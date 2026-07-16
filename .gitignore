@@ -1,0 +1,61 @@
+# === 敏感信息（绝对不能提交）===
+.env
+.env.*
+*.local
+config.local.*
+secrets/
+*.pem
+*.key
+
+# === 临时部署/测试脚本（含服务器密码）===
+deploy_*.py
+fix_*.py
+test_*.py
+diag*.py
+recover.py
+check_*.py
+get_*.py
+run_debug.py
+cleanup.py
+verify_final.py
+
+# === Go 后端 ===
+source/backend/bin/
+source/backend/tmp/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+
+# === Node 前端 ===
+source/frontend/node_modules/
+source/frontend/dist/
+source/frontend/.vite/
+source/frontend/npm-debug.log*
+source/frontend/yarn-debug.log*
+source/frontend/pnpm-debug.log*
+source/frontend/.DS_Store
+
+# === IDE / 编辑器 ===
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# === 操作系统 ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === Docker 构建产物 ===
+*.tar
+*.tar.gz
+
+# === 日志 ===
+*.log
+logs/
