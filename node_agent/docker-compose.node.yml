@@ -1,0 +1,52 @@
+# ============================================================
+# node-agent 独立部署编排(用于独立的代理节点服务器)
+#
+# 与面板服务器分离部署: 此文件部署在每台代理节点服务器上
+# 节点只运行 node-agent + Xray，通过 gRPC 连接面板拉取配置
+#
+# 支持一台服务器部署多个节点: 容器名/端口由环境变量区分
+#
+# 使用方法:
+#   1. 在面板后台「节点管理」新建节点，复制 NODE_TOKEN
+#   2. 将本文件 + .env.node 上传到节点服务器
+#   3. docker compose -f docker-compose.node.yml --env-file .env.node up -d
+# ============================================================
+
+services:
+  node-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nexus-node-agent:latest
+    container_name: ${CONTAINER_NAME:-nexus-node-agent}
+    restart: unless-stopped
+    environment:
+      # 面板 gRPC 地址(必填，面板服务器的公网IP:50051)
+      PANEL_GRPC_ADDR: ${PANEL_GRPC_ADDR}
+      # 节点通信令牌(必填，从面板节点管理获取)
+      NODE_TOKEN: ${NODE_TOKEN}
+      # Xray 监听端口(对外提供代理服务)
+      LISTEN_PORT: ${LISTEN_PORT:-443}
+      # 健康检查端口(仅容器内部使用，不映射到宿主机，支持同机器多开)
+      HEALTH_PORT: ${HEALTH_PORT:-50052}
+      # Xray-core 版本
+      XRAY_VERSION: ${XRAY_VERSION:-v26.6.1}
+    ports:
+      # 代理端口(对外提供 VLESS+REALITY 服务，每节点不同)
+      - "${LISTEN_PORT:-443}:${LISTEN_PORT:-443}"
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      # Xray 二进制和配置缓存(避免每次重启重新下载)，每节点独立目录
+      # 用绑定挂载(相对路径)，避免 docker compose 顶层 volumes 不支持变量插值的问题
+      - ./xray-cache:/app/xray
+    healthcheck:
+      # /healthz 返回 200 表示 REALITY 自连成功，503 表示失败
+      # 容器内部访问 50052，不需要映射到宿主机
+      test: ["CMD", "wget", "-qO-", "-S", "http://127.0.0.1:${HEALTH_PORT:-50052}/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+
