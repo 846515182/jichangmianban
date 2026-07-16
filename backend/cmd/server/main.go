@@ -153,7 +153,7 @@ func main() {
 		Addr:         cfg.HTTPListen,
 		Handler:      r,
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		WriteTimeout: 600 * time.Second,
 	}
 	go func() {
 		logger.Info("HTTP 服务启动", zap.String("listen", cfg.HTTPListen))
@@ -167,7 +167,7 @@ func main() {
 			Addr:         cfg.HTTPSListen,
 			Handler:      r,
 			ReadTimeout:  30 * time.Second,
-			WriteTimeout: 30 * time.Second,
+			WriteTimeout: 600 * time.Second,
 		}
 		go func() {
 			logger.Info("HTTPS 服务启动", zap.String("listen", cfg.HTTPSListen))

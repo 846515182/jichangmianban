@@ -657,9 +657,9 @@ type systemActionResult struct {
 	Error   string `json:"error,omitempty"`
 }
 
-// execCommandDir 在指定目录执行 shell 命令(超时 60 秒)
+// execCommandDir 在指定目录执行 shell 命令(超时 600 秒)
 func execCommandDir(dir, name string, args ...string) systemActionResult {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, name, args...)
