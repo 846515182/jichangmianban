@@ -667,28 +667,46 @@ const loadGitStatus = async () => {
   }
 }
 
+let pollTimer: any = null
+
 const gitPull = async () => {
-  ElMessageBox.confirm('将从 GitHub 拉取最新代码，编译后端、构建前端，然后重启面板。确定继续？', '一键在线更新', {
+  ElMessageBox.confirm('将从 GitHub 拉取最新代码，然后构建 Docker 镜像、重启服务。确定继续？', '一键在线更新', {
     type: 'warning', confirmButtonText: '确认更新', cancelButtonText: '取消',
   }).then(async () => {
     pulling.value = true
     pullResult.value = ''
+    pullSuccess.value = false
     try {
       const res: any = await request.post('/api/v1/admin/system/git-pull')
-      const d = res?.data || res
-      pullResult.value = d.output || d.steps?.join('\n') || ''
-      pullSuccess.value = d.success !== false
-      if (pullSuccess.value) {
-        ElMessage.success('在线更新完成，面板即将重启...')
-      } else {
-        ElMessage.error('更新过程中出现错误')
+      pullResult.value = (res?.data?.msg || '更新已开始') + '\n'
+      // 开始轮询日志
+      const poll = async () => {
+        try {
+          const logRes: any = await request.get('/api/v1/admin/system/git-pull-log')
+          const logData = logRes?.data || logRes
+          pullResult.value = logData.log || pullResult.value
+          if (logData.done) {
+            pulling.value = false
+            pullSuccess.value = logData.success !== false
+            if (pullSuccess.value) {
+              ElMessage.success('在线更新完成')
+            } else {
+              ElMessage.error('更新过程中出现错误')
+            }
+            loadGitStatus()
+            clearInterval(pollTimer)
+            return
+          }
+        } catch { /* 忽略轮询错误 */ }
       }
-      loadGitStatus()
+      poll()
+      pollTimer = setInterval(poll, 2000)
     } catch (e: any) {
       pullResult.value = e?.response?.data?.msg || e?.message || '更新失败'
       pullSuccess.value = false
+      pulling.value = false
       ElMessage.error(pullResult.value)
-    } finally { pulling.value = false }
+    }
   }).catch(() => {})
 }
 

@@ -8,17 +8,21 @@ import (
 	"strings"
 	"time"
 
+	"nexus-panel/internal/config"
 	"nexus-panel/internal/repo"
 )
 
 // EmailService 邮件服务
 type EmailService struct {
 	settingRepo *repo.SettingRepo
+	cfg         *config.Config
 }
 
-// NewEmailService 创建邮件服务
-func NewEmailService(sr *repo.SettingRepo) *EmailService {
-	return &EmailService{settingRepo: sr}
+// NewEmailService 创建邮件服务。
+// cfg 用于在数据库 notification 配置缺失/未启用时回退到环境变量 SMTP_* 配置，
+// 保证管理员在 UI 配好邮件前，注册/重置等邮件仍能通过环境变量发出。
+func NewEmailService(sr *repo.SettingRepo, cfg *config.Config) *EmailService {
+	return &EmailService{settingRepo: sr, cfg: cfg}
 }
 
 // EmailConfig 邮件配置
@@ -44,7 +48,7 @@ type notifyConfig struct {
 	TelegramChat    string `json:"telegram_chat"`
 }
 
-// GetConfig 获取邮件配置
+// GetConfig 获取邮件配置（仅读数据库 notification 设置，供管理后台展示/脱敏使用）
 func (s *EmailService) GetConfig() (*EmailConfig, error) {
 	var cfg notifyConfig
 	if err := s.settingRepo.Get("notification", &cfg); err != nil {
@@ -57,6 +61,36 @@ func (s *EmailService) GetConfig() (*EmailConfig, error) {
 		Enabled: cfg.EmailEnabled, Host: cfg.EmailHost, Port: cfg.EmailPort,
 		User: cfg.EmailUser, Password: cfg.EmailPassword, From: cfg.EmailFrom,
 	}, nil
+}
+
+// effectiveConfig 返回实际生效的邮件配置: 优先数据库 notification 设置,
+// 若数据库未启用或配置不完整, 回退到环境变量 SMTP_* (cfg)。
+// 这样管理后台配置与历史环境变量配置都能驱动真实邮件发送。
+func (s *EmailService) effectiveConfig() (*EmailConfig, error) {
+	dbCfg, _ := s.GetConfig()
+	return mergeConfig(dbCfg, s.cfg), nil
+}
+
+// mergeConfig 纯函数: 数据库配置优先, 缺失/未启用时回退环境变量配置 (便于单测)。
+func mergeConfig(dbCfg *EmailConfig, cfg *config.Config) *EmailConfig {
+	if dbCfg != nil && dbCfg.Enabled && dbCfg.Host != "" && dbCfg.User != "" && dbCfg.Password != "" {
+		return dbCfg
+	}
+	if cfg != nil && cfg.SMTPEnabled() {
+		port := cfg.SMTPPort
+		if port == 0 {
+			port = 587
+		}
+		return &EmailConfig{
+			Enabled:  true,
+			Host:     cfg.SMTPHost,
+			Port:     port,
+			User:     cfg.SMTPUser,
+			Password: cfg.SMTPPass,
+			From:     cfg.SMTPFrom,
+		}
+	}
+	return dbCfg
 }
 
 // SaveConfig 保存邮件配置
@@ -94,7 +128,7 @@ func (s *EmailService) SendMail(to []string, subject, body string) error {
 	if len(to) == 0 {
 		return fmt.Errorf("收件人列表为空")
 	}
-	cfg, err := s.GetConfig()
+	cfg, err := s.effectiveConfig()
 	if err != nil {
 		return fmt.Errorf("获取邮件配置失败: %w", err)
 	}
@@ -145,14 +179,30 @@ func (s *EmailService) TestConfig(cfg *EmailConfig) error {
 	return sendMailWithTLS(addr, auth, from, []string{from}, msg)
 }
 
-// sendMailWithTLS 使用 TLS 发送邮件（兼容 Mailtrap 等需要 TLS 的 SMTP 服务）
+// sendMailWithTLS 发送邮件:
+//   - 端口 465: 直接隐式 TLS (SMTPS) 连接
+//   - 其他端口: 先建明文连接, 服务器支持 STARTTLS 时升级 (兼容 Mailtrap 等现代 SMTP 服务)
 func sendMailWithTLS(addr string, auth smtp.Auth, from string, to []string, msg []byte) error {
-	host, _, _ := net.SplitHostPort(addr)
+	host, portStr, _ := net.SplitHostPort(addr)
+	implicitTLS := portStr == "465"
 
 	// 建立初始连接
-	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
-	if err != nil {
-		return fmt.Errorf("连接失败: %w", err)
+	var conn net.Conn
+	var err error
+	if implicitTLS {
+		tlsDialer := &tls.Dialer{
+			NetDialer: &net.Dialer{Timeout: 10 * time.Second},
+			Config:    &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12},
+		}
+		conn, err = tlsDialer.Dial("tcp", addr)
+		if err != nil {
+			return fmt.Errorf("TLS 连接失败: %w", err)
+		}
+	} else {
+		conn, err = net.DialTimeout("tcp", addr, 10*time.Second)
+		if err != nil {
+			return fmt.Errorf("连接失败: %w", err)
+		}
 	}
 	defer conn.Close()
 
@@ -163,14 +213,17 @@ func sendMailWithTLS(addr string, auth smtp.Auth, from string, to []string, msg 
 	}
 	defer client.Close()
 
-	// 尝试 STARTTLS
-	if ok, _ := client.Extension("STARTTLS"); ok {
-		config := &tls.Config{
-			ServerName:         host,
-			InsecureSkipVerify: false,
-		}
-		if err := client.StartTLS(config); err != nil {
-			return fmt.Errorf("STARTTLS 失败: %w", err)
+	// 非隐式 TLS 时尝试 STARTTLS 升级
+	if !implicitTLS {
+		if ok, _ := client.Extension("STARTTLS"); ok {
+			config := &tls.Config{
+				ServerName:         host,
+				InsecureSkipVerify: false,
+				MinVersion:         tls.VersionTLS12,
+			}
+			if err := client.StartTLS(config); err != nil {
+				return fmt.Errorf("STARTTLS 失败: %w", err)
+			}
 		}
 	}
 
