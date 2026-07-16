@@ -99,7 +99,7 @@ services:
     container_name: nexus-panel
     restart: "no"
     # [S6 fix 2026-07-14] 移除 user:0:0 改用默认非 root 运行
-    # user: "0:0"  # 以 root 运行，确保能访问 docker.sock 调用宿主机 docker(用于预编译 node-agent)
+    user: "0:0"  # 以 root 运行，确保能访问 docker.sock 调用宿主机 docker(用于预编译 node-agent)
     env_file:
       - .env
     environment:
@@ -116,9 +116,11 @@ services:
       # 用于一键部署时在面板服务器预编译，避免低内存节点现场编译 OOM
       # 注意: 挂载宿主机 /usr/bin/docker 在 alpine 容器内无法运行(glibc 不兼容)
       # 所以用静态编译的 docker CLI 放在 /root/nexus-panel/docker-cli/docker
+      - /root/nexus-panel:/root/nexus-panel:rw
       # [S6 fix 2026-07-14] 移除 docker.sock 挂载, 降低容器逃逸风险
       # - /var/run/docker.sock:/var/run/docker.sock
       - /root/nexus-panel/docker-cli:/usr/local/bin:ro
+      - /root/nexus-panel:/root/nexus-panel:rw
     depends_on:
       postgres:
         condition: service_healthy
