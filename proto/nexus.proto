@@ -1,0 +1,200 @@
+// ============================================================
+// Nexus-Panel gRPC 服务定义 (简化版: 无 well-known types 依赖)
+// 通信方向: node-agent(客户端) <-> panel(服务端)
+// ============================================================
+
+syntax = "proto3";
+
+package nexus;
+
+option go_package = "nexus-panel/proto;nexuspb";
+
+// ============================================================
+// 通用响应
+// ============================================================
+message Response {
+  int32 code = 1;
+  string message = 2;
+  string data = 3; // JSON 字符串
+}
+
+// 用户状态枚举
+enum UserStatus {
+  USER_STATUS_UNSPECIFIED = 0;
+  USER_ACTIVE = 1;
+  USER_DISABLED = 2;
+  USER_EXPIRED = 3;
+  USER_TRAFFIC_EXHAUSTED = 4;
+  USER_LOCKED = 5;
+}
+
+// 协议类型枚举
+enum Protocol {
+  PROTOCOL_UNSPECIFIED = 0;
+  PROTOCOL_VMESS = 1;
+  PROTOCOL_VLESS = 2;
+  PROTOCOL_TROJAN = 3;
+  PROTOCOL_SHADOWSOCKS = 4;
+}
+
+// ============================================================
+// 节点服务
+// ============================================================
+message NodeInfo {
+  string id = 1;
+  string name = 2;
+  string country_code = 3;
+  Protocol protocol = 4;
+  string server_address = 5;
+  int32 port = 6;
+  string server_config = 7; // JSON 字符串(含 REALITY 公钥等)
+  int64 traffic_limit = 8;
+  int64 traffic_used = 9;
+  bool is_enabled = 10;
+  string node_token = 11;
+  int32 grpc_port = 12;
+  bool online = 13;
+  string version = 14;
+  int64 last_seen_at = 15; // unix 时间戳
+}
+
+message RegisterRequest {
+  string node_token = 1;
+  string hostname = 2;
+  string version = 3;
+  int32 grpc_port = 4;
+  string server_address = 5;
+}
+
+message RegisterResponse {
+  Response resp = 1;
+  NodeInfo node = 2;
+}
+
+message HeartbeatRequest {
+  string node_token = 10;
+  string node_id = 1;
+  string version = 2;
+  double cpu_usage = 3;
+  double memory_usage = 4;
+  int64 memory_total = 5;
+  int32 online_connections = 6;
+  double uptime_seconds = 7;
+  int64 traffic_limit = 8;
+  int64 traffic_used = 9;
+}
+
+message HeartbeatResponse {
+  Response resp = 1;
+  bool config_changed = 2;
+  bool users_changed = 3;
+  int64 server_time = 4;
+}
+
+message GetConfigRequest {
+  string node_id = 1;
+  string node_token = 2;
+  string config_version = 3;
+}
+
+message NodeConfigResponse {
+  Response resp = 1;
+  string config_version = 2;
+  string xray_config = 3; // 完整 Xray 服务端配置 JSON
+  string meta = 4;        // 元信息 JSON
+}
+
+message ReportStatusRequest {
+  string node_token = 6;
+  string node_id = 1;
+  double cpu_usage = 2;
+  double memory_usage = 3;
+  int32 online_connections = 4;
+  double uptime_seconds = 5;
+}
+
+// ============================================================
+// 流量服务
+// ============================================================
+message TrafficRecord {
+  string user_id = 1;
+  string node_id = 2;
+  int64 upload_bytes = 3;
+  int64 download_bytes = 4;
+  int64 log_time = 5; // unix 时间戳
+}
+
+message ReportRealtimeRequest {
+  string node_token = 3;
+  string node_id = 1;
+  repeated TrafficRecord records = 2;
+}
+
+message ReportRealtimeResponse {
+  Response resp = 1;
+  int32 accepted = 2;
+}
+
+message UserTrafficSummary {
+  string user_id = 1;
+  int64 total_used = 2;
+  int64 traffic_limit = 3;
+  UserStatus status = 4;
+}
+
+message QueryUserTrafficRequest {
+  string node_id = 1;
+  string node_token = 2;
+  repeated string user_ids = 3;
+}
+
+message QueryUserTrafficResponse {
+  Response resp = 1;
+  repeated UserTrafficSummary users = 2;
+}
+
+// ============================================================
+// 用户同步服务
+// ============================================================
+message UserCredential {
+  string user_id = 1;
+  string username = 2;
+  string uuid = 3;             // VMess/VLESS UUID
+  string password = 4;         // Trojan/SS 密码
+  int64 traffic_limit = 5;
+  int64 traffic_used = 6;
+  UserStatus status = 7;
+  int64 expired_at = 8;        // unix 时间戳, 0=不限
+  int64 version = 9;
+}
+
+message SyncUsersRequest {
+  string node_id = 1;
+  string node_token = 2;
+  int64 since_version = 3; // 0=全量
+}
+
+message SyncUsersResponse {
+  Response resp = 1;
+  repeated UserCredential users = 2;
+  int64 latest_version = 3;
+}
+
+// ============================================================
+// 服务定义
+// ============================================================
+service NodeService {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc GetConfig(GetConfigRequest) returns (NodeConfigResponse);
+  rpc ReportStatus(ReportStatusRequest) returns (Response);
+}
+
+service TrafficService {
+  rpc ReportRealtime(ReportRealtimeRequest) returns (ReportRealtimeResponse);
+  rpc QueryUserTraffic(QueryUserTrafficRequest) returns (QueryUserTrafficResponse);
+}
+
+service UserSyncService {
+  rpc SyncUsers(SyncUsersRequest) returns (SyncUsersResponse);
+}

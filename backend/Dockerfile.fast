@@ -1,0 +1,13 @@
+FROM alpine:3.18
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apk/repositories &&     apk add --no-cache ca-certificates tzdata wget && update-ca-certificates
+ENV TZ=UTC LANG=C.UTF-8
+RUN addgroup -S nexus && adduser -S -G nexus nexus
+RUN mkdir -p /app/data /app/config /app/tls /app/node_agent && chown -R nexus:nexus /app
+WORKDIR /app
+COPY nexus-panel /app/nexus-panel
+COPY migrations /app/migrations
+RUN chmod +x /app/nexus-panel
+USER nexus
+EXPOSE 8080 50051
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD wget -qO- http://127.0.0.1:8080/healthz || exit 1
+ENTRYPOINT ["/app/nexus-panel"]
