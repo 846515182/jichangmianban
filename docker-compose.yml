@@ -120,8 +120,7 @@ services:
       # [S6 fix 2026-07-14] 移除 docker.sock 挂载, 降低容器逃逸风险
       - /var/run/docker.sock:/var/run/docker.sock
     entrypoint: >
-      sh -c "mkdir -p /root/.docker/cli-plugins &&
-             ln -sf /usr/libexec/docker/cli-plugins/docker-compose /root/.docker/cli-plugins/docker-compose &&
+      sh -c "apk add --no-cache git docker-cli docker-cli-compose >/dev/null 2>&1 &&
              exec /app/nexus-panel"
     depends_on:
       postgres:
