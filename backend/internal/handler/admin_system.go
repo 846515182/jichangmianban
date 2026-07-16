@@ -18,6 +18,7 @@ import (
 	"go.uber.org/zap"
 
 	"nexus-panel/internal/app"
+	"nexus-panel/internal/model"
 	"nexus-panel/internal/repo"
 	"nexus-panel/internal/response"
 	"nexus-panel/internal/service"
@@ -235,7 +236,7 @@ func (h *AdminSystemHandler) BackupToFile(c *gin.Context) {
 		"backup_at": time.Now(),
 		"users":     safeUsers,
 		"nodes":     safeNodes,
-		"settings":  settings,
+		"settings":  maskedSettings(settings),
 	}
 	b, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
@@ -255,6 +256,45 @@ func (h *AdminSystemHandler) BackupToFile(c *gin.Context) {
 	c.Header("Content-Type", "application/json; charset=utf-8")
 	c.Header("Content-Disposition", "attachment; filename=\""+filename+"\"")
 	c.Data(http.StatusOK, "application/json", b)
+}
+
+// maskedSettings 返回 settings 的副本, 其中敏感配置项(密钥/密码)被脱敏,
+// 避免备份文件(可被超级管理员下载)泄露 epay_key / hmac_sub_secret / 邮箱密码等机密。
+func maskedSettings(settings []model.Setting) []model.Setting {
+	// 整体脱敏的 key: 值直接替换为掩码
+	fullMask := map[string]bool{
+		"hmac_sub_secret": true,
+		"epay_key":        true,
+	}
+	out := make([]model.Setting, len(settings))
+	for i, s := range settings {
+		out[i] = s
+		if fullMask[s.Key] {
+			out[i].Value = []byte(`"****"`)
+			continue
+		}
+		// notification 是 JSON 对象, 仅脱敏 email_password 字段
+		if s.Key == "notification" {
+			out[i].Value = maskNotificationValue(s.Value)
+		}
+	}
+	return out
+}
+
+// maskNotificationValue 脱敏 notification 配置中的 email_password 字段
+func maskNotificationValue(raw []byte) []byte {
+	var m map[string]interface{}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return []byte(`{}`)
+	}
+	if _, ok := m["email_password"]; ok {
+		m["email_password"] = "****"
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return []byte(`{}`)
+	}
+	return b
 }
 
 // SubConfig [27] PUT /api/v1/admin/system/sub-config
@@ -709,94 +749,75 @@ func execCommand(name string, args ...string) systemActionResult {
 }
 
 // GitPull POST /api/v1/admin/system/git-pull
-// 一键在线更新: 拉取 GitHub 代码 → 编译后端 → 构建前端 → 重启服务
+// 一键在线更新: 拉取 GitHub 代码 → 构建镜像 → 重启服务 (Docker Compose 模式)
 func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 	var steps []string
 	allOK := true
 
 	gitRoot := getGitRoot()
 	branch := getCurrentBranch()
-	backendDir := filepath.Join(gitRoot, "source", "backend")
-	frontendDir := filepath.Join(gitRoot, "source", "frontend")
 
-	// 1. 拉取代码
-	steps = append(steps, fmt.Sprintf(">>> 1/6 拉取 GitHub 代码 (branch=%s, root=%s)", branch, gitRoot))
-	fetchResult := execCommand("git", "fetch", "origin")
-	if !fetchResult.Success {
-		steps = append(steps, "失败: git fetch - "+fetchResult.Error)
-		response.OK(c, gin.H{"success": false, "steps": steps, "output": strings.Join(steps, "\n")})
-		return
-	}
-	steps = append(steps, fetchResult.Output)
-
-	resetResult := execCommand("git", "reset", "--hard", "origin/"+branch)
-	if !resetResult.Success {
-		steps = append(steps, "失败: git reset - "+resetResult.Error)
-		response.OK(c, gin.H{"success": false, "steps": steps, "output": strings.Join(steps, "\n")})
-		return
-	}
-	steps = append(steps, resetResult.Output)
-
-	// 2. 编译后端
-	steps = append(steps, ">>> 2/6 编译后端 (go build)")
-	if _, err := os.Stat(backendDir); os.IsNotExist(err) {
-		steps = append(steps, fmt.Sprintf("警告: 后端目录不存在 %s, 跳过编译", backendDir))
+	// 1. 预检工作树
+	steps = append(steps, fmt.Sprintf(">>> 1/6 预检工作树检查本地是否有未提交的修改..."))
+	statusResult := execCommand("git", "status", "--short")
+	if statusResult.Output != "" {
+		steps = append(steps, "工作树有未提交的修改:\n"+statusResult.Output)
+		allOK = false
 	} else {
-		buildResult := execCommandDir(backendDir, "go", "build", "-o", "nexus-panel", "./cmd/server")
-		if !buildResult.Success {
-			steps = append(steps, "失败: go build - "+buildResult.Error)
-			allOK = false
-		} else {
-			steps = append(steps, "后端编译成功: "+buildResult.Output)
-
-			// 3. 复制二进制到 systemd 服务路径
-			steps = append(steps, ">>> 3/6 安装二进制文件")
-			possiblePaths := []string{
-				"/usr/local/bin/nexus-panel",
-				"/app/nexus-panel",
-				filepath.Join(gitRoot, "nexus-panel"),
-			}
-			src := filepath.Join(backendDir, "nexus-panel")
-			copied := false
-			for _, dst := range possiblePaths {
-				if _, err := os.Stat(dst); err == nil {
-					copyResult := execCommandDir(backendDir, "cp", "-f", "nexus-panel", dst)
-					steps = append(steps, fmt.Sprintf("复制到 %s: %s", dst, copyResult.Output))
-					copied = true
-					break
-				}
-			}
-			if !copied {
-				steps = append(steps, fmt.Sprintf("未找到已安装的二进制目标路径，二进制输出在: %s", src))
-			}
-		}
+		steps = append(steps, "工作树干净，可以继续更新")
 	}
 
-	// 4. 构建前端
-	steps = append(steps, ">>> 4/6 构建前端 (npm build)")
-	if _, err := os.Stat(frontendDir); os.IsNotExist(err) {
-		steps = append(steps, fmt.Sprintf("警告: 前端目录不存在 %s, 跳过构建", frontendDir))
-	} else {
-		npmResult := execCommandDir(frontendDir, "npm", "run", "build")
-		if !npmResult.Success {
-			steps = append(steps, "失败: npm build - "+npmResult.Error)
-			allOK = false
-		} else {
-			steps = append(steps, "前端构建成功: "+npmResult.Output)
-		}
-	}
-
-	// 5. 重启后端服务
-	steps = append(steps, ">>> 5/6 重启后端服务")
 	if allOK {
-		// 延迟 1 秒后重启，确保当前响应已发送
-		go func() {
-			time.Sleep(1 * time.Second)
-			execCommand("systemctl", "restart", "nexus-panel")
-		}()
-		steps = append(steps, "服务重启指令已下发，面板将在 1-2 秒后恢复")
+		// 2. 拉取代码
+		steps = append(steps, fmt.Sprintf(">>> 2/6 拉取 GitHub git fetch origin (branch=%s, root=%s)", branch, gitRoot))
+		fetchResult := execCommand("git", "fetch", "origin")
+		steps = append(steps, fetchResult.Output)
+		if !fetchResult.Success {
+			steps = append(steps, "失败: "+fetchResult.Error)
+			allOK = false
+		}
+	}
+
+	if allOK {
+		// 3. 同步本地代码
+		steps = append(steps, fmt.Sprintf(">>> 3/6 同步本地代码 git reset --hard origin/%s", branch))
+		resetResult := execCommand("git", "reset", "--hard", "origin/"+branch)
+		steps = append(steps, resetResult.Output)
+		if !resetResult.Success {
+			steps = append(steps, "失败: "+resetResult.Error)
+			allOK = false
+		}
+	}
+
+	if allOK {
+		// 4. 构建 Docker 镜像
+		steps = append(steps, ">>> 4/6 构建镜像 docker compose build panel frontend (首次约3-5分钟，后续有服务器缓存)")
+		buildResult := execCommandDir(gitRoot, "docker", "compose", "build", "panel", "frontend")
+		if !buildResult.Success {
+			steps = append(steps, "Docker 镜像构建失败，服务未重启（回滚到更新前镜像）: "+buildResult.Error)
+			allOK = false
+		} else {
+			steps = append(steps, "镜像构建成功: "+buildResult.Output)
+		}
+	}
+
+	if allOK {
+		// 5. 重启服务
+		steps = append(steps, ">>> 5/6 重启服务 docker compose up -d")
+		upResult := execCommandDir(gitRoot, "docker", "compose", "up", "-d", "--remove-orphans")
+		if !upResult.Success {
+			steps = append(steps, "重启失败: "+upResult.Error)
+			allOK = false
+		} else {
+			steps = append(steps, "服务已重启")
+		}
+	}
+
+	// 6. 返回结果
+	if allOK {
+		steps = append(steps, ">>> 6/6 在线更新完成!")
 	} else {
-		steps = append(steps, "构建失败，跳过重启")
+		steps = append(steps, ">>> 6/6 更新失败，请检查日志")
 	}
 
 	response.OK(c, gin.H{
