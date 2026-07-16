@@ -43,6 +43,11 @@ type Config struct {
 
 	SubSigTTL time.Duration
 
+	// [P0-3 2026-07-17] 订阅签名是否绑定客户端 IP
+	// true:  签名包含客户端 IP, IP 变化则签名失效(更安全, 但用户换网络需重新获取)
+	// false: 仅按时间校验(更友好, 但链接泄漏 60s 内可能被滥用)
+	SubSigBindIP bool
+
 	IPBanTTL time.Duration
 
 	GRPCTLSCert string
@@ -93,7 +98,8 @@ func Load() (*Config, error) {
 		RateSub:         getEnvInt("RATE_SUB", 10),
 		LoginMaxFail:    getEnvInt("LOGIN_MAX_FAIL", 10),
 		LoginLockWindow: getEnvDuration("LOGIN_LOCK_WINDOW", 15*time.Minute),
-		SubSigTTL:       getEnvDuration("SUB_SIG_TTL", 5*time.Minute),
+		SubSigTTL:       getEnvDuration("SUB_SIG_TTL", 60*time.Second), // [P0-3 2026-07-17] 默认 60s 缩短攻击窗口
+		SubSigBindIP:    getEnvBool("SUB_SIG_BIND_IP", false),            // 默认不绑定, 兼容性优先; 高安全场景可开
 		IPBanTTL:        getEnvDuration("IP_BAN_TTL", time.Hour),
 		GRPCTLSCert:       getEnv("GRPC_TLS_CERT", ""),
 		GRPCTLSKey:        getEnv("GRPC_TLS_KEY", ""),

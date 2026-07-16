@@ -272,37 +272,50 @@ func (s *PaymentService) VerifyCallback(params map[string]string) (bool, error) 
 // 现实现: 先 PaySuccess, 成功后再 SetNX 标记。PaySuccess 内部用 FOR UPDATE 做幂等,
 //         重复回调会命中 status==paid 直接返回 nil, 不会重复开通套餐。
 func (s *PaymentService) HandleNotify(params map[string]string) (string, error) {
+	// [P0-4 2026-07-17] 把所有错误路径用结构化日志记录, 便于运维排障
+	// 之前: 所有错误均吞成 "fail" 给支付平台, 数据库侧零日志, 排查支付问题需手动 grep
 	ok, err := s.VerifyCallback(params)
 	if err != nil {
+		app.Get().Logger.Warn("payment_notify verify error", zap.Error(err), zap.String("out_trade_no", params["out_trade_no"]), zap.String("trade_no", params["trade_no"]))
 		return "fail", err
 	}
 	if !ok {
+		app.Get().Logger.Warn("payment_notify sign mismatch", zap.String("out_trade_no", params["out_trade_no"]), zap.String("received_sign", params["sign"]))
 		return "fail", errors.New("签名校验失败")
 	}
 	tradeStatus := params["trade_status"]
 	if tradeStatus != "TRADE_SUCCESS" {
+		app.Get().Logger.Info("payment_notify non-success status", zap.String("trade_status", tradeStatus), zap.String("out_trade_no", params["out_trade_no"]))
 		return "fail", errors.New("trade_status 非 TRADE_SUCCESS")
 	}
 	orderNo := params["out_trade_no"]
 	tradeNo := params["trade_no"]
 	moneyStr := params["money"]
 	if orderNo == "" {
+		app.Get().Logger.Warn("payment_notify missing out_trade_no", zap.String("trade_no", tradeNo))
 		return "fail", errors.New("缺少 out_trade_no")
 	}
 	// 金额校验
 	order, err := s.orderSvc.GetByOrderNo(orderNo)
 	if err != nil {
+		app.Get().Logger.Warn("payment_notify order not found", zap.String("out_trade_no", orderNo), zap.Error(err))
 		return "fail", errors.New("订单不存在")
 	}
 	moneyCents, err := parseMoneyToCents(moneyStr)
 	if err != nil {
+		app.Get().Logger.Warn("payment_notify money parse error", zap.String("out_trade_no", orderNo), zap.String("money", moneyStr), zap.Error(err))
 		return "fail", fmt.Errorf("金额格式错误: %w", err)
 	}
 	if moneyCents != order.AmountCents {
+		app.Get().Logger.Warn("payment_notify amount mismatch",
+			zap.String("out_trade_no", orderNo),
+			zap.Int64("callback_cents", moneyCents),
+			zap.Int64("order_cents", order.AmountCents))
 		return "fail", fmt.Errorf("金额不匹配: 回调=%d分 订单=%d分", moneyCents, order.AmountCents)
 	}
 	// 先执行业务逻辑(PaySuccess 内部用 SELECT FOR UPDATE 保证幂等)
 	if err := s.orderSvc.PaySuccess(orderNo, tradeNo); err != nil {
+		app.Get().Logger.Error("payment_notify PaySuccess failed", zap.String("out_trade_no", orderNo), zap.String("trade_no", tradeNo), zap.Error(err))
 		return "fail", err
 	}
 	// 业务成功后再标记 trade_no 已处理, 阻断后续重复回调

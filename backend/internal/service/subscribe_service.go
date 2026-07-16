@@ -38,17 +38,22 @@ func NewSubscribeService(s *repo.SubscriptionRepo, n *repo.NodeRepo, u *repo.Use
 }
 
 // GenerateSignedURL 为用户生成带签名的订阅链接(有效期由配置决定)
-// clientIP 用于绑定签名，防止订阅链接被他人转用
+// clientIP 用于绑定签名(可选, 由配置 SubSigBindIP 决定)
 func (s *SubscribeService) GenerateSignedURL(userID, baseURL, clientIP string) (string, error) {
 	sub, err := s.subRepo.GetByUserID(userID)
 	if err != nil {
 		return "", err
 	}
 	hmacMgr := security.NewHMACManager(app.Get().Cfg.HMACSubSecret)
-	// 取消 IP 绑定：用户可能在不同设备/网络导入订阅，IP 绑定会导致验证失败
-	// 仅保留时间有效期（默认 5 分钟）即可保证安全性
-	sig, exp := hmacMgr.SignWithTTL(sub.SubToken, userID, app.Get().Cfg.SubSigTTL)
-	sigStr := hmacMgr.BuildSigStr(exp, sig)
+	// [P0-3 2026-07-17] 根据配置决定是否 IP 绑定; 默认 60s TTL 已大幅缩短攻击窗口
+	var sigStr string
+	if app.Get().Cfg.SubSigBindIP {
+		sig, exp := hmacMgr.SignWithTTLAndIP(sub.SubToken, userID, clientIP, app.Get().Cfg.SubSigTTL)
+		sigStr = hmacMgr.BuildSigStr(exp, sig)
+	} else {
+		sig, exp := hmacMgr.SignWithTTL(sub.SubToken, userID, app.Get().Cfg.SubSigTTL)
+		sigStr = hmacMgr.BuildSigStr(exp, sig)
+	}
 
 	u, err := url.Parse(strings.TrimRight(baseURL, "/") + "/api/v1/subscribe")
 	if err != nil {
@@ -74,14 +79,21 @@ type FetchResult struct {
 // subType 为空时按 User-Agent 识别客户端
 // sig 格式: exp.signature
 func (s *SubscribeService) Fetch(userID, subType, sig, userAgent, clientIP string) (*FetchResult, error) {
-	// 1. 校验签名（仅校验时间有效期，不绑定 IP）
+	// 1. 校验签名(根据 SubSigBindIP 决定是否 IP 绑定)
 	sub, err := s.subRepo.GetByUserID(userID)
 	if err != nil {
 		return nil, err
 	}
 	hmacMgr := security.NewHMACManager(app.Get().Cfg.HMACSubSecret)
-	if err := hmacMgr.VerifySigStr(sub.SubToken, userID, sig); err != nil {
-		return nil, ErrSubSigExpired
+	// [P0-3 2026-07-17] 与 GenerateSignedURL 保持一致的校验策略
+	if app.Get().Cfg.SubSigBindIP {
+		if err := hmacMgr.VerifySigStrWithIP(sub.SubToken, userID, sig, clientIP); err != nil {
+			return nil, ErrSubSigExpired
+		}
+	} else {
+		if err := hmacMgr.VerifySigStr(sub.SubToken, userID, sig); err != nil {
+			return nil, ErrSubSigExpired
+		}
 	}
 
 	// 2. 校验用户状态: 账号禁用 / 已到期 / 流量耗尽时返回空订阅(避免客户端报错)
@@ -115,17 +127,31 @@ func (s *SubscribeService) Fetch(userID, subType, sig, userAgent, clientIP strin
 
 	// 5. 按类型生成
 	res := &FetchResult{}
+	// [P1-7 2026-07-17] 被阻断时仍返回合法格式但内容提示用户, 避免 Clash/Sing-box 客户端启动失败
+	// 之前: 返回 0 节点配置, 部分 Clash 变种会因为 proxy-groups 引用未定义代理名而启动报错
 	switch subType {
 	case SubTypeClash:
-		res.Content = s.generateClashYAML(nodes, userID)
+		if blocked {
+			res.Content = s.generateBlockedClashYAML(reason)
+		} else {
+			res.Content = s.generateClashYAML(nodes, userID)
+		}
 		res.ContentType = "application/x-yaml; charset=utf-8"
 		res.Filename = "clash.yaml"
 	case SubTypeSingBox:
-		res.Content = s.generateSingBoxJSON(nodes, userID)
+		if blocked {
+			res.Content = s.generateBlockedSingBoxJSON(reason)
+		} else {
+			res.Content = s.generateSingBoxJSON(nodes, userID)
+		}
 		res.ContentType = "application/json; charset=utf-8"
 		res.Filename = "sing-box.json"
 	case SubTypeSIP008:
-		res.Content = s.generateSIP008(nodes)
+		if blocked {
+			res.Content = s.generateBlockedSIP008(reason)
+		} else {
+			res.Content = s.generateSIP008(nodes)
+		}
 		res.ContentType = "application/json; charset=utf-8"
 		res.Filename = "sip008.json"
 	case SubTypeV2Ray:
@@ -133,7 +159,13 @@ func (s *SubscribeService) Fetch(userID, subType, sig, userAgent, clientIP strin
 	default:
 		res.ContentType = "text/plain; charset=utf-8"
 		res.Filename = "v2ray.txt"
-		res.Content = base64.StdEncoding.EncodeToString([]byte(s.generateV2RayURIs(nodes, userID)))
+		if blocked {
+			// V2Ray 协议是 base64 编码的 URI 列表, 无法插入注释;
+			// 客户端拉取后是 0 节点, 配合响应头 X-Subscription-Status 区分
+			res.Content = base64.StdEncoding.EncodeToString([]byte("# 订阅已暂停: " + reason + "\n"))
+		} else {
+			res.Content = base64.StdEncoding.EncodeToString([]byte(s.generateV2RayURIs(nodes, userID)))
+		}
 	}
 	// 阻断时在响应头标记原因(订阅生成器透传)
 	res.Blocked = blocked
@@ -496,6 +528,54 @@ func orDefault(s, def string) string {
 		return def
 	}
 	return s
+}
+
+// [P1-7 2026-07-17] 订阅被阻断时的占位配置, 仍保持格式合法避免客户端启动失败
+// 返回最小可用配置 + 顶部说明性注释, 用户看到 0 节点时也能明白原因
+func (s *SubscribeService) generateBlockedClashYAML(reason string) string {
+	doc := map[string]interface{}{
+		// proxies 留空, proxy-groups 仅引用 DIRECT (Clash 内置, 不需要在 proxies 列表中定义)
+		"proxies": []map[string]interface{}{},
+		"proxy-groups": []map[string]interface{}{
+			{
+				"name":    "Nexus",
+				"type":    "select",
+				"proxies": []string{"DIRECT"},
+			},
+		},
+		"rules": []string{
+			"MATCH,DIRECT",
+		},
+	}
+	b, _ := yaml.Marshal(doc)
+	// 在 YAML 顶部插入注释说明阻断原因 (yaml 序列化后用字符串拼接)
+	comment := "# 订阅已暂停: " + reason + "\n# 请在面板续费或联系管理员\n"
+	return comment + string(b)
+}
+
+func (s *SubscribeService) generateBlockedSingBoxJSON(reason string) string {
+	doc := map[string]interface{}{
+		"_notice": "订阅已暂停: " + reason + " - 请在面板续费或联系管理员",
+		"outbounds": []map[string]interface{}{
+			{
+				"type": "direct",
+				"tag":  "direct",
+			},
+		},
+	}
+	b, _ := json.MarshalIndent(doc, "", "  ")
+	return string(b)
+}
+
+func (s *SubscribeService) generateBlockedSIP008(reason string) string {
+	doc := map[string]interface{}{
+		"version":    "2",
+		"servers":    []interface{}{},
+		"bytes_used": 0,
+		"_notice":    "订阅已暂停: " + reason,
+	}
+	b, _ := json.MarshalIndent(doc, "", "  ")
+	return string(b)
 }
 
 // EnsureSubscription 为用户确保存在订阅记录(不存在则创建)

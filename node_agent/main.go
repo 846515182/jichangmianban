@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,6 +15,9 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"nexus-agent/proto"
 )
@@ -150,6 +154,11 @@ func loadConfig() (*Config, error) {
 	}
 	if cfg.PanelGrpcAddr == "" {
 		return nil, fmt.Errorf("环境变量 PANEL_GRPC_ADDR 必填")
+	}
+	// [P1-3 2026-07-17] 校验 host:port 格式, 避免 grpc.Dial 时报"passthrough: received empty
+	// address"等不友好错误。若用户填了 DNS 域名也会被接受(net.SplitHostPort 支持域名)
+	if _, _, err := net.SplitHostPort(cfg.PanelGrpcAddr); err != nil {
+		return nil, fmt.Errorf("PANEL_GRPC_ADDR 格式错误, 应为 host:port 如 panel.example.com:50051: %w", err)
 	}
 	if cfg.NodeToken == "" {
 		return nil, fmt.Errorf("环境变量 NODE_TOKEN 必填")
@@ -374,17 +383,23 @@ func (a *Agent) handleFatalShutdown(reason string) {
 
 // isFatalHeartbeatError 判断 gRPC 错误是否为致命错误(节点被删/token失效/被禁用)
 // 这类错误不可恢复，继续运行 Xray 会导致"已删节点仍代理流量"的安全漏洞
+// [P1-1 2026-07-17] 改用 gRPC status.Code() 判定, 不再依赖错误消息字符串
+// 后端 grpc 服务已统一返回 codes.NotFound / codes.Unauthenticated / codes.PermissionDenied
 func isFatalHeartbeatError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "节点不存在") ||
-		strings.Contains(msg, "NotFound") ||
-		strings.Contains(msg, "节点 token 无效") ||
-		strings.Contains(msg, "Unauthenticated") ||
-		strings.Contains(msg, "PermissionDenied") ||
-		strings.Contains(msg, "节点已禁用")
+	st, ok := status.FromError(err)
+	if !ok {
+		// 非 gRPC 状态错误(网络层/超时等), 视为可重试, 不停服
+		return false
+	}
+	switch st.Code() {
+	case codes.NotFound, codes.Unauthenticated, codes.PermissionDenied:
+		return true
+	default:
+		return false
+	}
 }
 
 // isFatalHeartbeatMsg 判断心跳被拒消息是否为致命错误

@@ -2,6 +2,7 @@ package service
 
 import (
 	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -490,15 +491,14 @@ func calcCouponDiscount(c *model.Coupon, amount int64) (int64, error) {
 	}
 }
 
-// generateOrderNo 生成订单号: NP + yyyyMMddHHmmss + 6位随机数字
+// generateOrderNo 生成唯一订单号
+// [P1-9 2026-07-17] 改用 8 字节十六进制后缀, 有效信息熵从 ~20 bits 提升到 64 bits
+// 原实现: 6 字节取 %10 拼 6 位十进制, 实际只用每字节 log2(10)≈3.3 bits
+// 新实现: 8 字节 hex = 16 chars, 等价 64 bits, 碰撞概率从 10^-6 降到 10^-19
 func generateOrderNo() (string, error) {
-	b := make([]byte, 6)
+	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-	suffix := ""
-	for _, x := range b {
-		suffix += string(rune('0' + int(x%10)))
-	}
-	return "NP" + time.Now().Format("20060102150405") + suffix, nil
+	return "NP" + time.Now().Format("20060102150405") + hex.EncodeToString(b), nil
 }

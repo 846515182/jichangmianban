@@ -132,7 +132,9 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 
 	api.GET("/captcha", GetCaptcha)
 
-	pay := api.Group("/payment")
+	// 支付 notify 同样加限流, 防止外部刷回调拖垮 DB
+	// 注: EPay 平台 IP 通常固定, RateScopeSub 默认 5r/s 已可覆盖正常回调频率
+	pay := api.Group("/payment", middleware.RateLimit(middleware.RateScopeSub))
 	{
 		pay.GET("/notify", paymentH.Notify)
 		pay.POST("/notify", paymentH.Notify)

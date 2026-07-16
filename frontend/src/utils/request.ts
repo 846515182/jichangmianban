@@ -15,7 +15,9 @@ service.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
     const auth = useAuthStore()
     if (auth.token && config.headers) {
-      config.headers.Authorization = `Bearer ${auth.token}`
+      // [P1-6 2026-07-17] 使用 .set() API, 兼容 axios v1.x 中 headers 可能为 AxiosHeaders 实例
+      // 直接赋值可能在严格类型下触发 TS 错误, 也可能在某些 axios 版本中静默失败
+      config.headers.set('Authorization', `Bearer ${auth.token}`)
     }
     return config
   },
@@ -57,7 +59,10 @@ service.interceptors.response.use(
           isRefreshing = false
           requestsQueue.forEach((cb) => cb(newToken))
           requestsQueue = []
-          config.headers.Authorization = `Bearer ${newToken}`
+          // [P1-6 2026-07-17] 同上, 使用 .set() 替代直接赋值
+          if (config.headers) {
+            config.headers.set('Authorization', `Bearer ${newToken}`)
+          }
           return service(config)
         } catch (refreshErr) {
           isRefreshing = false
@@ -70,7 +75,10 @@ service.interceptors.response.use(
       } else {
         return new Promise((resolve) => {
           requestsQueue.push((token: string) => {
-            config.headers.Authorization = `Bearer ${token}`
+            // [P1-6 2026-07-17] 同上
+            if (config.headers) {
+              config.headers.set('Authorization', `Bearer ${token}`)
+            }
             resolve(service(config))
           })
         })

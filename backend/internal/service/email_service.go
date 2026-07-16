@@ -149,7 +149,8 @@ func (s *EmailService) SendMail(to []string, subject, body string) error {
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	auth := smtp.PlainAuth("", cfg.User, cfg.Password, cfg.Host)
-	return sendMailWithTLS(addr, auth, from, to, msg)
+	// [P1-8 2026-07-17] SMTP 瞬时故障重试, 避免注册/重置邮件因抖动永远丢失
+	return sendMailWithRetry(addr, auth, from, to, msg)
 }
 
 // TestConfig 测试邮件配置
@@ -176,7 +177,28 @@ func (s *EmailService) TestConfig(cfg *EmailConfig) error {
 	auth := smtp.PlainAuth("", cfg.User, cfg.Password, cfg.Host)
 
 	// 收件人 = from (发件人自己), 确保 cfg.From 是一个能收信的真实邮箱
-	return sendMailWithTLS(addr, auth, from, []string{from}, msg)
+	// [P1-8 2026-07-17] 测试邮件同样支持重试
+	return sendMailWithRetry(addr, auth, from, []string{from}, msg)
+}
+
+// sendMailWithRetry 在 SMTP 发送失败时进行指数退避重试, 最多 3 次
+// 解决 SMTP 服务瞬时不可用(网络抖动 / 4xx 临时错误 / DNS 解析抖动)时邮件永久丢失的问题
+func sendMailWithRetry(addr string, auth smtp.Auth, from string, to []string, msg []byte) error {
+	const maxAttempts = 3
+	backoff := 1 * time.Second
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		err := sendMailWithTLS(addr, auth, from, to, msg)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if attempt < maxAttempts {
+			time.Sleep(backoff)
+			backoff *= 2
+		}
+	}
+	return fmt.Errorf("SMTP 发送失败 (已重试 %d 次): %w", maxAttempts, lastErr)
 }
 
 // sendMailWithTLS 发送邮件:

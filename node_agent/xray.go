@@ -58,7 +58,10 @@ func (m *XrayManager) EnsureBinary() error {
 
 // downloadXray 从 GitHub releases 下载并解压 Xray-core 二进制
 func (m *XrayManager) downloadXray() error {
-	arch := xrayArch()
+	arch, err := xrayArch()
+	if err != nil {
+		return err
+	}
 	url := fmt.Sprintf("https://github.com/XTLS/Xray-core/releases/download/%s/Xray-linux-%s.zip", m.version, arch)
 	log.Printf("下载 Xray-core %s: %s", m.version, url)
 
@@ -104,16 +107,19 @@ func (m *XrayManager) downloadXray() error {
 }
 
 // xrayArch 根据 runtime.GOARCH 返回 Xray 发布包的架构标识
-func xrayArch() string {
+// [P1-2 2026-07-17] 不支持的架构返回错误而非默认 amd64, 防止下载到不兼容二进制后段错误
+func xrayArch() (string, error) {
 	switch runtime.GOARCH {
 	case "amd64":
-		return "64"
+		return "64", nil
 	case "arm64":
-		return "arm64-v8a"
+		return "arm64-v8a", nil
 	case "arm":
-		return "arm32-v7a"
+		return "arm32-v7a", nil
+	case "386":
+		return "32", nil
 	default:
-		return "64"
+		return "", fmt.Errorf("不支持的 CPU 架构: %s (当前 Xray-core 仅支持 amd64/arm64/arm/386)", runtime.GOARCH)
 	}
 }
 

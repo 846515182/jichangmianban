@@ -333,10 +333,10 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	defer client.Close()
 	sse.event(PhaseConnectServer, "done", "SSH 连接成功", "")
 
-	// 清理同节点旧容器 (容错: 容器可能本来就不存在)
-	if _, err := sshRun(client, fmt.Sprintf(
-		"docker stop %s 2>/dev/null; docker rm -f %s 2>/dev/null; echo OK", containerName, containerName)); err != nil {
-		app.Get().Logger.Warn("清理旧容器失败 (通常无害)", zap.String("container", containerName), zap.Error(err))
+	// 清理同节点旧容器 (容错: 容器可能本来就不存在, docker rm -f 对不存在的容器返回非 0)
+	// [P0-2 2026-07-17] 用 sshRunArgs 替代字符串拼接, 防止 containerName 含 shell 元字符导致注入
+	if _, err := sshRunArgs(client, "docker", "rm", "-f", containerName); err != nil {
+		app.Get().Logger.Debug("清理旧容器 (通常无害, 容器可能本来就不存在)", zap.String("container", containerName), zap.Error(err))
 	}
 
 	// ============================================================
@@ -365,7 +365,8 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	sse.event(PhasePrepare, "running", "正在准备部署环境...", "")
 
 	// 3.1 创建远程目录
-	if out, err := sshRun(client, "mkdir -p "+deployDir); err != nil {
+	// [P0-2 2026-07-17] 用 sshRunArgs 替代字符串拼接
+	if out, err := sshRunArgs(client, "mkdir", "-p", deployDir); err != nil {
 		sse.eventWithCode(PhasePrepare, "error", "创建目录失败: "+err.Error(), out, DeployErrUnknown)
 		return false, DeployErrUnknown, "创建目录失败: " + err.Error()
 	}
@@ -432,7 +433,8 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 		sse.eventWithCode(PhaseBuild, "error", "传输失败: "+transferErr.Error(), transferOut, DeployErrTransfer)
 		return false, DeployErrTransfer, "传输失败: " + transferErr.Error()
 	}
-	if _, err := sshRun(client, "chmod +x "+deployDir+"/agent"); err != nil {
+	// [P0-2 2026-07-17] 用 sshRunArgs 替代字符串拼接
+	if _, err := sshRunArgs(client, "chmod", "+x", deployDir+"/agent"); err != nil {
 		return false, DeployErrTransfer, "chmod agent 失败: " + err.Error()
 	}
 
@@ -487,7 +489,8 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	var success bool
 	for i := 0; i < 12; i++ {
 		time.Sleep(3 * time.Second)
-		verifyOut, _ = sshRun(client, fmt.Sprintf("docker logs --tail 50 %s 2>&1", containerName))
+		// [P0-2 2026-07-17] 用 sshRunArgs 替代字符串拼接; 原 "2>&1" 冗余, sshRun 内部已合并 stdout/stderr
+		verifyOut, _ = sshRunArgs(client, "docker", "logs", "--tail", "50", containerName)
 		if strings.Contains(verifyOut, "注册成功") || strings.Contains(verifyOut, "已注册到面板") || strings.Contains(verifyOut, "Xray 已启动") || strings.Contains(verifyOut, "Xray 进程已启动") {
 			success = true
 			break
@@ -759,7 +762,8 @@ func diagnoseContainerStartup(client *ssh.Client, containerName string, listenPo
 
 	var lines []string
 
-	rawStatus, _ := sshRun(client, fmt.Sprintf("docker ps -a --filter name=%s --format '{{.ID}} {{.Status}}' 2>/dev/null; docker ps -a --format '{{.Names}} {{.Status}}' 2>/dev/null | head -20", containerName))
+	// [P0-2 2026-07-17] docker ps --format 模板串需要 shell, 容器名经 shellescape 后拼接
+	rawStatus, _ := sshRun(client, fmt.Sprintf("docker ps -a --filter name=%s --format '{{.ID}} {{.Status}}' 2>/dev/null; docker ps -a --format '{{.Names}} {{.Status}}' 2>/dev/null | head -20", shellescape(containerName)))
 	lines = append(lines, "=== 容器状态 ===")
 	lines = append(lines, rawStatus)
 
@@ -781,7 +785,8 @@ func diagnoseContainerStartup(client *ssh.Client, containerName string, listenPo
 	}
 
 	if strings.Contains(containerStatus, "Exited") || strings.Contains(containerStatus, "Restarting") {
-		crashLogs, _ := sshRun(client, fmt.Sprintf("docker logs --tail 80 %s 2>&1", containerName))
+		// [P0-2 2026-07-17] 用 sshRunArgs
+		crashLogs, _ := sshRunArgs(client, "docker", "logs", "--tail", "80", containerName)
 		lines = append(lines, "=== 崩溃日志 ===")
 		lines = append(lines, crashLogs)
 
@@ -794,7 +799,8 @@ func diagnoseContainerStartup(client *ssh.Client, containerName string, listenPo
 		}
 	}
 
-	logs, _ := sshRun(client, fmt.Sprintf("docker logs --tail 50 %s 2>&1", containerName))
+	// [P0-2 2026-07-17] 用 sshRunArgs
+	logs, _ := sshRunArgs(client, "docker", "logs", "--tail", "50", containerName)
 	lines = append(lines, "=== 启动日志 ===")
 	lines = append(lines, logs)
 
@@ -947,7 +953,8 @@ func scpViaSSH(client *ssh.Client, localPath, remotePath string) (string, error)
 		return "", fmt.Errorf("本地文件为空: %s", localPath)
 	}
 
-	if _, err := sshRun(client, "rm -f "+remotePath); err != nil {
+	// [P0-2 2026-07-17] 用 sshRunArgs
+	if _, err := sshRunArgs(client, "rm", "-f", remotePath); err != nil {
 		return "", fmt.Errorf("清空远程文件失败: %w", err)
 	}
 
@@ -974,7 +981,7 @@ func scpViaSSH(client *ssh.Client, localPath, remotePath string) (string, error)
 		}
 		var errBuf bytes.Buffer
 		session.Stderr = &errBuf
-		if err := session.Start("base64 -d >> " + remotePath); err != nil {
+		if err := session.Start("base64 -d >> " + shellescape(remotePath)); err != nil {
 			session.Close()
 			return "", fmt.Errorf("启动命令失败(块 %d/%d): %w", i+1, totalChunks, err)
 		}
@@ -991,9 +998,10 @@ func scpViaSSH(client *ssh.Client, localPath, remotePath string) (string, error)
 		session.Close()
 	}
 
-	sshRun(client, "chmod +x "+remotePath)
+	// [P0-2 2026-07-17] 用 sshRunArgs
+	sshRunArgs(client, "chmod", "+x", remotePath)
 
-	verifyOut, _ := sshRun(client, "ls -la "+remotePath)
+	verifyOut, _ := sshRunArgs(client, "ls", "-la", remotePath)
 	return fmt.Sprintf("已传输 %d 字节(分 %d 块), 远程文件: %s", len(data), totalChunks, verifyOut), nil
 }
 
@@ -1023,7 +1031,8 @@ func sshWriteFile(client *ssh.Client, path, content string) error {
 		return err
 	}
 
-	if err := session.Start("cat > " + path); err != nil {
+	// [P0-2 2026-07-17] shellescape 转义路径, 防止 path 含 shell 元字符被注入
+	if err := session.Start("cat > " + shellescape(path)); err != nil {
 		stdin.Close()
 		return err
 	}
@@ -1121,7 +1130,8 @@ func uploadNodeAgent(client *ssh.Client, deployDir string) error {
 	if err != nil {
 		return err
 	}
-	if err := session.Start("tar -xzf - -C " + deployDir); err != nil {
+	// [P0-2 2026-07-17] shellescape 转义 deployDir
+	if err := session.Start("tar -xzf - -C " + shellescape(deployDir)); err != nil {
 		return err
 	}
 
@@ -1144,4 +1154,44 @@ func safeGo(fn func()) {
 		}()
 		fn()
 	}()
+}
+
+// shellescape 将字符串安全地转义为 POSIX shell 单引号字符串。
+// 策略: 仅当字符串完全由"安全字符"组成时原样返回, 否则用单引号包裹并转义内部的单引号。
+// 重要: 该函数用于把不可信输入嵌入 sshRun 的 shell 命令串中,
+// 防止部署场景中 node.ServerAddress / containerName / path 等字段被攻击者
+// 通过 admin 节点管理或前端 XSS 注入恶意 shell 片段。
+func shellescape(s string) string {
+	if s == "" {
+		return "''"
+	}
+	safe := true
+	for _, r := range s {
+		isSafe := (r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			r == '_' || r == '-' || r == '.' ||
+			r == '/' || r == ':' || r == '@' || r == ',' || r == '='
+		if !isSafe {
+			safe = false
+			break
+		}
+	}
+	if safe {
+		return s
+	}
+	// 包裹单引号, 内部单引号转义为 '\''
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// sshRunArgs 安全执行一条命令, 参数以列表形式传入并经 shellescape 转义。
+// 等价于 sshRun, 但调用方不再手动拼接 shell 字符串, 杜绝命令注入。
+// 注: stderr/stdout 仍合并到同一 buffer (沿用 sshRun 行为), 无需在命令串中加 2>&1。
+func sshRunArgs(client *ssh.Client, name string, args ...string) (string, error) {
+	parts := make([]string, 0, 1+len(args))
+	parts = append(parts, shellescape(name))
+	for _, a := range args {
+		parts = append(parts, shellescape(a))
+	}
+	return sshRun(client, strings.Join(parts, " "))
 }

@@ -185,14 +185,12 @@ const routes: RouteRecordRaw[] = [
   // 根路径根据角色跳转
   {
     path: '/',
-    redirect: () => {
-      const auth = useAuthStore()
-      if (auth.role === 'admin') return '/admin/dashboard'
-      if (auth.role === 'user') return '/user/dashboard'
-      return '/login'
-    },
+    // [P1-4 2026-07-17] redirect 改为硬编码 /login, 不再依赖 auth.role 状态
+    // 原因: pinia 还没挂载时 auth.role 是空, 这里若用 role 判定会导致无 token
+    // 用户访问 / 看到一次空白闪烁。统一走 /login, 登录页内部会根据 role 再跳转
+    redirect: () => '/login',
   },
-  // 兜底
+  // 兜底: 未知路径重定向到 /login (原逻辑保留, 因为没单独的 404 页)
   { path: '/:pathMatch(.*)*', redirect: '/login' },
 ]
 
@@ -200,6 +198,13 @@ const router = createRouter({
   history: createWebHistory(),
   routes,
 })
+
+// [P1-4 2026-07-17] 抽离"角色 → 主页"映射为独立函数, 避免各处重复 if/else
+function dashboardByRole(role?: string): string {
+  if (role === 'admin') return '/admin/dashboard'
+  if (role === 'user') return '/user/dashboard'
+  return '/login'
+}
 
 // 全局前置守卫：鉴权与角色校验
 router.beforeEach((to, _from) => {
@@ -210,7 +215,7 @@ router.beforeEach((to, _from) => {
   if (to.meta.public) {
     // 已登录用户访问登录页/注册页则跳转到对应主页
     if ((to.name === 'Login' || to.name === 'Register') && auth.token) {
-      return auth.role === 'admin' ? '/admin/dashboard' : '/user/dashboard'
+      return dashboardByRole(auth.role)
     }
     return true
   }
@@ -223,12 +228,17 @@ router.beforeEach((to, _from) => {
     // 角色校验
     const requiredRole = to.meta.role as string | undefined
     if (requiredRole && auth.role !== requiredRole) {
-      // 角色不匹配，跳转到自身主页
-      return auth.role === 'admin' ? '/admin/dashboard' : '/user/dashboard'
+      // 角色不匹配, 跳转到自身主页
+      return dashboardByRole(auth.role)
     }
     return true
   }
 
+  // 兜底: 任何未声明 requiresAuth 也未声明 public 的页面, 默认要求登录
+  // [P1-4 2026-07-17] 防止新增页面忘记加 meta.public 时被默认放行
+  if (!auth.token) {
+    return { name: 'Login' }
+  }
   return true
 })
 
