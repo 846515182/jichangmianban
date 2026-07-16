@@ -121,7 +121,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - /root/nexus-panel/docker-cli:/usr/local/bin:ro
     entrypoint: >
-      sh -c "mkdir -p /root/.docker/cli-plugins &&
+      sh -c "mkdir -p /usr/libexec/git-core /root/.docker/cli-plugins &&
+             ln -sf /usr/local/bin/git-core/git-remote-https /usr/libexec/git-core/git-remote-https &&
              ln -sf /usr/local/bin/docker-compose /root/.docker/cli-plugins/docker-compose &&
              exec /app/nexus-panel"
     depends_on:
