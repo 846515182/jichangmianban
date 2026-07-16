@@ -37,7 +37,7 @@ FROM alpine:3.18
 
 # 安装运行时所需的最小依赖：ca-certificates(HTTPS)、tzdata(时区)、wget(健康检查)
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apk/repositories && \
-    apk add --no-cache ca-certificates tzdata wget && \
+    apk add --no-cache ca-certificates tzdata wget git docker-cli docker-cli-compose && \
     update-ca-certificates
 
 # 设置时区为 UTC
