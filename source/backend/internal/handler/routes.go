@@ -237,6 +237,7 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 		admin.GET("/system/git-status", middleware.RBAC(middleware.PermBackup), systemH.GitStatus)
 		admin.POST("/system/git-pull", middleware.RBAC(middleware.PermBackup), systemH.GitPull)
 		admin.POST("/system/git-push", middleware.RBAC(middleware.PermBackup), systemH.GitPush)
+		admin.POST("/system/restart", middleware.RBAC(middleware.PermBackup), systemH.SystemRestart)
 
 		// 磁盘管理
 		admin.GET("/system/disk-usage", middleware.RBAC(middleware.PermBackup), systemH.DiskUsage)

@@ -257,18 +257,23 @@
                 </div>
               </div>
               <div class="git-actions">
-                <el-button type="primary" @click="gitPull" :loading="pulling" :disabled="gitStatus.status">
-                  <el-icon><Download /></el-icon>拉取更新 (git pull)
+                <el-button type="primary" @click="gitPull" :loading="pulling" :disabled="!!gitStatus.status">
+                  <el-icon><Download /></el-icon>一键在线更新
                 </el-button>
                 <el-button type="success" @click="gitPushDialog = true" :disabled="!gitStatus.status">
-                  <el-icon><Upload /></el-icon>推送代码 (git push)
+                  <el-icon><Upload /></el-icon>推送代码
+                </el-button>
+                <el-button type="warning" @click="systemRestart" :loading="restarting">
+                  <el-icon><RefreshRight /></el-icon>重启面板
                 </el-button>
                 <el-button @click="loadGitStatus" :loading="loadingGitStatus">
                   <el-icon><Refresh /></el-icon>刷新状态
                 </el-button>
               </div>
               <div v-if="pullResult" class="cmd-output">
-                <div class="output-title">更新结果:</div>
+                <div class="output-title" :class="pullSuccess ? 'text-success' : 'text-danger'">
+                  更新{{ pullSuccess ? '成功' : '失败' }}:
+                </div>
                 <pre>{{ pullResult }}</pre>
               </div>
             </div>
@@ -638,9 +643,11 @@ const savePwd = async () => {
 const loadingGitStatus = ref(false)
 const pulling = ref(false)
 const pushing = ref(false)
+const restarting = ref(false)
 const gitPushDialog = ref(false)
 const gitPushMessage = ref('')
 const pullResult = ref('')
+const pullSuccess = ref(false)
 const gitStatus = reactive({
   branch: '',
   recent5: '',
@@ -661,20 +668,41 @@ const loadGitStatus = async () => {
 }
 
 const gitPull = async () => {
-  ElMessageBox.confirm('将从 GitHub 拉取最新代码并覆盖本地修改，确定继续？', '确认更新', {
-    type: 'warning', confirmButtonText: '确认拉取', cancelButtonText: '取消',
+  ElMessageBox.confirm('将从 GitHub 拉取最新代码，编译后端、构建前端，然后重启面板。确定继续？', '一键在线更新', {
+    type: 'warning', confirmButtonText: '确认更新', cancelButtonText: '取消',
   }).then(async () => {
     pulling.value = true
+    pullResult.value = ''
     try {
       const res: any = await request.post('/api/v1/admin/system/git-pull')
       const d = res?.data || res
-      pullResult.value = d.fetch_output + '\n' + d.reset_output
-      ElMessage.success('代码已更新')
+      pullResult.value = d.output || d.steps?.join('\n') || ''
+      pullSuccess.value = d.success !== false
+      if (pullSuccess.value) {
+        ElMessage.success('在线更新完成，面板即将重启...')
+      } else {
+        ElMessage.error('更新过程中出现错误')
+      }
       loadGitStatus()
     } catch (e: any) {
       pullResult.value = e?.response?.data?.msg || e?.message || '更新失败'
+      pullSuccess.value = false
       ElMessage.error(pullResult.value)
     } finally { pulling.value = false }
+  }).catch(() => {})
+}
+
+const systemRestart = async () => {
+  ElMessageBox.confirm('确定重启面板后端服务吗？重启后页面将短暂不可用。', '重启面板', {
+    type: 'warning', confirmButtonText: '确认重启', cancelButtonText: '取消',
+  }).then(async () => {
+    restarting.value = true
+    try {
+      await request.post('/api/v1/admin/system/restart')
+      ElMessage.success('重启指令已下发，面板即将恢复...')
+    } catch { /* 拦截器已提示 */ } finally {
+      restarting.value = false
+    }
   }).catch(() => {})
 }
 
@@ -767,5 +795,7 @@ onMounted(() => {
 .disk-output pre { margin: 0; font-size: 12px; color: var(--np-text-secondary); white-space: pre-wrap; max-height: 200px; overflow-y: auto; }
 .cmd-output { margin-top: 12px; background: var(--np-bg-soft); border-radius: 8px; padding: 12px; }
 .cmd-output .output-title { font-size: 13px; font-weight: 600; color: var(--np-text); margin-bottom: 6px; }
+.cmd-output .output-title.text-success { color: #67c23a; }
+.cmd-output .output-title.text-danger { color: #f56c6c; }
 .cmd-output pre { margin: 0; font-size: 12px; color: var(--np-text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }
 </style>

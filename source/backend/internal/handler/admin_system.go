@@ -657,13 +657,13 @@ type systemActionResult struct {
 	Error   string `json:"error,omitempty"`
 }
 
-// execCommand 执行 shell 命令并返回结果(超时 60 秒)
-func execCommand(name string, args ...string) systemActionResult {
+// execCommandDir 在指定目录执行 shell 命令(超时 60 秒)
+func execCommandDir(dir, name string, args ...string) systemActionResult {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Dir = "/workspace" // Nexus Panel 项目目录
+	cmd.Dir = dir
 	output, err := cmd.CombinedOutput()
 	result := systemActionResult{
 		Output: strings.TrimSpace(string(output)),
@@ -675,28 +675,85 @@ func execCommand(name string, args ...string) systemActionResult {
 	return result
 }
 
+// execCommand 在项目根目录执行命令
+func execCommand(name string, args ...string) systemActionResult {
+	return execCommandDir("/workspace", name, args...)
+}
+
 // GitPull POST /api/v1/admin/system/git-pull
-// 从 GitHub 拉取最新代码(手动在线更新)
+// 一键在线更新: 拉取 GitHub 代码 → 编译后端 → 构建前端 → 重启服务
 func (h *AdminSystemHandler) GitPull(c *gin.Context) {
-	// 1. git fetch origin
+	var steps []string
+	allOK := true
+
+	// 1. 拉取代码
+	steps = append(steps, ">>> 1/5 拉取 GitHub 代码")
 	fetchResult := execCommand("git", "fetch", "origin")
 	if !fetchResult.Success {
-		response.FailMsg(c, response.CodeServerError, "git fetch 失败: "+fetchResult.Error)
+		steps = append(steps, "失败: git fetch - "+fetchResult.Error)
+		response.OK(c, gin.H{"success": false, "steps": steps, "output": strings.Join(steps, "\n")})
 		return
 	}
+	steps = append(steps, fetchResult.Output)
 
-	// 2. git reset --hard origin/main
 	resetResult := execCommand("git", "reset", "--hard", "origin/main")
 	if !resetResult.Success {
-		response.FailMsg(c, response.CodeServerError, "git reset 失败: "+resetResult.Error)
+		steps = append(steps, "失败: git reset - "+resetResult.Error)
+		response.OK(c, gin.H{"success": false, "steps": steps, "output": strings.Join(steps, "\n")})
 		return
+	}
+	steps = append(steps, resetResult.Output)
+
+	// 2. 编译后端
+	steps = append(steps, ">>> 2/5 编译后端 (go build)")
+	backendDir := "/workspace/source/backend"
+	buildResult := execCommandDir(backendDir, "go", "build", "-o", "nexus-panel", "./cmd/server")
+	if !buildResult.Success {
+		steps = append(steps, "失败: go build - "+buildResult.Error)
+		allOK = false
+	} else {
+		steps = append(steps, "后端编译成功: "+buildResult.Output)
+	}
+
+	// 3. 构建前端
+	steps = append(steps, ">>> 3/5 构建前端 (npm build)")
+	frontendDir := "/workspace/source/frontend"
+	npmResult := execCommandDir(frontendDir, "npm", "run", "build")
+	if !npmResult.Success {
+		steps = append(steps, "失败: npm build - "+npmResult.Error)
+		allOK = false
+	} else {
+		steps = append(steps, "前端构建成功: "+npmResult.Output)
+	}
+
+	// 4. 重启后端服务
+	steps = append(steps, ">>> 4/5 重启后端服务")
+	if allOK {
+		// 延迟 1 秒后重启，确保当前响应已发送
+		go func() {
+			time.Sleep(1 * time.Second)
+			execCommand("systemctl", "restart", "nexus-panel")
+		}()
+		steps = append(steps, "服务重启指令已下发，面板将在 1-2 秒后恢复")
+	} else {
+		steps = append(steps, "构建失败，跳过重启")
 	}
 
 	response.OK(c, gin.H{
-		"action":       "git-pull",
-		"fetch_output": fetchResult.Output,
-		"reset_output": resetResult.Output,
+		"success": allOK,
+		"steps":   steps,
+		"output":  strings.Join(steps, "\n"),
 	})
+}
+
+// SystemRestart POST /api/v1/admin/system/restart
+// 手动重启后端服务
+func (h *AdminSystemHandler) SystemRestart(c *gin.Context) {
+	go func() {
+		time.Sleep(1 * time.Second)
+		execCommand("systemctl", "restart", "nexus-panel")
+	}()
+	response.OKMsg(c, "重启指令已下发，面板即将恢复")
 }
 
 // GitPush POST /api/v1/admin/system/git-push
