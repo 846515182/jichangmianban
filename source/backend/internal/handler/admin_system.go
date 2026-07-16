@@ -675,9 +675,37 @@ func execCommandDir(dir, name string, args ...string) systemActionResult {
 	return result
 }
 
-// execCommand 在项目根目录执行命令
+// getGitRoot 自动检测 git 仓库根目录
+func getGitRoot() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
+	output, err := cmd.Output()
+	if err != nil {
+		// 回退到环境变量或默认路径
+		if root := os.Getenv("PROJECT_ROOT"); root != "" {
+			return root
+		}
+		return "/root/nexus-panel"
+	}
+	return strings.TrimSpace(string(output))
+}
+
+// getCurrentBranch 获取当前分支名
+func getCurrentBranch() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	output, err := cmd.Output()
+	if err != nil {
+		return "main"
+	}
+	return strings.TrimSpace(string(output))
+}
+
+// execCommand 在 git 仓库根目录执行命令
 func execCommand(name string, args ...string) systemActionResult {
-	return execCommandDir("/workspace", name, args...)
+	return execCommandDir(getGitRoot(), name, args...)
 }
 
 // GitPull POST /api/v1/admin/system/git-pull
@@ -686,8 +714,13 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 	var steps []string
 	allOK := true
 
+	gitRoot := getGitRoot()
+	branch := getCurrentBranch()
+	backendDir := filepath.Join(gitRoot, "source", "backend")
+	frontendDir := filepath.Join(gitRoot, "source", "frontend")
+
 	// 1. 拉取代码
-	steps = append(steps, ">>> 1/5 拉取 GitHub 代码")
+	steps = append(steps, fmt.Sprintf(">>> 1/6 拉取 GitHub 代码 (branch=%s, root=%s)", branch, gitRoot))
 	fetchResult := execCommand("git", "fetch", "origin")
 	if !fetchResult.Success {
 		steps = append(steps, "失败: git fetch - "+fetchResult.Error)
@@ -696,7 +729,7 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 	}
 	steps = append(steps, fetchResult.Output)
 
-	resetResult := execCommand("git", "reset", "--hard", "origin/main")
+	resetResult := execCommand("git", "reset", "--hard", "origin/"+branch)
 	if !resetResult.Success {
 		steps = append(steps, "失败: git reset - "+resetResult.Error)
 		response.OK(c, gin.H{"success": false, "steps": steps, "output": strings.Join(steps, "\n")})
@@ -705,29 +738,56 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 	steps = append(steps, resetResult.Output)
 
 	// 2. 编译后端
-	steps = append(steps, ">>> 2/5 编译后端 (go build)")
-	backendDir := "/workspace/source/backend"
-	buildResult := execCommandDir(backendDir, "go", "build", "-o", "nexus-panel", "./cmd/server")
-	if !buildResult.Success {
-		steps = append(steps, "失败: go build - "+buildResult.Error)
-		allOK = false
+	steps = append(steps, ">>> 2/6 编译后端 (go build)")
+	if _, err := os.Stat(backendDir); os.IsNotExist(err) {
+		steps = append(steps, fmt.Sprintf("警告: 后端目录不存在 %s, 跳过编译", backendDir))
 	} else {
-		steps = append(steps, "后端编译成功: "+buildResult.Output)
+		buildResult := execCommandDir(backendDir, "go", "build", "-o", "nexus-panel", "./cmd/server")
+		if !buildResult.Success {
+			steps = append(steps, "失败: go build - "+buildResult.Error)
+			allOK = false
+		} else {
+			steps = append(steps, "后端编译成功: "+buildResult.Output)
+
+			// 3. 复制二进制到 systemd 服务路径
+			steps = append(steps, ">>> 3/6 安装二进制文件")
+			possiblePaths := []string{
+				"/usr/local/bin/nexus-panel",
+				"/app/nexus-panel",
+				filepath.Join(gitRoot, "nexus-panel"),
+			}
+			src := filepath.Join(backendDir, "nexus-panel")
+			copied := false
+			for _, dst := range possiblePaths {
+				if _, err := os.Stat(dst); err == nil {
+					copyResult := execCommandDir(backendDir, "cp", "-f", "nexus-panel", dst)
+					steps = append(steps, fmt.Sprintf("复制到 %s: %s", dst, copyResult.Output))
+					copied = true
+					break
+				}
+			}
+			if !copied {
+				steps = append(steps, fmt.Sprintf("未找到已安装的二进制目标路径，二进制输出在: %s", src))
+			}
+		}
 	}
 
-	// 3. 构建前端
-	steps = append(steps, ">>> 3/5 构建前端 (npm build)")
-	frontendDir := "/workspace/source/frontend"
-	npmResult := execCommandDir(frontendDir, "npm", "run", "build")
-	if !npmResult.Success {
-		steps = append(steps, "失败: npm build - "+npmResult.Error)
-		allOK = false
+	// 4. 构建前端
+	steps = append(steps, ">>> 4/6 构建前端 (npm build)")
+	if _, err := os.Stat(frontendDir); os.IsNotExist(err) {
+		steps = append(steps, fmt.Sprintf("警告: 前端目录不存在 %s, 跳过构建", frontendDir))
 	} else {
-		steps = append(steps, "前端构建成功: "+npmResult.Output)
+		npmResult := execCommandDir(frontendDir, "npm", "run", "build")
+		if !npmResult.Success {
+			steps = append(steps, "失败: npm build - "+npmResult.Error)
+			allOK = false
+		} else {
+			steps = append(steps, "前端构建成功: "+npmResult.Output)
+		}
 	}
 
-	// 4. 重启后端服务
-	steps = append(steps, ">>> 4/5 重启后端服务")
+	// 5. 重启后端服务
+	steps = append(steps, ">>> 5/6 重启后端服务")
 	if allOK {
 		// 延迟 1 秒后重启，确保当前响应已发送
 		go func() {
@@ -767,19 +827,22 @@ func (h *AdminSystemHandler) GitPush(c *gin.Context) {
 		return
 	}
 
-	// 1. git add -A
-	addResult := execCommand("git", "add", "-A")
+	branch := getCurrentBranch()
+
+	// 1. git add . (使用 . 而非 -A，尊重 .gitignore)
+	addResult := execCommand("git", "add", ".")
 	if !addResult.Success {
 		response.FailMsg(c, response.CodeServerError, "git add 失败: "+addResult.Error)
 		return
 	}
 
-	// 2. git commit
+	// 2. git commit (可能因无变更而失败，这是正常的)
 	commitResult := execCommand("git", "commit", "-m", req.Message)
-	// commit 可能因为无变更而失败，这是正常的
+	noChanges := strings.Contains(commitResult.Error, "nothing to commit") ||
+		strings.Contains(commitResult.Output, "nothing to commit")
 
 	// 3. git push
-	pushResult := execCommand("git", "push", "origin", "main")
+	pushResult := execCommand("git", "push", "origin", branch)
 	if !pushResult.Success {
 		response.FailMsg(c, response.CodeServerError, "git push 失败: "+pushResult.Error)
 		return
@@ -787,6 +850,8 @@ func (h *AdminSystemHandler) GitPush(c *gin.Context) {
 
 	response.OK(c, gin.H{
 		"action":        "git-push",
+		"branch":        branch,
+		"no_changes":    noChanges,
 		"commit_output": commitResult.Output,
 		"push_output":   pushResult.Output,
 	})
@@ -797,11 +862,12 @@ func (h *AdminSystemHandler) GitPush(c *gin.Context) {
 func (h *AdminSystemHandler) GitStatus(c *gin.Context) {
 	statusResult := execCommand("git", "status", "--short")
 	logResult := execCommand("git", "log", "--oneline", "-5")
+	branch := getCurrentBranch()
 
 	response.OK(c, gin.H{
 		"status":   statusResult.Output,
 		"recent_5": logResult.Output,
-		"branch":   execCommand("git", "rev-parse", "--abbrev-ref", "HEAD").Output,
+		"branch":   branch,
 	})
 }
 
