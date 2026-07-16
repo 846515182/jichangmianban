@@ -17,7 +17,10 @@ import (
 // 用法: admin.PUT("/nodes/:id", AuditAction("node.update"), adminNodeH.NodeUpdate)
 func AuditAction(action string) gin.HandlerFunc {
         return func(c *gin.Context) {
-                c.Next() // 先执行业务逻辑
+                // 在 c.Next() 之前读取请求体，避免 body 被 handler 消费后无法读取
+                bodyBytes := readRequestBody(c)
+
+                c.Next() // 执行业务逻辑
 
                 // 仅记录成功的状态变更操作 (POST/PUT/DELETE/PATCH)
                 method := c.Request.Method
@@ -39,7 +42,7 @@ func AuditAction(action string) gin.HandlerFunc {
                 }
 
                 // 提取请求体摘要(最多 512 字节)
-                detail := extractRequestBody(c)
+                detail := formatRequestBody(bodyBytes)
 
                 audit := &model.AdminAction{
                         AdminID:    claims.UserID,
@@ -59,16 +62,25 @@ func AuditAction(action string) gin.HandlerFunc {
         }
 }
 
-func extractRequestBody(c *gin.Context) string {
+// readRequestBody 在 c.Next() 之前读取请求体，并将 body 重置以便 handler 后续使用
+func readRequestBody(c *gin.Context) []byte {
         if c.Request.Body == nil {
-                return ""
+                return nil
         }
         body, err := io.ReadAll(c.Request.Body)
         if err != nil {
-                return ""
+                return nil
         }
         // 重新设置 body 供后续 handler 读取
         c.Request.Body = io.NopCloser(bytes.NewBuffer(body))
+        return body
+}
+
+// formatRequestBody 格式化已读取的请求体字节，截取最多 512 字节
+func formatRequestBody(body []byte) string {
+        if len(body) == 0 {
+                return ""
+        }
         if len(body) > 512 {
                 body = body[:512]
         }

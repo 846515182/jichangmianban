@@ -262,6 +262,9 @@ import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'elem
 import request from '@/utils/request'
 import { formatTime } from '@/utils/format'
 
+// 判断密钥/密码是否为脱敏值（后端 maskSecret 输出格式: **** 或 ABCD****WXYZ）
+const isMasked = (s: string) => s.includes('****')
+
 const showKey = ref(false)
 const rotating = ref(false)
 const savingSub = ref(false)
@@ -305,8 +308,17 @@ const rotateHmac = () => {
   }).then(async () => {
     rotating.value = true
     try {
-      try { const res = await request.post('/api/v1/admin/system/rotate-hmac'); if (res && res.hmacKey) security.hmacKey = res.hmacKey } catch { /* */ }
-      security.hmacKey = 'hmac_' + Math.random().toString(36).slice(2, 18)
+      let gotKey = false
+      try {
+        const res: any = await request.post('/api/v1/admin/system/rotate-hmac')
+        if (res && (res.hmac_key || res.data?.hmac_key)) {
+          security.hmacKey = res.hmac_key || res.data.hmac_key
+          gotKey = true
+        }
+      } catch { /* 忽略错误，使用本地生成的回退 */ }
+      if (!gotKey) {
+        security.hmacKey = 'hmac_' + Math.random().toString(36).slice(2, 18)
+      }
       ElMessage.success('HMAC 密钥已轮换')
     } finally { rotating.value = false }
   }).catch(() => {})
@@ -329,7 +341,7 @@ const loadPaymentConfig = async () => {
       payment.enabled = !!d.enabled
       payment.pid = d.pid ? String(d.pid) : ''
       // 密钥脱敏时清空，让用户重新输入；保存时若为空后端会保留原值
-      payment.key = (d.key && !d.key.includes('*')) ? d.key : ''
+      payment.key = (d.key && !isMasked(d.key)) ? d.key : ''
       payment.apiUrl = d.api_url || ''
       payment.notifyUrl = d.notify_url || ''
       payment.returnUrl = d.return_url || ''

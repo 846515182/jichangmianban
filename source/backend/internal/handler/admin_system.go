@@ -148,7 +148,7 @@ func (h *AdminSystemHandler) RotateHMAC(c *gin.Context) {
 	}
 	// 更新运行时配置
 	app.Get().Cfg.HMACSubSecret = newSecret
-	response.OK(c, gin.H{"rotated_at": time.Now()})
+	response.OK(c, gin.H{"rotated_at": time.Now(), "hmac_key": newSecret})
 }
 
 // LoginAudit [25] GET /api/v1/admin/system/login-audit

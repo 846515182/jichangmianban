@@ -91,6 +91,9 @@ func resolveFrom(cfg *EmailConfig) (string, error) {
 
 // SendMail 发送邮件
 func (s *EmailService) SendMail(to []string, subject, body string) error {
+	if len(to) == 0 {
+		return fmt.Errorf("收件人列表为空")
+	}
 	cfg, err := s.GetConfig()
 	if err != nil {
 		return fmt.Errorf("获取邮件配置失败: %w", err)
@@ -108,7 +111,7 @@ func (s *EmailService) SendMail(to []string, subject, body string) error {
 	}
 
 	msg := []byte(fmt.Sprintf("From: Nexus-Panel <%s>\r\nTo: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s",
-		from, to[0], subject, body))
+		from, strings.Join(to, ","), subject, body))
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	auth := smtp.PlainAuth("", cfg.User, cfg.Password, cfg.Host)
