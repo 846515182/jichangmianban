@@ -62,7 +62,7 @@ func NewDeps() *Deps {
 
 	orderSvc := service.NewOrderService(orderRepo, planRepo, couponRepo, userRepo)
 	paymentSvc := service.NewPaymentService(settingRepo, orderSvc)
-	emailSvc := service.NewEmailService(settingRepo)
+	emailSvc := service.NewEmailService(settingRepo, cfg)
 
 	return &Deps{
 		JWTMgr:         jwtMgr,
@@ -236,6 +236,7 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 		// 系统更新 & GitHub 同步
 		admin.GET("/system/git-status", middleware.RBAC(middleware.PermBackup), systemH.GitStatus)
 		admin.POST("/system/git-pull", middleware.RBAC(middleware.PermBackup), systemH.GitPull)
+		admin.GET("/system/git-pull-log", middleware.RBAC(middleware.PermBackup), systemH.GitPullLog)
 		admin.POST("/system/git-push", middleware.RBAC(middleware.PermBackup), systemH.GitPush)
 		admin.POST("/system/restart", middleware.RBAC(middleware.PermBackup), systemH.SystemRestart)
 

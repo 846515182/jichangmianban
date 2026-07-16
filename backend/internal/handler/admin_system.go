@@ -1,17 +1,20 @@
 package handler
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -748,82 +751,132 @@ func execCommand(name string, args ...string) systemActionResult {
 	return execCommandDir(getGitRoot(), name, args...)
 }
 
+// ============================================================
+// 异步在线更新（后台运行 + 实时日志轮询）
+// ============================================================
+
+var (
+	gitPullMu    sync.Mutex
+	gitPullLog   strings.Builder
+	gitPullDone  bool
+	gitPullOK    bool
+)
+
+// logWrite 写入日志并在末尾追加换行
+func logWrite(format string, args ...interface{}) {
+	gitPullLog.WriteString(fmt.Sprintf(format, args...))
+	gitPullLog.WriteString("\n")
+}
+
+// execCommandLog 执行命令并将输出同时写入日志（600s 超时）
+func execCommandLog(dir, name string, args ...string) bool {
+	logWrite("$ %s %s", name, strings.Join(args, " "))
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	stdout, _ := cmd.StdoutPipe()
+	stderr, _ := cmd.StderrPipe()
+	if err := cmd.Start(); err != nil {
+		logWrite("启动失败: %v", err)
+		return false
+	}
+	// 实时读取 stdout
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			logWrite("  %s", scanner.Text())
+		}
+	}()
+	// 实时读取 stderr
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			logWrite("  %s", scanner.Text())
+		}
+	}()
+	if err := cmd.Wait(); err != nil {
+		logWrite("失败: %v", err)
+		return false
+	}
+	return true
+}
+
 // GitPull POST /api/v1/admin/system/git-pull
-// 一键在线更新: 拉取 GitHub 代码 → 构建镜像 → 重启服务 (Docker Compose 模式)
+// 一键在线更新（异步）: 立即返回，后台执行构建，进度通过 GitPullLog 轮询
 func (h *AdminSystemHandler) GitPull(c *gin.Context) {
-	var steps []string
-	allOK := true
-
-	gitRoot := getGitRoot()
-	branch := getCurrentBranch()
-
-	// 1. 预检工作树
-	steps = append(steps, fmt.Sprintf(">>> 1/6 预检工作树检查本地是否有未提交的修改..."))
-	statusResult := execCommand("git", "status", "--short")
-	if statusResult.Output != "" {
-		steps = append(steps, "工作树有未提交的修改:\n"+statusResult.Output)
-		allOK = false
-	} else {
-		steps = append(steps, "工作树干净，可以继续更新")
+	if !gitPullMu.TryLock() {
+		response.OK(c, gin.H{"success": false, "msg": "已有更新任务正在执行，请查看日志"})
+		return
 	}
 
-	if allOK {
-		// 2. 拉取代码
-		steps = append(steps, fmt.Sprintf(">>> 2/6 拉取 GitHub git fetch origin (branch=%s, root=%s)", branch, gitRoot))
-		fetchResult := execCommand("git", "fetch", "origin")
-		steps = append(steps, fetchResult.Output)
-		if !fetchResult.Success {
-			steps = append(steps, "失败: "+fetchResult.Error)
-			allOK = false
+	gitPullLog.Reset()
+	gitPullDone = false
+	gitPullOK = false
+
+	go func() {
+		defer gitPullMu.Unlock()
+		gitRoot := getGitRoot()
+		branch := getCurrentBranch()
+
+		logWrite(">>> 1/6 预检工作树")
+		statusResult := execCommand("git", "status", "--short")
+		if statusResult.Output != "" {
+			logWrite("工作树有未提交的修改:\n%s", statusResult.Output)
+			gitPullOK = false
+			gitPullDone = true
+			return
 		}
-	}
+		logWrite("工作树干净")
 
-	if allOK {
-		// 3. 同步本地代码
-		steps = append(steps, fmt.Sprintf(">>> 3/6 同步本地代码 git reset --hard origin/%s", branch))
-		resetResult := execCommand("git", "reset", "--hard", "origin/"+branch)
-		steps = append(steps, resetResult.Output)
-		if !resetResult.Success {
-			steps = append(steps, "失败: "+resetResult.Error)
-			allOK = false
+		logWrite(">>> 2/6 拉取代码 git fetch origin (branch=%s)", branch)
+		if !execCommandLog(gitRoot, "git", "fetch", "origin") {
+			logWrite("git fetch 失败")
+			gitPullOK = false
+			gitPullDone = true
+			return
 		}
-	}
 
-	if allOK {
-		// 4. 构建 Docker 镜像
-		steps = append(steps, ">>> 4/6 构建镜像 docker compose build panel frontend (首次约3-5分钟，后续有服务器缓存)")
-		buildResult := execCommandDir(gitRoot, "docker", "compose", "build", "panel", "frontend")
-		if !buildResult.Success {
-			steps = append(steps, "Docker 镜像构建失败，服务未重启（回滚到更新前镜像）: "+buildResult.Error)
-			allOK = false
-		} else {
-			steps = append(steps, "镜像构建成功: "+buildResult.Output)
+		logWrite(">>> 3/6 同步代码 git reset --hard origin/%s", branch)
+		if !execCommandLog(gitRoot, "git", "reset", "--hard", "origin/"+branch) {
+			logWrite("git reset 失败")
+			gitPullOK = false
+			gitPullDone = true
+			return
 		}
-	}
 
-	if allOK {
-		// 5. 重启服务
-		steps = append(steps, ">>> 5/6 重启服务 docker compose up -d")
-		upResult := execCommandDir(gitRoot, "docker", "compose", "up", "-d", "--remove-orphans")
-		if !upResult.Success {
-			steps = append(steps, "重启失败: "+upResult.Error)
-			allOK = false
-		} else {
-			steps = append(steps, "服务已重启")
+		logWrite(">>> 4/6 构建镜像 docker compose build panel frontend")
+		logWrite("（首次构建约3-5分钟，后续有缓存会快很多）")
+		if !execCommandLog(gitRoot, "docker", "compose", "build", "panel", "frontend") {
+			logWrite("镜像构建失败，请查看上方日志")
+			gitPullOK = false
+			gitPullDone = true
+			return
 		}
-	}
 
-	// 6. 返回结果
-	if allOK {
-		steps = append(steps, ">>> 6/6 在线更新完成!")
-	} else {
-		steps = append(steps, ">>> 6/6 更新失败，请检查日志")
-	}
+		logWrite(">>> 5/6 重启服务 docker compose up -d")
+		if !execCommandLog(gitRoot, "docker", "compose", "up", "-d", "--remove-orphans") {
+			logWrite("重启失败")
+			gitPullOK = false
+			gitPullDone = true
+			return
+		}
 
+		logWrite(">>> 6/6 在线更新完成！")
+		gitPullOK = true
+		gitPullDone = true
+	}()
+
+	response.OK(c, gin.H{"success": true, "msg": "更新已开始，请在日志面板查看实时进度"})
+}
+
+// GitPullLog GET /api/v1/admin/system/git-pull-log
+// 轮询获取在线更新的实时日志
+func (h *AdminSystemHandler) GitPullLog(c *gin.Context) {
 	response.OK(c, gin.H{
-		"success": allOK,
-		"steps":   steps,
-		"output":  strings.Join(steps, "\n"),
+		"log":     gitPullLog.String(),
+		"done":    gitPullDone,
+		"success": gitPullOK,
 	})
 }
 
