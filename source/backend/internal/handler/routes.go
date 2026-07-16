@@ -223,12 +223,24 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 
 		admin.POST("/system/rotate-hmac", middleware.RBAC(middleware.PermKeyManage), systemH.RotateHMAC)
 		admin.GET("/system/login-audit", middleware.RBAC(middleware.PermGlobalSec), systemH.LoginAudit)
-		admin.POST("/system/backup", middleware.RBAC(middleware.PermBackup), systemH.Backup)
+		admin.POST("/system/backup", middleware.RBAC(middleware.PermBackup), systemH.BackupToFile)
+		admin.GET("/system/backups", middleware.RBAC(middleware.PermBackup), systemH.ListBackups)
+		admin.DELETE("/system/backups/:name", middleware.RBAC(middleware.PermBackup), systemH.DeleteBackup)
+		admin.GET("/system/backups/:name/download", middleware.RBAC(middleware.PermBackup), systemH.DownloadBackup)
 		admin.GET("/system/sub-config", systemH.GetSubConfig)
 		admin.PUT("/system/sub-config", systemH.SubConfig)
 		admin.GET("/system/pay-config", systemH.GetPayConfig)
 		admin.PUT("/system/pay-config", systemH.UpdatePayConfig)
 		admin.POST("/system/pay-config/test", systemH.TestPayConfig)
+
+		// 系统更新 & GitHub 同步
+		admin.GET("/system/git-status", middleware.RBAC(middleware.PermBackup), systemH.GitStatus)
+		admin.POST("/system/git-pull", middleware.RBAC(middleware.PermBackup), systemH.GitPull)
+		admin.POST("/system/git-push", middleware.RBAC(middleware.PermBackup), systemH.GitPush)
+
+		// 磁盘管理
+		admin.GET("/system/disk-usage", middleware.RBAC(middleware.PermBackup), systemH.DiskUsage)
+		admin.POST("/system/disk-cleanup", middleware.RBAC(middleware.PermBackup), systemH.DiskCleanup)
 
 		// 通知配置
 		admin.GET("/system/notify-config", systemH.GetNotifyConfig)

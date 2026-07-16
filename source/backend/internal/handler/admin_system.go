@@ -1,14 +1,21 @@
 package handler
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 
 	"nexus-panel/internal/app"
 	"nexus-panel/internal/repo"
@@ -164,9 +171,9 @@ func (h *AdminSystemHandler) LoginAudit(c *gin.Context) {
 	response.OK(c, gin.H{"list": list, "total": total})
 }
 
-// Backup [26] POST /api/v1/admin/system/backup
-// 系统备份(导出关键表的 JSON 快照)，仅超级管理员可调用
-func (h *AdminSystemHandler) Backup(c *gin.Context) {
+// BackupToFile [26] POST /api/v1/admin/system/backup
+// 系统备份: 保存到磁盘 + 返回下载，仅超级管理员可调用
+func (h *AdminSystemHandler) BackupToFile(c *gin.Context) {
 	users, _, err := h.userRepo.List(1, 10000, "")
 	if err != nil {
 		response.Fail(c, response.CodeDBError)
@@ -183,7 +190,6 @@ func (h *AdminSystemHandler) Backup(c *gin.Context) {
 		return
 	}
 
-	// 脱敏敏感字段
 	type safeUser struct {
 		ID           string     `json:"id"`
 		Username     string     `json:"username"`
@@ -237,6 +243,15 @@ func (h *AdminSystemHandler) Backup(c *gin.Context) {
 		return
 	}
 	filename := "nexus-backup-" + time.Now().Format("20060102-150405") + ".json"
+
+	// 保存到磁盘
+	if err := ensureBackupDir(); err == nil {
+		filePath := filepath.Join(backupDir, filename)
+		if err := os.WriteFile(filePath, b, 0600); err != nil {
+			app.Get().Logger.Warn("备份写入磁盘失败", zap.String("file", filePath), zap.Error(err))
+		}
+	}
+
 	c.Header("Content-Type", "application/json; charset=utf-8")
 	c.Header("Content-Disposition", "attachment; filename=\""+filename+"\"")
 	c.Data(http.StatusOK, "application/json", b)
@@ -514,5 +529,321 @@ func (h *AdminSystemHandler) TestNotifyConfig(c *gin.Context) {
 	}
 
 	response.OKMsg(c, "测试邮件已发送，请查收")
+}
+
+// ============================================================
+// 备份文件管理
+// ============================================================
+
+const backupDir = "/var/backups/nexus"
+
+// ensureBackupDir 确保备份目录存在
+func ensureBackupDir() error {
+	return os.MkdirAll(backupDir, 0700)
+}
+
+// backupFileInfo 备份文件信息
+type backupFileInfo struct {
+	Name      string    `json:"name"`
+	Size      int64     `json:"size"`
+	SizeHuman string    `json:"size_human"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// formatSize 格式化文件大小
+func formatSize(size int64) string {
+	switch {
+	case size >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(size)/(1<<30))
+	case size >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(size)/(1<<20))
+	case size >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(size)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", size)
+	}
+}
+
+// ListBackups GET /api/v1/admin/system/backups
+// 列出所有备份文件
+func (h *AdminSystemHandler) ListBackups(c *gin.Context) {
+	if err := ensureBackupDir(); err != nil {
+		response.Fail(c, response.CodeServerError)
+		return
+	}
+
+	entries, err := os.ReadDir(backupDir)
+	if err != nil {
+		response.Fail(c, response.CodeServerError)
+		return
+	}
+
+	var backups []backupFileInfo
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		backups = append(backups, backupFileInfo{
+			Name:      info.Name(),
+			Size:      info.Size(),
+			SizeHuman: formatSize(info.Size()),
+			CreatedAt: info.ModTime(),
+		})
+	}
+
+	// 按创建时间倒序
+	sort.Slice(backups, func(i, j int) bool {
+		return backups[i].CreatedAt.After(backups[j].CreatedAt)
+	})
+
+	response.OK(c, gin.H{"list": backups, "total": len(backups)})
+}
+
+// DeleteBackup DELETE /api/v1/admin/system/backups/:name
+// 删除指定备份文件
+func (h *AdminSystemHandler) DeleteBackup(c *gin.Context) {
+	name := c.Param("name")
+	// 安全检查: 防止路径穿越
+	if strings.Contains(name, "/") || strings.Contains(name, "\\") || strings.Contains(name, "..") {
+		response.FailMsg(c, response.CodeParamError, "无效的文件名")
+		return
+	}
+	if !strings.HasSuffix(name, ".json") {
+		response.FailMsg(c, response.CodeParamError, "仅允许删除 .json 备份文件")
+		return
+	}
+
+	filePath := filepath.Join(backupDir, name)
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		response.FailMsg(c, response.CodeNotFound, "备份文件不存在")
+		return
+	}
+	if err := os.Remove(filePath); err != nil {
+		response.FailMsg(c, response.CodeServerError, "删除失败: "+err.Error())
+		return
+	}
+	response.OKMsg(c, "备份已删除")
+}
+
+// DownloadBackup GET /api/v1/admin/system/backups/:name/download
+// 下载指定备份文件
+func (h *AdminSystemHandler) DownloadBackup(c *gin.Context) {
+	name := c.Param("name")
+	if strings.Contains(name, "/") || strings.Contains(name, "\\") || strings.Contains(name, "..") {
+		response.FailMsg(c, response.CodeParamError, "无效的文件名")
+		return
+	}
+
+	filePath := filepath.Join(backupDir, name)
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		response.FailMsg(c, response.CodeNotFound, "备份文件不存在")
+		return
+	}
+	c.FileAttachment(filePath, name)
+}
+
+// ============================================================
+// 系统更新 & GitHub 同步
+// ============================================================
+
+// systemActionResult 系统操作结果
+type systemActionResult struct {
+	Success bool   `json:"success"`
+	Output  string `json:"output"`
+	Error   string `json:"error,omitempty"`
+}
+
+// execCommand 执行 shell 命令并返回结果(超时 60 秒)
+func execCommand(name string, args ...string) systemActionResult {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = "/workspace" // Nexus Panel 项目目录
+	output, err := cmd.CombinedOutput()
+	result := systemActionResult{
+		Output: strings.TrimSpace(string(output)),
+	}
+	if err != nil {
+		result.Error = err.Error()
+	}
+	result.Success = err == nil
+	return result
+}
+
+// GitPull POST /api/v1/admin/system/git-pull
+// 从 GitHub 拉取最新代码(手动在线更新)
+func (h *AdminSystemHandler) GitPull(c *gin.Context) {
+	// 1. git fetch origin
+	fetchResult := execCommand("git", "fetch", "origin")
+	if !fetchResult.Success {
+		response.FailMsg(c, response.CodeServerError, "git fetch 失败: "+fetchResult.Error)
+		return
+	}
+
+	// 2. git reset --hard origin/main
+	resetResult := execCommand("git", "reset", "--hard", "origin/main")
+	if !resetResult.Success {
+		response.FailMsg(c, response.CodeServerError, "git reset 失败: "+resetResult.Error)
+		return
+	}
+
+	response.OK(c, gin.H{
+		"action":       "git-pull",
+		"fetch_output": fetchResult.Output,
+		"reset_output": resetResult.Output,
+	})
+}
+
+// GitPush POST /api/v1/admin/system/git-push
+// 推送本地代码到 GitHub(协同开发提交)
+func (h *AdminSystemHandler) GitPush(c *gin.Context) {
+	var req struct {
+		Message string `json:"message" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.FailMsg(c, response.CodeParamError, "请填写提交信息")
+		return
+	}
+
+	// 1. git add -A
+	addResult := execCommand("git", "add", "-A")
+	if !addResult.Success {
+		response.FailMsg(c, response.CodeServerError, "git add 失败: "+addResult.Error)
+		return
+	}
+
+	// 2. git commit
+	commitResult := execCommand("git", "commit", "-m", req.Message)
+	// commit 可能因为无变更而失败，这是正常的
+
+	// 3. git push
+	pushResult := execCommand("git", "push", "origin", "main")
+	if !pushResult.Success {
+		response.FailMsg(c, response.CodeServerError, "git push 失败: "+pushResult.Error)
+		return
+	}
+
+	response.OK(c, gin.H{
+		"action":        "git-push",
+		"commit_output": commitResult.Output,
+		"push_output":   pushResult.Output,
+	})
+}
+
+// GitStatus GET /api/v1/admin/system/git-status
+// 查看当前 git 状态
+func (h *AdminSystemHandler) GitStatus(c *gin.Context) {
+	statusResult := execCommand("git", "status", "--short")
+	logResult := execCommand("git", "log", "--oneline", "-5")
+
+	response.OK(c, gin.H{
+		"status":   statusResult.Output,
+		"recent_5": logResult.Output,
+		"branch":   execCommand("git", "rev-parse", "--abbrev-ref", "HEAD").Output,
+	})
+}
+
+// ============================================================
+// 磁盘清理
+// ============================================================
+
+// DiskUsage GET /api/v1/admin/system/disk-usage
+// 查看磁盘使用情况
+func (h *AdminSystemHandler) DiskUsage(c *gin.Context) {
+	result := execCommand("df", "-h")
+	response.OK(c, gin.H{"output": result.Output})
+}
+
+// DiskCleanup POST /api/v1/admin/system/disk-cleanup
+// 清理无用文件: Docker 镜像/容器/卷、系统日志、临时文件、旧备份
+func (h *AdminSystemHandler) DiskCleanup(c *gin.Context) {
+	var req struct {
+		CleanDocker      bool `json:"clean_docker"`
+		CleanLogs        bool `json:"clean_logs"`
+		CleanTmp         bool `json:"clean_tmp"`
+		CleanOldBackups  bool `json:"clean_old_backups"`
+		KeepBackupCount  int  `json:"keep_backup_count"` // 保留最近 N 个备份, 0=全部保留
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		req.CleanDocker = true
+		req.CleanLogs = true
+		req.CleanTmp = true
+		req.CleanOldBackups = true
+		req.KeepBackupCount = 5
+	}
+
+	var results []string
+
+	// Docker 清理
+	if req.CleanDocker {
+		results = append(results, "=== Docker 清理 ===")
+		out := execCommand("docker", "system", "prune", "-af", "--volumes")
+		results = append(results, out.Output)
+		if out.Error != "" {
+			results = append(results, "Error: "+out.Error)
+		}
+	}
+
+	// 日志清理
+	if req.CleanLogs {
+		results = append(results, "=== 日志清理 ===")
+		// 清理超过 7 天的 journald 日志
+		out := execCommand("journalctl", "--vacuum-time=7d")
+		results = append(results, out.Output)
+		// 清理 /var/log 下的旧日志
+		out2 := execCommand("find", "/var/log", "-type", "f", "-name", "*.log", "-mtime", "+7", "-delete")
+		results = append(results, "清理旧日志文件: "+out2.Output)
+		// 清空系统日志
+		out3 := execCommand("truncate", "-s", "0", "/var/log/syslog", "/var/log/messages", "/var/log/kern.log")
+		results = append(results, "清空系统日志: "+out3.Output)
+	}
+
+	// 临时文件清理
+	if req.CleanTmp {
+		results = append(results, "=== 临时文件清理 ===")
+		out := execCommand("find", "/tmp", "-type", "f", "-mtime", "+1", "-delete")
+		results = append(results, "清理 /tmp 旧文件: "+out.Output)
+	}
+
+	// 旧备份清理
+	if req.CleanOldBackups && req.KeepBackupCount > 0 {
+		results = append(results, "=== 旧备份清理 ===")
+		if err := ensureBackupDir(); err == nil {
+			entries, _ := os.ReadDir(backupDir)
+			// 按修改时间排序
+			sort.Slice(entries, func(i, j int) bool {
+				infoI, _ := entries[i].Info()
+				infoJ, _ := entries[j].Info()
+				if infoI == nil || infoJ == nil {
+					return false
+				}
+				return infoI.ModTime().After(infoJ.ModTime())
+			})
+			// 删除超过保留数量的旧备份
+			deleted := 0
+			for i := req.KeepBackupCount; i < len(entries); i++ {
+				if !entries[i].IsDir() && strings.HasSuffix(entries[i].Name(), ".json") {
+					os.Remove(filepath.Join(backupDir, entries[i].Name()))
+					deleted++
+				}
+			}
+			results = append(results, fmt.Sprintf("已删除 %d 个旧备份, 保留最近 %d 个", deleted, req.KeepBackupCount))
+		}
+	}
+
+	// 最终磁盘状态
+	diskResult := execCommand("df", "-h")
+	results = append(results, "=== 清理后磁盘状态 ===")
+	results = append(results, diskResult.Output)
+
+	response.OK(c, gin.H{
+		"summary": results,
+		"output":  strings.Join(results, "\n"),
+	})
 }
 

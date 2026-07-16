@@ -70,19 +70,22 @@
               <el-button><el-icon><Upload /></el-icon>恢复备份</el-button>
             </el-upload>
           </div>
-          <el-table :data="backups" stripe style="margin-top: 16px">
+          <el-table :data="backups" stripe style="margin-top: 16px" v-loading="loadingBackups">
             <el-table-column prop="name" label="备份名称" min-width="220" />
-            <el-table-column prop="size" label="大小" width="120" />
-            <el-table-column label="创建时间" width="180">
-              <template #default="{ row }">{{ formatTime(row.createdAt) }}</template>
+            <el-table-column label="大小" width="120">
+              <template #default="{ row }">{{ row.size_human || row.size }}</template>
             </el-table-column>
-            <el-table-column label="操作" width="160">
+            <el-table-column label="创建时间" width="180">
+              <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="180">
               <template #default="{ row }">
                 <el-button size="small" link type="primary" @click="downloadBackup(row)">下载</el-button>
                 <el-button size="small" link type="danger" @click="deleteBackup(row)">删除</el-button>
               </template>
             </el-table-column>
           </el-table>
+          <el-empty v-if="!loadingBackups && !backups.length" description="暂无备份文件" />
         </div>
       </el-col>
     </el-row>
@@ -233,6 +236,67 @@
         </el-row>
       </el-tab-pane>
 
+      <!-- 系统维护 -->
+      <el-tab-pane label="系统维护" name="maintenance">
+        <el-row :gutter="20">
+          <el-col :xs="24" :md="12">
+            <div class="np-card section-card">
+              <div class="section-title"><el-icon><Connection /></el-icon> GitHub 同步</div>
+              <div class="git-status-box" v-loading="loadingGitStatus">
+                <div class="git-info">
+                  <span class="git-label">当前分支:</span>
+                  <el-tag size="small" type="success">{{ gitStatus.branch }}</el-tag>
+                </div>
+                <div class="git-info">
+                  <span class="git-label">最近提交:</span>
+                  <pre class="git-log">{{ gitStatus.recent5 || '加载中...' }}</pre>
+                </div>
+                <div class="git-info">
+                  <span class="git-label">变更文件:</span>
+                  <pre class="git-log" :class="{ 'has-changes': gitStatus.status }">{{ gitStatus.status || '无变更' }}</pre>
+                </div>
+              </div>
+              <div class="git-actions">
+                <el-button type="primary" @click="gitPull" :loading="pulling" :disabled="gitStatus.status">
+                  <el-icon><Download /></el-icon>拉取更新 (git pull)
+                </el-button>
+                <el-button type="success" @click="gitPushDialog = true" :disabled="!gitStatus.status">
+                  <el-icon><Upload /></el-icon>推送代码 (git push)
+                </el-button>
+                <el-button @click="loadGitStatus" :loading="loadingGitStatus">
+                  <el-icon><Refresh /></el-icon>刷新状态
+                </el-button>
+              </div>
+              <div v-if="pullResult" class="cmd-output">
+                <div class="output-title">更新结果:</div>
+                <pre>{{ pullResult }}</pre>
+              </div>
+            </div>
+          </el-col>
+
+          <el-col :xs="24" :md="12">
+            <div class="np-card section-card">
+              <div class="section-title"><el-icon><Monitor /></el-icon> 磁盘管理</div>
+              <div class="disk-output" v-loading="loadingDisk">
+                <pre>{{ diskUsage }}</pre>
+              </div>
+              <div class="disk-actions">
+                <el-button @click="loadDiskUsage" :loading="loadingDisk">
+                  <el-icon><Refresh /></el-icon>刷新
+                </el-button>
+                <el-button type="danger" @click="diskCleanup" :loading="cleaning">
+                  <el-icon><Delete /></el-icon>清理磁盘
+                </el-button>
+              </div>
+              <div v-if="cleanupResult" class="cmd-output">
+                <div class="output-title">清理结果:</div>
+                <pre>{{ cleanupResult }}</pre>
+              </div>
+            </div>
+          </el-col>
+        </el-row>
+      </el-tab-pane>
+
     </el-tabs>
 
     <!-- 修改密码对话框 -->
@@ -251,6 +315,21 @@
       <template #footer>
         <el-button @click="pwdDialog = false">取消</el-button>
         <el-button type="primary" @click="savePwd">确认</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- Git Push 对话框 -->
+    <el-dialog v-model="gitPushDialog" title="推送代码到 GitHub" width="480px">
+      <el-form>
+        <el-form-item label="提交信息">
+          <el-input v-model="gitPushMessage" type="textarea" :rows="3" placeholder="请输入本次提交的描述..." />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="gitPushDialog = false">取消</el-button>
+        <el-button type="success" @click="gitPush" :loading="pushing">
+          <el-icon><Upload /></el-icon>确认推送
+        </el-button>
       </template>
     </el-dialog>
   </div>
@@ -296,11 +375,8 @@ const subscribe = reactive({
   domain: 'sub.nexus.dev', port: 443, https: true, defaultFormat: 'clash',
 })
 
-const backups = ref([
-  { name: 'backup-20260706-020000.tar', size: '12.4 MB', createdAt: '2026-07-06 02:00:00' },
-  { name: 'backup-20260705-020000.tar', size: '11.8 MB', createdAt: '2026-07-05 02:00:00' },
-  { name: 'backup-20260704-020000.tar', size: '11.2 MB', createdAt: '2026-07-04 02:00:00' },
-])
+const backups = ref<any[]>([])
+const loadingBackups = ref(false)
 
 const rotateHmac = () => {
   ElMessageBox.confirm('轮换HMAC密钥将使所有现有订阅Token失效，确定继续吗？', '危险操作', {
@@ -405,14 +481,11 @@ const testPayment = async () => {
 const createBackup = async () => {
   backing.value = true
   try {
-    try { await request.post('/api/v1/admin/system/backup') } catch { /* */ }
-    const now = new Date()
-    const ts = now.toISOString().replace(/[-:T]/g, '').slice(0, 14)
-    backups.value.unshift({
-      name: `backup-${ts}.tar`, size: (10 + Math.random() * 5).toFixed(1) + ' MB',
-      createdAt: now.toISOString().replace('T', ' ').slice(0, 19),
-    })
+    await request.post('/api/v1/admin/system/backup')
     ElMessage.success('备份已创建')
+    loadBackups()
+  } catch {
+    ElMessage.error('备份创建失败')
   } finally { backing.value = false }
 }
 
@@ -426,14 +499,35 @@ const restoreBackup = (file: File) => {
 }
 
 const downloadBackup = (row: any) => {
-  ElMessage.success('开始下载：' + row.name)
+  window.open(`/api/v1/admin/system/backups/${encodeURIComponent(row.name)}/download`, '_blank')
 }
 
 const deleteBackup = (row: any) => {
-  ElMessageBox.confirm(`确定删除备份「${row.name}」吗？`, '提示', { type: 'warning' }).then(() => {
-    backups.value = backups.value.filter((b) => b.name !== row.name)
-    ElMessage.success('备份已删除')
+  ElMessageBox.confirm(`确定删除备份「${row.name}」吗？`, '提示', { type: 'warning' }).then(async () => {
+    try {
+      await request.delete(`/api/v1/admin/system/backups/${encodeURIComponent(row.name)}`)
+      backups.value = backups.value.filter((b) => b.name !== row.name)
+      ElMessage.success('备份已删除')
+    } catch {
+      ElMessage.error('删除失败')
+    }
   }).catch(() => {})
+}
+
+const loadBackups = async () => {
+  loadingBackups.value = true
+  try {
+    const res: any = await request.get('/api/v1/admin/system/backups')
+    if (res && res.data && Array.isArray(res.data.list)) {
+      backups.value = res.data.list
+    } else if (res && Array.isArray(res.data)) {
+      backups.value = res.data
+    } else if (Array.isArray(res)) {
+      backups.value = res
+    }
+  } catch { /* 忽略 */ } finally {
+    loadingBackups.value = false
+  }
 }
 
 // 修改密码
@@ -540,9 +634,115 @@ const savePwd = async () => {
   })
 }
 
+// ========== Git 同步 & 系统更新 ==========
+const loadingGitStatus = ref(false)
+const pulling = ref(false)
+const pushing = ref(false)
+const gitPushDialog = ref(false)
+const gitPushMessage = ref('')
+const pullResult = ref('')
+const gitStatus = reactive({
+  branch: '',
+  recent5: '',
+  status: '',
+})
+
+const loadGitStatus = async () => {
+  loadingGitStatus.value = true
+  try {
+    const res: any = await request.get('/api/v1/admin/system/git-status')
+    const d = res?.data || res
+    gitStatus.branch = d.branch || ''
+    gitStatus.recent5 = d.recent_5 || ''
+    gitStatus.status = d.status || ''
+  } catch { /* */ } finally {
+    loadingGitStatus.value = false
+  }
+}
+
+const gitPull = async () => {
+  ElMessageBox.confirm('将从 GitHub 拉取最新代码并覆盖本地修改，确定继续？', '确认更新', {
+    type: 'warning', confirmButtonText: '确认拉取', cancelButtonText: '取消',
+  }).then(async () => {
+    pulling.value = true
+    try {
+      const res: any = await request.post('/api/v1/admin/system/git-pull')
+      const d = res?.data || res
+      pullResult.value = d.fetch_output + '\n' + d.reset_output
+      ElMessage.success('代码已更新')
+      loadGitStatus()
+    } catch (e: any) {
+      pullResult.value = e?.response?.data?.msg || e?.message || '更新失败'
+      ElMessage.error(pullResult.value)
+    } finally { pulling.value = false }
+  }).catch(() => {})
+}
+
+const gitPush = async () => {
+  if (!gitPushMessage.value.trim()) {
+    ElMessage.warning('请填写提交信息')
+    return
+  }
+  pushing.value = true
+  try {
+    await request.post('/api/v1/admin/system/git-push', { message: gitPushMessage.value })
+    ElMessage.success('代码已推送到 GitHub')
+    gitPushDialog.value = false
+    gitPushMessage.value = ''
+    loadGitStatus()
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.msg || e?.message || '推送失败')
+  } finally { pushing.value = false }
+}
+
+// ========== 磁盘管理 ==========
+const loadingDisk = ref(false)
+const cleaning = ref(false)
+const diskUsage = ref('')
+const cleanupResult = ref('')
+
+const loadDiskUsage = async () => {
+  loadingDisk.value = true
+  try {
+    const res: any = await request.get('/api/v1/admin/system/disk-usage')
+    const d = res?.data || res
+    diskUsage.value = d.output || ''
+  } catch { /* */ } finally {
+    loadingDisk.value = false
+  }
+}
+
+const diskCleanup = async () => {
+  ElMessageBox.confirm('将清理 Docker 冗余数据、系统日志、临时文件和旧备份，确定继续？', '磁盘清理', {
+    type: 'warning', confirmButtonText: '确认清理', cancelButtonText: '取消',
+  }).then(async () => {
+    cleaning.value = true
+    try {
+      const res: any = await request.post('/api/v1/admin/system/disk-cleanup', {
+        clean_docker: true,
+        clean_logs: true,
+        clean_tmp: true,
+        clean_old_backups: true,
+        keep_backup_count: 5,
+      })
+      const d = res?.data || res
+      cleanupResult.value = d.output || ''
+      ElMessage.success('磁盘清理完成')
+      loadDiskUsage()
+      loadBackups()
+    } catch (e: any) {
+      cleanupResult.value = e?.response?.data?.msg || e?.message || '清理失败'
+      ElMessage.error(cleanupResult.value)
+    } finally { cleaning.value = false }
+  }).catch(() => {})
+}
+
 onMounted(() => {
   loadPaymentConfig()
   loadEmailConfig()
+  loadBackups()
+  loadGitStatus()
+  loadDiskUsage()
 })
 </script>
 
@@ -554,4 +754,18 @@ onMounted(() => {
 .pay-tips { margin: 0; padding-left: 18px; color: var(--np-text-secondary); font-size: 13px; line-height: 1.9; }
 .pay-tips li { margin-bottom: 4px; }
 .pay-status { display: flex; gap: 10px; flex-wrap: wrap; }
+
+/* 系统维护 */
+.git-status-box { background: var(--np-bg-soft); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+.git-info { margin-bottom: 8px; }
+.git-label { font-size: 12px; color: var(--np-text-muted); margin-right: 8px; }
+.git-log { margin: 4px 0 0; padding: 8px; background: var(--np-card); border-radius: 4px; font-size: 12px; color: var(--np-text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 120px; overflow-y: auto; }
+.git-log.has-changes { color: var(--np-warning); }
+.git-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.disk-actions { margin-top: 12px; display: flex; gap: 8px; }
+.disk-output { background: var(--np-bg-soft); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+.disk-output pre { margin: 0; font-size: 12px; color: var(--np-text-secondary); white-space: pre-wrap; max-height: 200px; overflow-y: auto; }
+.cmd-output { margin-top: 12px; background: var(--np-bg-soft); border-radius: 8px; padding: 12px; }
+.cmd-output .output-title { font-size: 13px; font-weight: 600; color: var(--np-text); margin-bottom: 6px; }
+.cmd-output pre { margin: 0; font-size: 12px; color: var(--np-text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }
 </style>
