@@ -193,6 +193,17 @@ html.dark {
   border-right: none !important;
 }
 
+/* ElMessageBox 垂直居中
+   Element Plus 的 MessageBox 默认偏上(遮罩 align-items: flex-start +
+   .el-message-box margin-top: 15vh)，与 el-dialog(默认居中)不一致，
+   导致确认框总显示在屏幕顶部。强制遮罩居中并清掉偏移，使其与 Dialog 位置统一。 */
+.el-overlay-message-box {
+  align-items: center !important;
+}
+.el-message-box {
+  margin-top: 0 !important;
+}
+
 /* ===== 全局移动端适配 (max-width: 768px) ===== */
 @media (max-width: 768px) {
   .el-dialog {
