@@ -886,8 +886,8 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		}
 		logWrite("二进制已更新")
 
-		logWrite(">>> 6/6 重启前端服务 docker compose restart frontend")
-		if !execCommandLog(gitRoot, "docker", "compose", "restart", "frontend") {
+		logWrite(">>> 6/6 重建前端容器 docker compose up -d frontend")
+		if !execCommandLog(gitRoot, "docker", "compose", "up", "-d", "frontend") {
 			logWrite("重启前端失败")
 			gitPullOK = false
 			gitPullDone = true
