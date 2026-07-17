@@ -1,6 +1,7 @@
 package service
 
 import (
+	"compress/gzip"
 	"context"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 
 	"nexus-panel/internal/app"
 	"nexus-panel/internal/config"
@@ -201,6 +203,67 @@ func (s *CronService) CleanOrphanData() {
 		s.logger.Error("clean old admin_actions failed", zap.Error(result.Error))
 	} else if result.RowsAffected > 0 {
 		s.logger.Info("cleaned old admin_actions", zap.Int64("count", result.RowsAffected))
+	}
+
+	// 修复 STORAGE-PARTITION-01 (P0): traffic_logs 是按月分区表, 旧版只 DELETE 30 天前数据,
+	// 但 DELETE 不会释放磁盘空间(留下死元组), 且分区本身永远不 DROP, 长期运行后:
+	//   1. 每月一个分区文件持续膨胀
+	//   2. VACUUM 也无法回收已 DROP 但未归档的空间
+	// 现改为: 直接 DROP 超过 2 个月的旧分区(整块释放磁盘), 保留当月+上月分区。
+	// 这比 DELETE 高效且彻底, 因为旧月份数据已无业务价值(趋势图最多展示 1 年,
+	// 但分区级 DROP 后, 趋势图查询旧月会返回空, 可接受)。
+	s.dropOldTrafficPartitions(db)
+}
+
+// dropOldTrafficPartitions DROP 超过 2 个月的 traffic_logs 旧分区
+// 保留当月与上月分区, 更早的分区整块 DROP 释放磁盘空间
+func (s *CronService) dropOldTrafficPartitions(db *gorm.DB) {
+	// 查询所有 traffic_logs 子分区名
+	type partInfo struct {
+		PartName string `gorm:"column:partname"`
+	}
+	var parts []partInfo
+	err := db.Raw(`
+		SELECT c.relname AS partname
+		FROM pg_inherits
+		JOIN pg_class parent ON parent.oid = pg_inherits.inhparent
+		JOIN pg_class c ON c.oid = pg_inherits.inhrelid
+		WHERE parent.relname = 'traffic_logs'
+	`).Scan(&parts).Error
+	if err != nil {
+		s.logger.Error("查询 traffic_logs 分区列表失败", zap.Error(err))
+		return
+	}
+	if len(parts) == 0 {
+		return
+	}
+
+	// 计算需要保留的分区名: 当月 + 上月(格式 traffic_logs_YYYY_MM)
+	now := time.Now()
+	keepMonths := map[string]bool{
+		"traffic_logs_" + now.Format("2006_01"):                   true, // 当月
+		"traffic_logs_" + now.AddDate(0, -1, 0).Format("2006_01"): true, // 上月
+	}
+
+	dropped := 0
+	for _, p := range parts {
+		if keepMonths[p.PartName] {
+			continue
+		}
+		// 仅 DROP 形如 traffic_logs_YYYY_MM 的分区(防误删)
+		if !strings.HasPrefix(p.PartName, "traffic_logs_20") {
+			continue
+		}
+		// DROP 分区(整块删除, 立即释放磁盘)
+		if err := db.Exec(fmt.Sprintf(`DROP TABLE IF EXISTS %q CASCADE`, p.PartName)).Error; err != nil {
+			s.logger.Warn("DROP 旧分区失败", zap.String("part", p.PartName), zap.Error(err))
+		} else {
+			dropped++
+			s.logger.Info("已 DROP 旧流量日志分区, 磁盘空间已释放", zap.String("part", p.PartName))
+		}
+	}
+	if dropped > 0 {
+		s.logger.Info("旧流量日志分区清理完成", zap.Int("dropped", dropped))
 	}
 }
 
@@ -502,30 +565,80 @@ func (s *CronService) AutoBackupDatabase() {
 	ts := time.Now().Format("20060102-150405")
 	outPath := filepath.Join(backupDir, "db-backup-"+ts+".sql.gz")
 
-	// 优先尝试 pg_dump(全量, 含所有表与数据)
+	// 优先尝试本机 pg_dump; 失败则降级用 docker exec 调用 postgres 容器内的 pg_dump
+	done := false
 	if _, err := exec.LookPath("pg_dump"); err == nil {
 		if err := runPgDump(cfg, outPath); err != nil {
-			s.logger.Error("pg_dump 备份失败", zap.Error(err))
-			_ = os.Remove(outPath) // 清理可能写了一半的损坏文件
+			s.logger.Error("pg_dump 备份失败, 尝试 docker exec 降级", zap.Error(err))
+			_ = os.Remove(outPath)
 		} else {
 			s.logger.Info("数据库自动备份完成(pg_dump)", zap.String("file", outPath))
+			done = true
 		}
-	} else {
-		// 容器内无 pg_dump: 降级告警, 不阻塞(管理员可手动配置 pg_dump 或用 JSON 快照)
-		s.logger.Warn("容器内未找到 pg_dump, 跳过数据库全量备份(建议在镜像中安装 postgresql-client)")
+	}
+	// 降级方案: 通过 docker exec 调用 postgres 容器内的 pg_dump
+	// 修复 STORAGE-BACKUP-04 (P0): panel 容器基于 alpine 未装 postgresql-client,
+	// 导致 AutoBackupDatabase 永远走"未找到 pg_dump"分支, 从不产生 .sql.gz 备份,
+	// 用户手动备份的 .json 快照又只含配置不含数据, 灾备形同虚设。
+	if !done {
+		if err := runPgDumpViaDocker(cfg, outPath); err != nil {
+			s.logger.Warn("docker exec pg_dump 备份失败(容器名 nexus-postgres 可能不匹配)",
+				zap.Error(err))
+			_ = os.Remove(outPath)
+		} else {
+			s.logger.Info("数据库自动备份完成(docker exec pg_dump)", zap.String("file", outPath))
+			done = true
+		}
+	}
+	if !done {
+		s.logger.Warn("数据库全量备份未能完成(本机无 pg_dump 且 docker exec 失败)")
 	}
 
 	// 无论 pg_dump 是否成功, 都执行备份轮转(清理旧文件, 保留最新 1 份)
 	s.RotateBackupsKeepOne()
 }
 
+// runPgDumpViaDocker 通过 docker exec 调用 postgres 容器内的 pg_dump
+// 用于 panel 容器内未安装 postgresql-client 的场景, 复用 postgres 镜像自带的 pg_dump
+// 修复 STORAGE-BACKUP-05 (P1): 用 gzip.Writer 包装输出, 真正产生 .gz 压缩文件
+func runPgDumpViaDocker(cfg *config.Config, outPath string) error {
+	f, err := os.Create(outPath)
+	if err != nil {
+		return fmt.Errorf("创建备份文件失败: %w", err)
+	}
+	defer f.Close()
+
+	gw := gzip.NewWriter(f)
+	defer gw.Close()
+
+	// docker exec nexus-postgres pg_dump -U <user> -d <db> --no-owner --no-privileges
+	// 注意: postgres 容器与 panel 容器在同一 docker network, localhost 即容器自身,
+	// pg_dump 在 postgres 容器内执行时用 -h 127.0.0.1 走本地 unix socket
+	args := []string{
+		"exec", "nexus-postgres",
+		"pg_dump",
+		"-U", cfg.DBUser,
+		"-d", cfg.DBName,
+		"-h", "127.0.0.1",
+		"--no-owner", "--no-privileges", // 跨环境恢复兼容
+	}
+	cmd := exec.Command("docker", args...)
+	cmd.Stdout = gw
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
 // runPgDump 执行 pg_dump 并压缩为 gzip
+// 修复 STORAGE-BACKUP-05 (P1): 旧版文件名 .sql.gz 但实际写裸 SQL 未压缩, 修复后用 gzip 真正压缩
 func runPgDump(cfg *config.Config, outPath string) error {
 	f, err := os.Create(outPath)
 	if err != nil {
 		return fmt.Errorf("创建备份文件失败: %w", err)
 	}
 	defer f.Close()
+
+	gw := gzip.NewWriter(f)
+	defer gw.Close()
 
 	// pg_dump 连接串: host=... port=... user=... dbname=... (密码通过 PGPASSWORD 环境变量传递, 避免进程参数泄露)
 	args := []string{
@@ -536,7 +649,7 @@ func runPgDump(cfg *config.Config, outPath string) error {
 		"--no-owner", "--no-privileges", // 跨环境恢复兼容
 	}
 	cmd := exec.Command("pg_dump", args...)
-	cmd.Stdout = f
+	cmd.Stdout = gw
 	cmd.Stderr = os.Stderr
 	cmd.Env = append(os.Environ(), "PGPASSWORD="+cfg.DBPass)
 	return cmd.Run()

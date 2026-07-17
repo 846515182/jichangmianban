@@ -945,6 +945,13 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 			return
 		}
 
+		// 修复 STORAGE-UPDATE-01 (P0): 每次在线更新都会 docker compose build,
+		// 累积大量悬空镜像层和构建缓存(单次更新可残留数百 MB-数 GB)。
+		// 更新完成后清理悬空镜像 + build cache, 防止多次更新后磁盘爆满。
+		logWrite(">>> 清理 Docker 构建残留(悬空镜像+构建缓存)")
+		_ = execCommandLog(gitRoot, "docker", "image", "prune", "-f")
+		_ = execCommandLog(gitRoot, "docker", "builder", "prune", "-f")
+
 		logWrite("在线更新完成！面板将在3秒后自动重启生效（页面会短暂不可用）")
 		gitPullOK = true
 		gitPullDone = true
@@ -1045,32 +1052,46 @@ func (h *AdminSystemHandler) DiskUsage(c *gin.Context) {
 }
 
 // DiskCleanup POST /api/v1/admin/system/disk-cleanup
-// 清理无用文件: Docker 镜像/容器/卷、系统日志、临时文件、旧备份
+// 清理无用文件: Docker 悬空镜像/容器、系统日志、临时文件、旧备份
+// 修复 STORAGE-CLEANUP-01/02/03 (P0):
+//   1. 旧版只清 .json 不清 .sql.gz, 导致数据库备份无限累积(真正的存储杀手)
+//   2. 旧版 docker system prune --volumes 会误删 pg-data/redis-data 等业务卷
+//   3. 旧版 keep_backup_count 默认 5 违反"自动备份仅保留最新一份"需求, 改为 1
+//   4. 新增 PostgreSQL VACUUM ANALYZE 回收死元组(traffic_logs 高频删除后膨胀)
+//   5. 新增 Docker build cache 清理(builder 缓存长期累积可达数 GB)
 func (h *AdminSystemHandler) DiskCleanup(c *gin.Context) {
 	var req struct {
-		CleanDocker      bool `json:"clean_docker"`
-		CleanLogs        bool `json:"clean_logs"`
-		CleanTmp         bool `json:"clean_tmp"`
-		CleanOldBackups  bool `json:"clean_old_backups"`
-		KeepBackupCount  int  `json:"keep_backup_count"` // 保留最近 N 个备份, 0=全部保留
+		CleanDocker     bool `json:"clean_docker"`
+		CleanLogs       bool `json:"clean_logs"`
+		CleanTmp        bool `json:"clean_tmp"`
+		CleanOldBackups bool `json:"clean_old_backups"`
+		KeepBackupCount int  `json:"keep_backup_count"` // 保留最近 N 个备份, 0=全部保留
+		VacuumDB        bool `json:"vacuum_db"`         // 清理 PostgreSQL 死元组
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		req.CleanDocker = true
 		req.CleanLogs = true
 		req.CleanTmp = true
 		req.CleanOldBackups = true
-		req.KeepBackupCount = 5
+		req.KeepBackupCount = 1 // 修复 STORAGE-CLEANUP-03: 默认只保留 1 份(用户需求)
+		req.VacuumDB = true
 	}
 
 	var results []string
 
-	// Docker 清理
+	// Docker 清理(修复 STORAGE-CLEANUP-02: 不用 --volumes 避免误删业务卷)
 	if req.CleanDocker {
-		results = append(results, "=== Docker 清理 ===")
-		out := execCommand("docker", "system", "prune", "-af", "--volumes")
-		results = append(results, out.Output)
+		results = append(results, "=== Docker 清理(悬空镜像+停止容器+构建缓存) ===")
+		// 1. 清理已停止的容器 + 悬空镜像(dangling), 不动正在使用的镜像和卷
+		out := execCommand("docker", "container", "prune", "-f")
+		results = append(results, "停止的容器: "+out.Output)
+		out = execCommand("docker", "image", "prune", "-f") // 仅 dangling 镜像
+		results = append(results, "悬空镜像: "+out.Output)
+		// 2. 清理 build cache(每次 docker build 都会累积, 是存储杀手)
+		out = execCommand("docker", "builder", "prune", "-f")
+		results = append(results, "构建缓存: "+out.Output)
 		if out.Error != "" {
-			results = append(results, "Error: "+out.Error)
+			results = append(results, "Docker 清理提示(容器内无 docker.sock 时正常): "+out.Error)
 		}
 	}
 
@@ -1095,29 +1116,22 @@ func (h *AdminSystemHandler) DiskCleanup(c *gin.Context) {
 		results = append(results, "清理 /tmp 旧文件: "+out.Output)
 	}
 
-	// 旧备份清理
+	// 旧备份清理(修复 STORAGE-CLEANUP-01: 同时清理 .json 和 .sql.gz)
 	if req.CleanOldBackups && req.KeepBackupCount > 0 {
 		results = append(results, "=== 旧备份清理 ===")
-		if err := ensureBackupDir(); err == nil {
-			entries, _ := os.ReadDir(backupDir)
-			// 按修改时间排序
-			sort.Slice(entries, func(i, j int) bool {
-				infoI, _ := entries[i].Info()
-				infoJ, _ := entries[j].Info()
-				if infoI == nil || infoJ == nil {
-					return false
-				}
-				return infoI.ModTime().After(infoJ.ModTime())
-			})
-			// 删除超过保留数量的旧备份
-			deleted := 0
-			for i := req.KeepBackupCount; i < len(entries); i++ {
-				if !entries[i].IsDir() && strings.HasSuffix(entries[i].Name(), ".json") {
-					os.Remove(filepath.Join(backupDir, entries[i].Name()))
-					deleted++
-				}
-			}
-			results = append(results, fmt.Sprintf("已删除 %d 个旧备份, 保留最近 %d 个", deleted, req.KeepBackupCount))
+		deleted := cleanupOldBackups(req.KeepBackupCount)
+		results = append(results, fmt.Sprintf("已删除 %d 个旧备份, 保留最近 %d 个", deleted, req.KeepBackupCount))
+	}
+
+	// PostgreSQL VACUUM(修复 STORAGE-CLEANUP-04: traffic_logs 高频 DELETE 后死元组膨胀)
+	if req.VacuumDB {
+		results = append(results, "=== PostgreSQL VACUUM ANALYZE ===")
+		out := execCommand("docker", "exec", "nexus-postgres", "psql", "-U",
+			os.Getenv("DB_USER"), "-d", os.Getenv("DB_NAME"),
+			"-c", "VACUUM ANALYZE;")
+		results = append(results, out.Output)
+		if out.Error != "" {
+			results = append(results, "VACUUM 提示: "+out.Error)
 		}
 	}
 
@@ -1130,5 +1144,57 @@ func (h *AdminSystemHandler) DiskCleanup(c *gin.Context) {
 		"summary": results,
 		"output":  strings.Join(results, "\n"),
 	})
+}
+
+// cleanupOldBackups 清理备份目录, 对每种类型(.json / .sql.gz)各保留最近 N 份
+// 修复 STORAGE-CLEANUP-01 (P0): 旧版只清 .json 不清 .sql.gz, 数据库备份无限累积
+func cleanupOldBackups(keep int) int {
+	if err := ensureBackupDir(); err != nil {
+		return 0
+	}
+	entries, err := os.ReadDir(backupDir)
+	if err != nil {
+		return 0
+	}
+	// 按后缀分组
+	type entryInfo struct {
+		name string
+		mod  time.Time
+	}
+	groups := map[string][]entryInfo{
+		".json":   {},
+		".sql.gz": {},
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		switch {
+		case strings.HasSuffix(name, ".sql.gz"):
+			groups[".sql.gz"] = append(groups[".sql.gz"], entryInfo{name, info.ModTime()})
+		case strings.HasSuffix(name, ".json"):
+			groups[".json"] = append(groups[".json"], entryInfo{name, info.ModTime()})
+		}
+	}
+	deleted := 0
+	for _, g := range groups {
+		if len(g) <= keep {
+			continue
+		}
+		// 按修改时间倒序(最新在前)
+		sort.Slice(g, func(i, j int) bool { return g[i].mod.After(g[j].mod) })
+		// 删除超出保留数量的旧文件
+		for _, e := range g[keep:] {
+			if err := os.Remove(filepath.Join(backupDir, e.name)); err == nil {
+				deleted++
+			}
+		}
+	}
+	return deleted
 }
 

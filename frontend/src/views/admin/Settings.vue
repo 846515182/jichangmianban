@@ -764,7 +764,7 @@ const loadDiskUsage = async () => {
 }
 
 const diskCleanup = async () => {
-  ElMessageBox.confirm('将清理 Docker 冗余数据、系统日志、临时文件和旧备份，确定继续？', '磁盘清理', {
+  ElMessageBox.confirm('将清理 Docker 冗余数据、系统日志、临时文件、旧备份并执行数据库 VACUUM，确定继续？', '磁盘清理', {
     type: 'warning', confirmButtonText: '确认清理', cancelButtonText: '取消',
   }).then(async () => {
     cleaning.value = true
@@ -774,7 +774,8 @@ const diskCleanup = async () => {
         clean_logs: true,
         clean_tmp: true,
         clean_old_backups: true,
-        keep_backup_count: 5,
+        keep_backup_count: 1, // 仅保留最新 1 份备份(满足存储控制需求)
+        vacuum_db: true,      // 清理 PostgreSQL 死元组(traffic_logs 高频 DELETE 后膨胀)
       })
       const d = res?.data || res
       cleanupResult.value = d.output || ''

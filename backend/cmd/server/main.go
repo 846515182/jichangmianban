@@ -190,7 +190,9 @@ func main() {
 	go func() {
 		tickerBackup := time.NewTicker(24 * time.Hour)
 		defer tickerBackup.Stop()
-		// 启动后先跑一次, 立即产生首份备份并清理历史残留
+		// 启动后先清理历史残留旧备份(立即释放存储, 不等 pg_dump)
+		cronSvc.RotateBackupsKeepOne()
+		// 再跑一次完整备份流程(含轮转)
 		cronSvc.AutoBackupDatabase()
 		for {
 			select {
