@@ -3,6 +3,15 @@ import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
 import router from '@/router'
 
+// 扩展 axios 配置, 支持 silent 自定义字段: true 时请求失败不弹全局错误弹窗。
+// 用于更新/重启面板期间的轮询请求(这些请求预期会因面板短暂不可用而失败,
+// 不应每次失败都弹 ElMessage.error 刷屏)。
+declare module 'axios' {
+  interface AxiosRequestConfig {
+    silent?: boolean
+  }
+}
+
 const service = axios.create({
   baseURL: '',
   timeout: 15000,
@@ -77,7 +86,7 @@ service.interceptors.response.use(
       }
     }
 
-    if (!isLoginReq) {
+    if (!isLoginReq && !(config as any)?.silent) {
       const msg =
         response?.data?.msg || response?.data?.message || error.message || '网络异常'
       ElMessage.error(msg)

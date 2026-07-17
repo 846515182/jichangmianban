@@ -278,7 +278,7 @@
                 <el-button type="warning" @click="systemRestart" :loading="restarting">
                   <el-icon><RefreshRight /></el-icon><span>重启面板</span>
                 </el-button>
-                <el-button type="info" @click="loadGitStatus" :loading="loadingGitStatus">
+                <el-button type="info" @click="() => loadGitStatus()" :loading="loadingGitStatus">
                   <el-icon><Refresh /></el-icon><span>刷新状态</span>
                 </el-button>
               </div>
@@ -707,7 +707,9 @@ const waitForPanelAndReload = () => {
   const check = setInterval(async () => {
     attempts++
     try {
-      const res: any = await request.get('/healthz', { timeout: 3000 })
+      // silent: 面板重启期间 /healthz 必然失败, 这是预期行为(用来判断面板
+      // 是否断开过), 不应弹错误弹窗。
+      const res: any = await request.get('/healthz', { timeout: 3000, silent: true })
       const newBootTime = res?.data?.boot_time || res?.boot_time
       // boot_time 变化 = 新进程已起来, 重启完成
       if (newBootTime && oldBootTime && newBootTime !== oldBootTime) {
@@ -755,10 +757,10 @@ const gitStatus = reactive({
   up_to_date: false,
 })
 
-const loadGitStatus = async () => {
+const loadGitStatus = async (silent = false) => {
   loadingGitStatus.value = true
   try {
-    const res: any = await request.get('/api/v1/admin/system/git-status')
+    const res: any = await request.get('/api/v1/admin/system/git-status', { silent })
     const d = res?.data || res
     gitStatus.branch = d.branch || ''
     gitStatus.recent5 = d.recent_5 || ''
@@ -772,6 +774,8 @@ const loadGitStatus = async () => {
     loadingGitStatus.value = false
   }
 }
+// 更新/重启期间静默刷新 git 状态(面板可能正在重启, 请求会失败, 不弹错误弹窗)
+const loadGitStatusSilent = () => loadGitStatus(true)
 
 const gitPull = async () => {
   ElMessageBox.confirm('将从 GitHub 拉取最新代码，编译后端、构建前端，然后重启面板。确定继续？', '一键在线更新', {
@@ -788,9 +792,12 @@ const gitPull = async () => {
       const res: any = await request.post('/api/v1/admin/system/git-pull')
       pullResult.value = (res?.data?.msg || '更新已开始') + '\n'
       // 轮询实时日志
+      // silent: 更新完成后面板会重启, 期间轮询请求必然失败,
+      // 拦截器默认会弹 ElMessage.error("网络异常"), 会导致浏览器上方
+      // 一直弹错误弹窗。这里用 silent 跳过弹窗, 只走 try-catch 静默忽略。
       const poll = async () => {
         try {
-          const logRes: any = await request.get('/api/v1/admin/system/git-pull-log')
+          const logRes: any = await request.get('/api/v1/admin/system/git-pull-log', { silent: true })
           const logData = logRes?.data || logRes
           if (logData.log) pullResult.value = logData.log
           if (logData.done) {
@@ -804,7 +811,9 @@ const gitPull = async () => {
             } else {
               ElMessage.error('更新过程中出现错误，请查看日志')
             }
-            loadGitStatus()
+            // silent: 更新完成后面板会重启, 此时调 git-status 大概率失败,
+            // 不弹错误弹窗(页面马上会因 waitForPanelAndReload 而刷新)
+            loadGitStatusSilent()
             if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
           }
         } catch { /* 忽略轮询错误 */ }
@@ -828,15 +837,18 @@ const systemRestart = async () => {
     restarting.value = true
     restartingPanel.value = true
     try {
-      await request.post('/api/v1/admin/system/restart')
+      // silent: restart 接口可能因面板立即重启(symlink.Exec)而断开连接,
+      // 这是预期行为不是错误, 不弹错误弹窗。
+      await request.post('/api/v1/admin/system/restart', {}, { silent: true })
       ElMessage.success('重启指令已下发，面板重启中...')
-      // 注意: 不在 finally 里清 restarting, 保持按钮 loading 直到面板恢复
-      // (面板恢复后 waitForPanelAndReload 会刷新页面, loading 自然消失)
-      waitForPanelAndReload()
     } catch {
-      restarting.value = false
-      restartingPanel.value = false
+      // 请求失败大概率是面板已经开始重启(连接被切断), 不是真正的错误。
+      // 不清状态, 继续走 waitForPanelAndReload 轮询面板恢复。
     }
+    // 无论 restart 请求成功还是失败(连接被切断), 都开始轮询面板恢复。
+    // 注意: 不在 finally 里清 restarting, 保持按钮 loading 直到面板恢复
+    // (面板恢复后 waitForPanelAndReload 会刷新页面, loading 自然消失)
+    waitForPanelAndReload()
   }).catch(() => {})
 }
 
@@ -887,7 +899,8 @@ const diskCleanup = async () => {
 const currentBootTime = ref<number | string>('')
 const loadBootTime = async () => {
   try {
-    const res: any = await request.get('/healthz', { timeout: 3000 })
+    // silent: 面板不可用时静默, 避免页面加载就弹错误弹窗
+    const res: any = await request.get('/healthz', { timeout: 3000, silent: true })
     currentBootTime.value = res?.data?.boot_time || res?.boot_time || ''
   } catch { /* 面板不可用时忽略 */ }
 }
