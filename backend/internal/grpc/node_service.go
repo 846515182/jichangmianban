@@ -289,8 +289,8 @@ func (s *NodeServiceServer) ReportStatus(ctx context.Context, req *nexuspb.Repor
 
 	rdb := app.Get().RDB
 	if rdb == nil {
-		// Redis 不可用时降级: 仅更新 last_seen_at
-		_ = s.nodeRepo.UpdateOnline(req.GetNodeId(), true, "", time.Now())
+		// Redis 不可用时降级: 仅刷新 last_seen_at(不覆盖 version)
+		_ = s.nodeRepo.TouchOnline(req.GetNodeId(), time.Now())
 		return &nexuspb.Response{Code: 0, Message: "ok(redis unavailable)"}, nil
 	}
 
@@ -310,8 +310,8 @@ func (s *NodeServiceServer) ReportStatus(ctx context.Context, req *nexuspb.Repor
 	}
 	_ = rdb.Expire(ctx, key, 5*time.Minute).Err()
 
-	// 顺便刷新 last_seen_at
-	_ = s.nodeRepo.UpdateOnline(req.GetNodeId(), true, "", now)
+	// 顺便刷新 last_seen_at(不覆盖 version)
+	_ = s.nodeRepo.TouchOnline(req.GetNodeId(), now)
 
 	return &nexuspb.Response{Code: 0, Message: "ok"}, nil
 }

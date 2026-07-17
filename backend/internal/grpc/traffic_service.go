@@ -194,6 +194,14 @@ func (s *TrafficServiceServer) ReportRealtime(ctx context.Context, req *nexuspb.
 		return nil, status.Error(codes.Internal, "流量上报失败")
 	}
 
+	// 流量上报成功 = agent 存活且 Xray 在跑，刷新 last_seen_at 防止
+	// 心跳瞬时失败时被 MarkStaleNodesOffline 误判离线(面板显示离线但节点可用)。
+	// 用 TouchOnline 而非 UpdateOnline，避免覆盖已记录的 agent version。
+	if err := s.nodeRepo.TouchOnline(req.GetNodeId(), time.Now()); err != nil {
+		s.logger.Warn("流量上报后刷新节点在线状态失败",
+			zap.String("node_id", req.GetNodeId()), zap.Error(err))
+	}
+
 	return &nexuspb.ReportRealtimeResponse{
 		Resp:     &nexuspb.Response{Code: 0, Message: "ok"},
 		Accepted: accepted,
