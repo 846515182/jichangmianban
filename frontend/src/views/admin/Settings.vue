@@ -700,21 +700,38 @@ const pullSteps = computed(() => {
 })
 
 // 轮询面板健康, 恢复后自动刷新页面(用于更新/重启后面板短暂不可用的场景)
+// 关键: 必须先等面板"断开"(确认重启已真正开始), 再等面板"恢复"。
+// 否则接口刚返回时面板还活着, 立即轮询会误判为"已恢复", 刷新后页面反而打不开。
 const waitForPanelAndReload = () => {
+  // 第一阶段: 等面板断开(请求失败 = 重启已开始), 最多等 15 秒
+  let phase = 'disconnect'
   let attempts = 0
   const check = setInterval(async () => {
     attempts++
     try {
       await request.get('/api/v1/admin/system/git-status', { timeout: 3000 })
+      if (phase === 'disconnect') {
+        // 面板还活着, 还没开始重启, 继续等
+        return
+      }
+      // phase === 'reconnect': 面板已恢复
       clearInterval(check)
       ElMessage.success('面板已恢复，正在刷新页面...')
       setTimeout(() => location.reload(), 800)
     } catch {
-      // 面板还没起来, 继续
+      // 请求失败 = 面板已断开(正在重启), 切换到等待恢复阶段
+      if (phase === 'disconnect') {
+        phase = 'reconnect'
+        attempts = 0
+        ElMessage.info('面板正在重启，等待恢复中...')
+      }
     }
-    if (attempts > 30) {
+    // 总超时: disconnect 阶段 15 秒 + reconnect 阶段 60 秒
+    if ((phase === 'disconnect' && attempts > 7) || (phase === 'reconnect' && attempts > 30)) {
       clearInterval(check)
       ElMessage.warning('面板恢复超时，请手动刷新页面')
+      restartingPanel.value = false
+      restarting.value = false
     }
   }, 2000)
 }
@@ -790,13 +807,16 @@ const systemRestart = async () => {
     type: 'warning', confirmButtonText: '确认重启', cancelButtonText: '取消',
   }).then(async () => {
     restarting.value = true
+    restartingPanel.value = true
     try {
       await request.post('/api/v1/admin/system/restart')
       ElMessage.success('重启指令已下发，面板正在重启，预计 10-30 秒后自动恢复...')
-      restartingPanel.value = true
+      // 注意: 不在 finally 里清 restarting, 保持按钮 loading 直到面板恢复
+      // (面板恢复后 waitForPanelAndReload 会刷新页面, loading 自然消失)
       waitForPanelAndReload()
-    } catch { /* 拦截器已提示 */ } finally {
+    } catch {
       restarting.value = false
+      restartingPanel.value = false
     }
   }).catch(() => {})
 }
