@@ -768,10 +768,15 @@ func logWrite(format string, args ...interface{}) {
 	gitPullLog.WriteString("\n")
 }
 
-// execCommandLog 执行命令并将输出同时写入日志（600s 超时）
+// execCommandLog 执行命令并将输出同时写入日志（默认 600s 超时）
 func execCommandLog(dir, name string, args ...string) bool {
+	return execCommandLogTimeout(dir, name, 600, args...)
+}
+
+// execCommandLogTimeout 执行命令并将输出同时写入日志（指定超时秒数）
+func execCommandLogTimeout(dir, name string, timeoutSec int, args ...string) bool {
 	logWrite("$ %s %s", name, strings.Join(args, " "))
-	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
@@ -847,7 +852,7 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 
 		logWrite(">>> 4/6 构建镜像 docker compose build panel frontend")
 		logWrite("（首次构建约3-5分钟，后续有缓存会快很多）")
-		if !execCommandLog(gitRoot, "docker", "compose", "build", "panel", "frontend") {
+		if !execCommandLogTimeout(gitRoot, "docker", 1800, "compose", "build", "panel", "frontend") {
 			logWrite("镜像构建失败，请查看上方日志")
 			gitPullOK = false
 			gitPullDone = true
