@@ -7,7 +7,9 @@ import (
 	"encoding/pem"
 	"fmt"
 	"log"
+	"net"
 	"os"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -54,8 +56,15 @@ func NewPanelClient(addr string) (*PanelClient, error) {
 		creds = credentials.NewTLS(tlsCfg)
 		log.Printf("gRPC TLS 模式已启用(CA: %s)", tlsCert)
 	} else {
-		creds = insecure.NewCredentials()
-		log.Printf("[WARN] gRPC 明文模式(未配置 GRPC_TLS_CA) — 生产环境建议启用 TLS")
+		// 修复 NODE-TLS-03 (P0): 未配置 GRPC_TLS_CA 时的兜底。
+		// 旧版直接用 insecure 明文连, 但面板若启用 TLS(如 Let's Encrypt 公网证书),
+		// agent 发明文会被面板 TLS 端直接 EOF, 表现为
+		// "error reading server preface: EOF", 所有 gRPC 调用永久失败, 节点显示离线
+		// (但 Xray 仍在跑, 用户能用)。这正是本次节点离线的根因。
+		// 兜底: 先 TCP 探测面板端口是否是 TLS 服务端, 若是则自动用系统 CA 池
+		// (Alpine 镜像已装 ca-certificates, /etc/ssl/certs/ca-certificates.crt 含
+		// ISRG Root X1, 可信 Let's Encrypt 等公信 CA); 否则保持明文。
+		creds = autoDetectCredentials(addr)
 	}
 
 	conn, err := grpc.NewClient(addr,
@@ -147,6 +156,86 @@ func verifyCACertValidity(pool *x509.CertPool) error {
 		return fmt.Errorf("PEM 文件中未找到有效证书")
 	}
 	return nil
+}
+
+// autoDetectCredentials 未配置 GRPC_TLS_CA 时的兜底: 探测面板 gRPC 端口是否是 TLS 服务端。
+// 修复 NODE-TLS-03 (P0): 旧版未配置 GRPC_TLS_CA 时直接用 insecure 明文, 但面板若启用
+// TLS(如 Let's Encrypt 公网证书), agent 发明文会被面板 TLS 端直接 EOF, 表现为
+// "error reading server preface: EOF", 所有 gRPC 调用永久失败, 节点显示离线
+// (但 Xray 仍在跑, 用户能用)。这正是本次节点离线的根因。
+//
+// 兜底策略: 向面板端口发一个 TLS ClientHello, 若对面回复 TLS ServerHello(握手数据)
+// 则判定为 TLS 服务端, 自动用系统 CA 池(/etc/ssl/certs/ca-certificates.crt, Alpine
+// 镜像已装 ca-certificates, 含 ISRG Root X1 等公信根 CA, 可信 Let's Encrypt);
+// 若对面无 TLS 响应(明文 gRPC 直接回 HTTP/2 preface)则保持明文模式。
+// 这样无论面板是否启用 TLS, agent 都能正确连接, 不再因配置不匹配永久掉线。
+func autoDetectCredentials(addr string) credentials.TransportCredentials {
+	// addr 形如 "host:port", 拆出 host 和 port
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		// 解析失败, 退回明文(保持旧行为, 不阻断启动)
+		log.Printf("[WARN] gRPC 明文模式(未配置 GRPC_TLS_CA 且地址解析失败 %q): %v — 若面板启用 TLS 将连接失败", addr, err)
+		return insecure.NewCredentials()
+	}
+	tlsDetected := probeTLSServer(host, port)
+	if !tlsDetected {
+		log.Printf("[WARN] gRPC 明文模式(未配置 GRPC_TLS_CA, 探测面板端口非 TLS) — 生产环境建议启用 TLS")
+		return insecure.NewCredentials()
+	}
+	// 面板是 TLS 服务端, 自动用系统 CA 池(公信 CA 如 Let's Encrypt 可直接信任)
+	// 若面板用自签证书, 系统池不信任会握手失败, 此时仍需显式配置 GRPC_TLS_CA
+	systemPool, err := x509.SystemCertPool()
+	if err != nil || systemPool == nil {
+		// 系统 CA 池不可用(极端情况), 退回明文并告警, 不阻断启动
+		log.Printf("[WARN] gRPC 面板为 TLS 但系统 CA 池不可用(%v), 退回明文 — 自签证书请显式配置 GRPC_TLS_CA", err)
+		return insecure.NewCredentials()
+	}
+	log.Printf("[INFO] gRPC 自动 TLS 模式(未配置 GRPC_TLS_CA, 探测面板为 TLS, 使用系统 CA 池)")
+	return credentials.NewTLS(&tls.Config{
+		RootCAs:            systemPool,
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: false,
+		// ServerName 设为 host, 让 TLS 校验证书 SAN/CN(公信 CA 签发的证书需域名匹配)
+		// 若面板用 IP 直连且证书 SAN 无 IP, 校验会失败 — 此时仍需 GRPC_TLS_CA 显式配置
+		ServerName: host,
+	})
+}
+
+// probeTLSServer 向 host:port 发起 TLS ClientHello, 判断对面是否是 TLS 服务端。
+// 返回 true 表示对面回复了 TLS 握手数据(是 TLS 服务端), false 表示明文或不可达。
+func probeTLSServer(host, port string) bool {
+	dialer := &net.Dialer{Timeout: 3 * time.Second}
+	conn, err := dialer.Dial("tcp", net.JoinHostPort(host, port))
+	if err != nil {
+		// 端口不可达, 无法探测, 保守返回 false(用明文, 让 gRPC 重连机制处理)
+		log.Printf("[WARN] TLS 探测: 连接 %s:%s 失败(%v), 假定明文", host, port, err)
+		return false
+	}
+	defer conn.Close()
+	// 设 3s 读写超时, 避免阻塞
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	// 发 TLS 1.2 ClientHello(最小化, 不做完整握手)
+	tlsConn := tls.Client(conn, &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: true, // 探测阶段不校验, 只看是否是 TLS 协议
+		ServerName:         host,
+	})
+	// 尝试握手: 若对面是 TLS 服务端会完成握手(或返回 TLS alert); 若是明文 gRPC,
+	// 对面会回 HTTP/2 preface 或直接关闭, tls.Handshake 会报 "first record not TLS handshake"
+	if err := tlsConn.Handshake(); err == nil {
+		return true // 握手成功, 确定是 TLS
+	}
+	// 握手失败, 但错误类型能区分: TLS alert(对面是 TLS 但证书有问题) vs 非 TLS
+	errStr := err.Error()
+	if strings.Contains(errStr, "tls:") || strings.Contains(errStr, "handshake") ||
+		strings.Contains(errStr, "certificate") || strings.Contains(errStr, "alert") {
+		// TLS 协议层错误(如证书校验失败/alert), 说明对面确实是 TLS 服务端
+		log.Printf("[INFO] TLS 探测: %s:%s 是 TLS 服务端(握手报错: %v), 将用系统 CA 池", host, port, err)
+		return true
+	}
+	// "first record not TLS handshake" / EOF / connection reset 等 → 明文服务端
+	log.Printf("[INFO] TLS 探测: %s:%s 非 TLS(%v), 用明文", host, port, err)
+	return false
 }
 
 func (c *PanelClient) Close() error {
