@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -853,17 +854,49 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 			return
 		}
 
-		logWrite(">>> 5/6 重启服务 docker compose up -d panel frontend")
-		if !execCommandLog(gitRoot, "docker", "compose", "up", "-d", "panel", "frontend") {
-			logWrite("重启失败")
+		logWrite(">>> 5/6 复制新二进制到当前容器")
+		newImage := "nexus-panel:latest"
+		// 从新镜像中提取二进制
+		extractCmd := exec.Command("docker", "run", "--rm", "--entrypoint", "sh", newImage, "-c", "cat /app/nexus-panel")
+		newBinary, err := extractCmd.Output()
+		if err != nil {
+			logWrite("提取二进制失败: %v", err)
+			gitPullOK = false
+			gitPullDone = true
+			return
+		}
+		// 写入临时路径，然后 mv 替换（防止写一半被读取）
+		tmpPath := "/app/nexus-panel.new"
+		if err := os.WriteFile(tmpPath, newBinary, 0755); err != nil {
+			logWrite("写入新二进制失败: %v", err)
+			gitPullOK = false
+			gitPullDone = true
+			return
+		}
+		if err := os.Rename(tmpPath, "/app/nexus-panel"); err != nil {
+			logWrite("替换二进制失败: %v", err)
+			gitPullOK = false
+			gitPullDone = true
+			return
+		}
+		logWrite("二进制已更新")
+
+		logWrite(">>> 6/6 重启前端服务 docker compose restart frontend")
+		if !execCommandLog(gitRoot, "docker", "compose", "restart", "frontend") {
+			logWrite("重启前端失败")
 			gitPullOK = false
 			gitPullDone = true
 			return
 		}
 
-		logWrite(">>> 6/6 在线更新完成！")
+		logWrite("在线更新完成！面板将在3秒后自动重启生效（页面会短暂不可用）")
 		gitPullOK = true
 		gitPullDone = true
+
+		// 延迟重启面板自身（sleep 后 exec 替换当前进程）
+		time.Sleep(3 * time.Second)
+		logWrite("正在重启面板...")
+		syscall.Exec("/app/nexus-panel", os.Args, os.Environ())
 	}()
 
 	response.OK(c, gin.H{"success": true, "msg": "更新已开始，请在日志面板查看实时进度"})
