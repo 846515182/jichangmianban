@@ -442,6 +442,8 @@ NODE_TOKEN=${token}
 LISTEN_PORT=${port}
 HEALTH_PORT=50052
 XRAY_VERSION=v1.8.23
+# 面板启用 gRPC TLS 时取消下行注释(公信 CA 如 Let's Encrypt 用系统证书即可)
+#GRPC_TLS_CA=/etc/ssl/certs/ca-certificates.crt
 EOF`,
         },
       ],

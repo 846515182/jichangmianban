@@ -31,6 +31,11 @@ services:
       HEALTH_PORT: ${HEALTH_PORT:-50052}
       # Xray-core 版本
       XRAY_VERSION: ${XRAY_VERSION:-v26.6.1}
+      # 面板启用 gRPC TLS 时传入 CA 证书路径
+      # - 公信 CA(Let's Encrypt): /etc/ssl/certs/ca-certificates.crt(镜像自带)
+      # - 自签 CA: /app/grpc-ca.crt(由 docker-compose volumes 挂载)
+      # 未设则 agent 自动探测面板端口是否 TLS(见 client.go autoDetectCredentials)
+      GRPC_TLS_CA: ${GRPC_TLS_CA:-}
     ports:
       # 代理端口(对外提供 VLESS+REALITY 服务，每节点不同)
       - "${LISTEN_PORT:-443}:${LISTEN_PORT:-443}"
@@ -47,6 +52,9 @@ services:
       # Xray 二进制和配置缓存(避免每次重启重新下载)，每节点独立目录
       # 用绑定挂载(相对路径)，避免 docker compose 顶层 volumes 不支持变量插值的问题
       - ./xray-cache:/app/xray
+      # 自签 gRPC CA 证书(面板启用 TLS 且用自签 CA 时, 自动部署会推送此文件)
+      # 文件不存在时 docker compose 会自动创建空目录, 不影响公信 CA 场景
+      - ./grpc-ca.crt:/app/grpc-ca.crt:ro
     healthcheck:
       # /healthz 返回 200 表示 REALITY 自连成功，503 表示失败
       # 容器内部访问 50052，不需要映射到宿主机

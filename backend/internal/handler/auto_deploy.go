@@ -399,6 +399,31 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	// 3.4 创建 .env.node
 	envContent := fmt.Sprintf("CONTAINER_NAME=%s\nPANEL_GRPC_ADDR=%s:%s\nNODE_TOKEN=%s\nLISTEN_PORT=%d\nHEALTH_PORT=%d\nXRAY_VERSION=v26.6.1",
 		containerName, panelIP, grpcPortStr, node.NodeToken, listenPort, healthPort)
+	// 修复 NODE-TLS-03 (P0): 面板启用 gRPC TLS 时, 主动给 agent 设置 GRPC_TLS_CA,
+	// 避免 agent 用明文连 TLS 端口导致 "error reading server preface: EOF" 节点永久离线。
+	// - 公信 CA(Let's Encrypt 等): agent 镜像内自带系统 CA bundle, 直接指向即可
+	// - 自签 CA: 把面板的 CA 证书推送到节点, 挂载进容器
+	if app.Get().Cfg.GRPCTLSEnabled() {
+		if caPath := app.Get().Cfg.GRPCTLSCA; caPath != "" {
+			// 自签 CA: 读取面板 CA 证书内容, 推送到节点
+			caContent, err := os.ReadFile(caPath)
+			if err != nil {
+				sse.eventWithCode(PhasePrepare, "error", "读取面板 gRPC CA 证书失败: "+err.Error(), "", DeployErrUnknown)
+				return false, DeployErrUnknown, "读取 CA 证书失败: " + err.Error()
+			}
+			if err := sshWriteFile(client, deployDir+"/grpc-ca.crt", string(caContent)); err != nil {
+				sse.eventWithCode(PhasePrepare, "error", "推送 gRPC CA 证书失败: "+err.Error(), "", DeployErrTransfer)
+				return false, DeployErrTransfer, "推送 CA 证书失败: " + err.Error()
+			}
+			// 容器内路径(docker-compose 挂载 ./grpc-ca.crt -> /app/grpc-ca.crt)
+			envContent += "\nGRPC_TLS_CA=/app/grpc-ca.crt"
+			sse.event(PhasePrepare, "running", "面板 gRPC TLS 已启用(自签 CA), CA 证书已推送到节点", "")
+		} else {
+			// 公信 CA(Let's Encrypt): agent 镜像内自带系统 CA bundle
+			envContent += "\nGRPC_TLS_CA=/etc/ssl/certs/ca-certificates.crt"
+			sse.event(PhasePrepare, "running", "面板 gRPC TLS 已启用(公信 CA), agent 将用系统 CA 池验证", "")
+		}
+	}
 	if err := sshWriteFile(client, deployDir+"/.env.node", envContent); err != nil {
 		sse.eventWithCode(PhasePrepare, "error", "写配置文件失败: "+err.Error(), "", DeployErrUnknown)
 		return false, DeployErrUnknown, "写配置失败: " + err.Error()

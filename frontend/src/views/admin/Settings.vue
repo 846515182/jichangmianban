@@ -270,11 +270,27 @@
                   <el-icon><Refresh /></el-icon>刷新状态
                 </el-button>
               </div>
-              <div v-if="pullResult" class="cmd-output">
-                <div class="output-title" :class="pullDone ? (pullSuccess ? 'text-success' : 'text-danger') : 'text-pending'">
-                  {{ pullDone ? (pullSuccess ? '更新成功' : '更新失败') : '更新中...' }}:
+              <div v-if="pullResult" class="update-progress">
+                <div class="progress-header" :class="pullDone ? (pullSuccess ? 'is-success' : 'is-error') : 'is-pending'">
+                  <span class="status-dot" :class="{ spinning: !pullDone }"></span>
+                  <span class="header-text">{{ pullDone ? (pullSuccess ? '更新成功' : '更新失败') : '更新中...' }}</span>
+                  <span v-if="restartingPanel" class="restart-hint">面板正在重启，预计 15-30 秒后自动恢复...</span>
                 </div>
-                <pre>{{ pullResult }}</pre>
+                <div class="step-list">
+                  <div v-for="(step, idx) in pullSteps" :key="idx" class="step-item" :class="step.status">
+                    <div class="step-head">
+                      <span class="step-dot" :class="step.status"></span>
+                      <span class="step-title">{{ step.title }}</span>
+                    </div>
+                    <div v-if="step.detail && (step.status === 'running' || step.status === 'error')" class="step-detail">
+                      <pre>{{ step.detail }}</pre>
+                    </div>
+                  </div>
+                </div>
+                <details v-if="pullResult" class="raw-log">
+                  <summary>查看完整日志</summary>
+                  <pre>{{ pullResult }}</pre>
+                </details>
               </div>
             </div>
           </el-col>
@@ -341,7 +357,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, computed } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import request from '@/utils/request'
 import { formatTime } from '@/utils/format'
@@ -649,7 +665,59 @@ const gitPushMessage = ref('')
 const pullResult = ref('')
 const pullSuccess = ref(false)
 const pullDone = ref(false)
+const restartingPanel = ref(false)
 let pollTimer: any = null
+
+// 解析更新日志的 >>> N/M 步骤标记, 按步骤一条条展示
+const pullSteps = computed(() => {
+  if (!pullResult.value) return []
+  const lines = pullResult.value.split('\n')
+  const steps: Array<{ title: string; detail: string; status: string }> = []
+  let current: { title: string; detail: string; status: string } | null = null
+  for (const line of lines) {
+    const m1 = line.match(/^>>>\s*\d+\/\d+\s+(.+)/)
+    const m2 = line.match(/^>>>\s+(.+)/)
+    if (m1 || m2) {
+      const title = m1 ? m1[1] : (m2 as RegExpMatchArray)[1]
+      if (current) steps.push(current)
+      current = { title, detail: '', status: 'pending' }
+    } else if (current) {
+      if (line.trim()) current.detail += line + '\n'
+    }
+  }
+  if (current) steps.push(current)
+  // 最后一步之前的都已完成, 最后一步根据 pullDone 判断
+  for (let i = 0; i < steps.length; i++) {
+    if (i < steps.length - 1) {
+      steps[i].status = 'done'
+    } else if (pullDone.value) {
+      steps[i].status = pullSuccess.value ? 'done' : 'error'
+    } else {
+      steps[i].status = 'running'
+    }
+  }
+  return steps
+})
+
+// 轮询面板健康, 恢复后自动刷新页面(用于更新/重启后面板短暂不可用的场景)
+const waitForPanelAndReload = () => {
+  let attempts = 0
+  const check = setInterval(async () => {
+    attempts++
+    try {
+      await request.get('/api/v1/admin/system/git-status', { timeout: 3000 })
+      clearInterval(check)
+      ElMessage.success('面板已恢复，正在刷新页面...')
+      setTimeout(() => location.reload(), 800)
+    } catch {
+      // 面板还没起来, 继续
+    }
+    if (attempts > 30) {
+      clearInterval(check)
+      ElMessage.warning('面板恢复超时，请手动刷新页面')
+    }
+  }, 2000)
+}
 const gitStatus = reactive({
   branch: '',
   recent5: '',
@@ -694,9 +762,11 @@ const gitPull = async () => {
             pullDone.value = true
             pullSuccess.value = logData.success !== false
             if (pullSuccess.value) {
-              ElMessage.success('在线更新完成')
+              ElMessage.success('更新完成，面板正在重启，预计 15-30 秒后自动恢复...')
+              restartingPanel.value = true
+              waitForPanelAndReload()
             } else {
-              ElMessage.error('更新过程中出现错误')
+              ElMessage.error('更新过程中出现错误，请查看日志')
             }
             loadGitStatus()
             if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
@@ -722,7 +792,9 @@ const systemRestart = async () => {
     restarting.value = true
     try {
       await request.post('/api/v1/admin/system/restart')
-      ElMessage.success('重启指令已下发，面板即将恢复...')
+      ElMessage.success('重启指令已下发，面板正在重启，预计 10-30 秒后自动恢复...')
+      restartingPanel.value = true
+      waitForPanelAndReload()
     } catch { /* 拦截器已提示 */ } finally {
       restarting.value = false
     }
@@ -829,4 +901,35 @@ onUnmounted(() => {
 .cmd-output .output-title.text-danger { color: #f56c6c; }
 .cmd-output .output-title.text-pending { color: var(--np-text-muted); }
 .cmd-output pre { margin: 0; font-size: 12px; color: var(--np-text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }
+
+/* 更新进度步骤列表 */
+.update-progress { margin-top: 12px; background: var(--np-bg-soft); border-radius: 8px; padding: 12px; }
+.progress-header { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; margin-bottom: 12px; }
+.progress-header.is-success { color: #67c23a; }
+.progress-header.is-error { color: #f56c6c; }
+.progress-header.is-pending { color: var(--np-text-muted); }
+.status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.is-pending .status-dot { background: var(--np-text-muted); opacity: 0.4; }
+.is-success .status-dot { background: #67c23a; }
+.is-error .status-dot { background: #f56c6c; }
+.status-dot.spinning { background: #409eff; animation: np-spin 1s linear infinite; }
+@keyframes np-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.restart-hint { font-size: 12px; color: var(--np-text-muted); font-weight: normal; }
+.step-list { display: flex; flex-direction: column; gap: 6px; }
+.step-item { padding: 2px 0; }
+.step-head { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.step-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.step-dot.pending { background: var(--np-text-muted); opacity: 0.4; }
+.step-dot.done { background: #67c23a; }
+.step-dot.error { background: #f56c6c; }
+.step-dot.running { background: #409eff; animation: np-spin 1s linear infinite; }
+.step-title { color: var(--np-text); }
+.step-item.done .step-title { color: var(--np-text-secondary); }
+.step-item.running .step-title { color: #409eff; font-weight: 500; }
+.step-item.error .step-title { color: #f56c6c; }
+.step-detail { margin: 4px 0 4px 16px; }
+.step-detail pre { margin: 0; font-size: 12px; color: var(--np-text-muted); white-space: pre-wrap; word-break: break-all; max-height: 120px; overflow-y: auto; background: var(--np-card); padding: 6px 8px; border-radius: 4px; }
+.raw-log { margin-top: 12px; }
+.raw-log summary { cursor: pointer; font-size: 12px; color: var(--np-text-muted); }
+.raw-log pre { margin: 8px 0 0; font-size: 12px; color: var(--np-text-muted); white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }
 </style>
