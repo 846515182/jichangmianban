@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -628,42 +629,90 @@ func readCPUUsage() float64 {
 	return usage
 }
 
-// readOnlineConnections 读取 Xray 当前活跃连接数(用 ss 统计 listen 端口上的 ESTABLISHED 连接)
+// readOnlineConnections 读取 Xray 当前活跃连接数
+//
+// 主路径: ss 命令统计 ESTABLISHED 连接(需容器装 iproute2)
+// 兜底:   ss 失败时(如容器未装 iproute2/命令不存在/语法问题)读 /proc/net/tcp[6],
+//         不依赖任何外部命令, 纯 Go 读文件。这样即使节点未重新部署(旧镜像没装 iproute2),
+//         连接数也能正常统计, 不至于恒为 0。
 //
 // 修复 NODE-DATA-01 (P0): 原 doHeartbeat 硬编码 onlineConns=0, 面板连接数永远显示 0。
-// 之前尝试用 ss 修复但有两个 bug:
-//   1. Dockerfile 没装 iproute2, 容器内根本没有 ss 命令 → exec 必然失败
-//   2. ss 过滤语法错误: "ss -ant '( dport = :N or sport = :N )'" 是非法 filter,
-//      ss 要求 filter 以 state/src/dst 等关键字开头, 且必须用单引号包裹。
-//      正确写法: ss -H -ant state established '( sport = :N or dport = :N )'
-//   3. 失败后静默 return 0, 运维无法感知采集失败。
-// 本次修复: 装 iproute2 + 修正语法 + 失败时限频打日志。
+// 之前尝试用 ss 修复但 ss 不存在导致恒 0; 现加 /proc/net/tcp 兜底确保至少有值。
 func (a *Agent) readOnlineConnections() int32 {
 	port := a.effectivePort
 	if port == 0 {
 		return 0
 	}
+	// 主路径: ss 命令
 	// -H 去表头; state established 只看已建立连接;
 	// filter 用 sport/dport 匹配本节点 listen 端口(进/出方向都算)。
-	// Go 的 exec.Command 不走 shell, 参数分开传, 单引号是 shell 语法不需要写进参数。
 	out, err := execCommand("ss", "-H", "-ant", "state", "established",
 		fmt.Sprintf("( sport = :%d or dport = :%d )", port, port))
-	if err != nil {
-		// 限频日志: 同一错误每 10 分钟最多打一次, 避免每 30s 心跳刷屏
-		if shouldLogConnErr() {
-			log.Printf("[conn][WARN] ss 命令执行失败, 连接数返回 0: %v (请检查容器是否安装 iproute2)", err)
+	if err == nil {
+		var count int32
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.TrimSpace(line) != "" {
+				count++
+			}
 		}
+		return count
+	}
+	// 兜底: ss 失败, 读 /proc/net/tcp[6] 统计
+	if shouldLogConnErr() {
+		log.Printf("[conn][WARN] ss 命令失败, 回退到 /proc/net/tcp 统计: %v", err)
+	}
+	return readOnlineConnectionsFromProc(port)
+}
+
+// readOnlineConnectionsFromProc 直接读 /proc/net/tcp 和 /proc/net/tcp6,
+// 统计 local_address 端口 == port 且状态为 ESTABLISHED(01) 的连接数。
+//
+// 作为 ss 命令失败时的兜底, 不依赖 iproute2, 纯 Go 读文件。
+// /proc/net/tcp 格式:
+//   sl  local_address rem_address   st tx_queue ...
+//    0: 0100007F:1F90 0100007F:1F90 01 ...
+// local_address/rem_address 格式: IP:PORT(端口为 4 位十六进制大写)
+// st 字段: 01=ESTABLISHED 0A=LISTEN 06=TIME_WAIT 等
+//
+// 对于代理服务器, 用户连进来的连接 local_address 是节点IP:监听端口,
+// rem_address 是用户IP:用户端口, 统计 local_address 端口 == listen port 且 st==01 即可。
+func readOnlineConnectionsFromProc(port int) int32 {
+	if port <= 0 || port > 65535 {
 		return 0
 	}
+	portHex := fmt.Sprintf("%04X", port) // /proc/net/tcp 端口固定 4 位十六进制大写
 	var count int32
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+		f, err := os.Open(path)
+		if err != nil {
 			continue
 		}
-		// -H 已去表头, 每行都是一条已建立连接; 按行计数即可。
-		// (行内已含 ESTAB 标记, 但用 state established 过滤后不需要再判断)
-		count++
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := scanner.Text()
+			fields := strings.Fields(line)
+			if len(fields) < 4 {
+				continue
+			}
+			// 跳过表头(第一字段是 "sl")
+			if fields[0] == "sl" {
+				continue
+			}
+			localAddr := fields[1] // IP:PORT
+			st := fields[3]        // state
+			if st != "01" {        // 01 = ESTABLISHED
+				continue
+			}
+			// local_address 格式 IP:PORT, 取最后一个冒号后的端口部分
+			colonIdx := strings.LastIndex(localAddr, ":")
+			if colonIdx < 0 {
+				continue
+			}
+			if localAddr[colonIdx+1:] == portHex {
+				count++
+			}
+		}
+		f.Close()
 	}
 	return count
 }

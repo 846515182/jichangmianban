@@ -82,6 +82,12 @@ func (h *AdminNodeHandler) NodeList(c *gin.Context) {
 
 	// 为每个节点附加实时状态(CPU/内存/连接/速度)和套餐绑定
 	items := make([]gin.H, 0, len(list))
+	// 收集需要回写快照的节点(speed_bps 兜底算法用: 记录 admin 视角的 traffic_used + ts)
+	type snapWrite struct {
+		key         string
+		trafficUsed int64
+	}
+	snapWrites := make([]snapWrite, 0, len(list))
 	for i := range list {
 		n := &list[i]
 		item := gin.H{
@@ -107,10 +113,12 @@ func (h *AdminNodeHandler) NodeList(c *gin.Context) {
 		item["plan_ids"] = planIDsMap[n.ID]
 
 		// 实时状态: 从预取结果计算
-		// 修复 NODE-SPEED-01: snap 不再由 admin 回写, 改由 traffic_service 维护;
-		// speed_bps 直接读 heartbeat hash, snap/dbTrafficUsed 仅作兼容参数传入(已忽略)
 		if rdb != nil {
 			item["runtime"] = h.buildNodeRuntimeFromCache(hbMap[n.ID], snapMap[n.ID], n.TrafficUsed)
+			snapWrites = append(snapWrites, snapWrite{
+				key:         fmt.Sprintf("node:speed_snap:%s", n.ID),
+				trafficUsed: n.TrafficUsed,
+			})
 		} else {
 			item["runtime"] = gin.H{
 				"cpu_usage":          0,
@@ -122,6 +130,18 @@ func (h *AdminNodeHandler) NodeList(c *gin.Context) {
 			}
 		}
 		items = append(items, item)
+	}
+
+	// 批量回写速度快照(供 speed_bps 字段缺失时的兜底算法用)
+	// snap = {traffic_used, ts}: admin 两次调用间 DB 流量增量 / 时间差 = 估算速率
+	if rdb != nil && len(snapWrites) > 0 {
+		now := time.Now().Unix()
+		pipe := rdb.Pipeline()
+		for _, w := range snapWrites {
+			pipe.HSet(ctx, w.key, "traffic_used", w.trafficUsed, "ts", now)
+			pipe.Expire(ctx, w.key, 10*time.Minute)
+		}
+		_, _ = pipe.Exec(ctx)
 	}
 
 	// 按 server_address 聚合流量(管理员统一流量展示)
@@ -167,10 +187,11 @@ func (h *AdminNodeHandler) readNodeRuntime(ctx context.Context, rdb *redis.Clien
 // buildNodeRuntimeFromCache 从已预取的心跳数据计算运行时状态(纯计算, 无 IO)。
 // 修复 PERF-NPLUS1-01: 抽离自 readNodeRuntime, 供 NodeList 批量预取后复用。
 //
-// 修复 NODE-SPEED-01 (P1): speed_bps 不再在 admin 端用 snap 时间差算, 改为直接读
-// heartbeat hash 的 speed_bps 字段(由 traffic_service.ReportRealtime 在 agent 上报
-// 流量时计算并写入)。snap 参数保留兼容但不再使用, dbTrafficUsed 也不再使用。
-func (h *AdminNodeHandler) buildNodeRuntimeFromCache(hb map[string]string, _ map[string]string, _ int64) gin.H {
+// 修复 NODE-SPEED-01 (P1): speed_bps 主路径读 heartbeat.speed_bps(traffic_service
+// 在 agent 上报流量时算的真实瞬时速率); 兜底: 字段缺失/为 0(新面板刚部署未收到首次
+// 上报、agent 无流量不上报、heartbeat TTL 过期重建)时, 回退到 snap 算法(用 admin
+// 两次调用的 DB traffic_used 差值 / 时间差估算), 避免速度恒为 0。
+func (h *AdminNodeHandler) buildNodeRuntimeFromCache(hb map[string]string, snap map[string]string, dbTrafficUsed int64) gin.H {
 	rt := gin.H{
 		"cpu_usage":          0,
 		"memory_usage":       0,
@@ -190,8 +211,20 @@ func (h *AdminNodeHandler) buildNodeRuntimeFromCache(hb map[string]string, _ map
 	onlineConn, _ := strconv.ParseInt(hb["online_connections"], 10, 64)
 	uptime, _ := strconv.ParseInt(hb["uptime_seconds"], 10, 64)
 	hbUpdatedAt, _ := strconv.ParseInt(hb["updated_at"], 10, 64)
-	// speed_bps 由 traffic_service 写入, 直接读; 缺失时为 0
+	// 主路径: speed_bps 由 traffic_service 写入 heartbeat hash, 直接读
 	speedBps, _ := strconv.ParseInt(hb["speed_bps"], 10, 64)
+
+	// 兜底: speed_bps 缺失或为 0 时, 回退到 snap 算法估算
+	// 场景: 新面板刚部署 traffic_service 还没收到首次流量上报 / agent 低负载无流量不上报
+	if speedBps == 0 && len(snap) > 0 {
+		prevUsed, _ := strconv.ParseInt(snap["traffic_used"], 10, 64)
+		prevTs, _ := strconv.ParseInt(snap["ts"], 10, 64)
+		curTs := time.Now().Unix()
+		dt := curTs - prevTs
+		if dt > 0 && dbTrafficUsed >= prevUsed {
+			speedBps = (dbTrafficUsed - prevUsed) / dt
+		}
+	}
 
 	rt["cpu_usage"] = cpuUsage
 	rt["memory_usage"] = memUsage
