@@ -853,8 +853,8 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 			return
 		}
 
-		logWrite(">>> 5/6 重启服务 docker compose up -d")
-		if !execCommandLog(gitRoot, "docker", "compose", "up", "-d", "--remove-orphans") {
+		logWrite(">>> 5/6 重启服务 docker compose up -d panel frontend")
+		if !execCommandLog(gitRoot, "docker", "compose", "up", "-d", "panel", "frontend") {
 			logWrite("重启失败")
 			gitPullOK = false
 			gitPullDone = true
