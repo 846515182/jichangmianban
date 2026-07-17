@@ -33,6 +33,22 @@ import './style.css'
 //   - 暗色主题 CSS 变量仍需全局引入(纯 CSS 变量定义, 体积小)
 const app = createApp(App)
 
+// 全局错误处理器: 捕获组件渲染/生命周期内的未处理异常, 避免页面静默白屏。
+// 把错误以 alert 形式抛出, 便于排查"点了导航没反应"实为渲染异常白屏的问题。
+app.config.errorHandler = (err, _instance, info) => {
+  console.error('[Vue ErrorHandler]', err, info)
+  const msg = err instanceof Error ? err.message : String(err)
+  try {
+    const box = document.createElement('div')
+    box.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:99999;background:#2a1a1a;color:#ffb4b4;border:1px solid #c00;border-radius:8px;padding:16px 20px;max-width:90vw;max-height:80vh;overflow:auto;font:14px/1.6 monospace;white-space:pre-wrap;box-shadow:0 8px 32px rgba(0,0,0,.5)'
+    box.textContent = '页面渲染错误:\n\n' + msg + '\n\n[info] ' + info + '\n\n请截图反馈。'
+    if (!document.getElementById('__err_box__')) {
+      box.id = '__err_box__'
+      document.body.appendChild(box)
+    }
+  } catch { /* ignore */ }
+}
+
 // 全局注册 Element Plus 图标(图标库不在自动导入范围内, 需手动注册)
 for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
   app.component(key, component)
