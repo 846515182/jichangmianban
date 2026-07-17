@@ -191,6 +191,19 @@ func (r *NodeRepo) UpdateOnline(id string, online bool, version string, t time.T
 		}).Error
 }
 
+// TouchOnline 仅刷新 online=true 与 last_seen_at，不覆盖 version 字段。
+// 用于流量上报/状态上报等"非心跳但能证明 agent 存活"的路径，
+// 避免 UpdateOnline 传空 version 擦除已记录的 agent 版本号。
+// 修复: ReportRealtime 不刷新 last_seen_at，导致有流量的节点被
+// MarkStaleNodesOffline 误判离线(面板显示离线但节点仍可用)。
+func (r *NodeRepo) TouchOnline(id string, t time.Time) error {
+	return r.db.Model(&model.Node{}).Where("id = ? AND is_deleted = false", id).
+		UpdateColumns(map[string]interface{}{
+			"online":       true,
+			"last_seen_at": t,
+		}).Error
+}
+
 // CountAll 统计节点总数
 func (r *NodeRepo) CountAll() (int64, error) {
 	var n int64

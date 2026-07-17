@@ -179,9 +179,14 @@ func (s *CronService) CleanOrphanData() {
 
 
 // MarkStaleNodesOffline 检测心跳超时的节点并标记为离线
-// 修复 BIZ-HEARTBEAT-01: 节点 gRPC 失联 3 分钟后自动标记 offline=true，
+// 修复 BIZ-HEARTBEAT-01: 节点 gRPC 失联后自动标记 offline=true，
 // 避免面板误显示节点在线但实际 Xray 仍在跑旧配置。
 // 同步清除 Redis 缓存，强制节点下次心跳时拉取最新配置。
+//
+// 阈值说明: 5 分钟(原 3 分钟过激)。agent 心跳 30s/次 + 流量上报 60s/次
+// 都会刷新 last_seen_at，因此 5 分钟内必须有连续 10 次心跳 + 5 次流量
+// 上报全部失败才会判离线，能容忍短暂网络抖动/gRPC 重连，避免"显示离线
+// 但节点仍可用"的误判。
 func (s *CronService) MarkStaleNodesOffline() {
 	if s.nodeRepo == nil {
 		return
@@ -191,7 +196,7 @@ func (s *CronService) MarkStaleNodesOffline() {
 		return
 	}
 	defer unlock()
-	threshold := time.Now().Add(-3 * time.Minute)
+	threshold := time.Now().Add(-5 * time.Minute)
 	count, err := s.nodeRepo.MarkStaleNodesOffline(threshold)
 	if err != nil {
 		s.logger.Error("mark stale nodes offline failed", zap.Error(err))
