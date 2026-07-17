@@ -271,8 +271,8 @@
                 </el-button>
               </div>
               <div v-if="pullResult" class="cmd-output">
-                <div class="output-title" :class="pullSuccess ? 'text-success' : 'text-danger'">
-                  更新{{ pullSuccess ? '成功' : '失败' }}:
+                <div class="output-title" :class="pullDone ? (pullSuccess ? 'text-success' : 'text-danger') : 'text-pending'">
+                  {{ pullDone ? (pullSuccess ? '更新成功' : '更新失败') : '更新中...' }}:
                 </div>
                 <pre>{{ pullResult }}</pre>
               </div>
@@ -648,6 +648,8 @@ const gitPushDialog = ref(false)
 const gitPushMessage = ref('')
 const pullResult = ref('')
 const pullSuccess = ref(false)
+const pullDone = ref(false)
+let pollTimer: any = null
 const gitStatus = reactive({
   branch: '',
   recent5: '',
@@ -667,26 +669,26 @@ const loadGitStatus = async () => {
   }
 }
 
-let pollTimer: any = null
-
 const gitPull = async () => {
-  ElMessageBox.confirm('将从 GitHub 拉取最新代码，然后构建 Docker 镜像、重启服务。确定继续？', '一键在线更新', {
+  ElMessageBox.confirm('将从 GitHub 拉取最新代码，编译后端、构建前端，然后重启面板。确定继续？', '一键在线更新', {
     type: 'warning', confirmButtonText: '确认更新', cancelButtonText: '取消',
   }).then(async () => {
     pulling.value = true
     pullResult.value = ''
     pullSuccess.value = false
+    pullDone.value = false
     try {
       const res: any = await request.post('/api/v1/admin/system/git-pull')
       pullResult.value = (res?.data?.msg || '更新已开始') + '\n'
-      // 开始轮询日志
+      // 轮询实时日志
       const poll = async () => {
         try {
           const logRes: any = await request.get('/api/v1/admin/system/git-pull-log')
           const logData = logRes?.data || logRes
-          pullResult.value = logData.log || pullResult.value
+          if (logData.log) pullResult.value = logData.log
           if (logData.done) {
             pulling.value = false
+            pullDone.value = true
             pullSuccess.value = logData.success !== false
             if (pullSuccess.value) {
               ElMessage.success('在线更新完成')
@@ -695,7 +697,6 @@ const gitPull = async () => {
             }
             loadGitStatus()
             clearInterval(pollTimer)
-            return
           }
         } catch { /* 忽略轮询错误 */ }
       }
@@ -704,6 +705,7 @@ const gitPull = async () => {
     } catch (e: any) {
       pullResult.value = e?.response?.data?.msg || e?.message || '更新失败'
       pullSuccess.value = false
+      pullDone.value = true
       pulling.value = false
       ElMessage.error(pullResult.value)
     }
@@ -815,5 +817,6 @@ onMounted(() => {
 .cmd-output .output-title { font-size: 13px; font-weight: 600; color: var(--np-text); margin-bottom: 6px; }
 .cmd-output .output-title.text-success { color: #67c23a; }
 .cmd-output .output-title.text-danger { color: #f56c6c; }
+.cmd-output .output-title.text-pending { color: var(--np-text-muted); }
 .cmd-output pre { margin: 0; font-size: 12px; color: var(--np-text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }
 </style>
