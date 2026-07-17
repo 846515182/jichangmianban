@@ -2,6 +2,16 @@ import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 // Element Plus 暗色模式变量(全局 CSS 变量, 不随组件按需加载, 需全局引入)
 import 'element-plus/theme-chalk/dark/css-vars.css'
+// 命令式组件样式(ElMessage/ElMessageBox/ElNotification/ElLoading)全局引入
+// 根因: 这些组件是 JS 命令式调用(ElMessageBox.confirm()), 不在模板里写
+// <el-message-box>, unplugin-vue-components 的按需导入只扫描模板标签,
+// 不会为它们自动导入样式。导致弹窗缺少 display/width/padding/定位等
+// 基础样式, 退化成默认块级元素显示在左上角。这里全局引入确保样式齐全。
+import 'element-plus/theme-chalk/el-overlay.css'
+import 'element-plus/theme-chalk/el-message-box.css'
+import 'element-plus/theme-chalk/el-message.css'
+import 'element-plus/theme-chalk/el-notification.css'
+import 'element-plus/theme-chalk/el-loading.css'
 // 所有 Element Plus 图标全局注册(图标不在 unplugin-vue-components 自动导入范围内)
 import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 
