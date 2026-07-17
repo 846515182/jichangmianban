@@ -81,6 +81,11 @@ func (s *EmailService) effectiveConfig() (*EmailConfig, error) {
 // mergeConfig 纯函数: 数据库配置优先, 缺失/未启用时回退环境变量配置 (便于单测)。
 func mergeConfig(dbCfg *EmailConfig, cfg *config.Config) *EmailConfig {
 	if dbCfg != nil && dbCfg.Enabled && dbCfg.Host != "" && dbCfg.User != "" && dbCfg.Password != "" {
+		// 防御性兜底: 若 DB 中 EmailPort 为 0 (老数据或 UI 未填), 默认 587
+		// 否则 SendMail 拼出 "host:0" 会导致连接失败
+		if dbCfg.Port == 0 {
+			dbCfg.Port = 587
+		}
 		return dbCfg
 	}
 	if cfg != nil && cfg.SMTPEnabled() {

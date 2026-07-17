@@ -2,8 +2,12 @@ package handler
 
 import (
 	"crypto/rand"
+	"encoding/base64"
+	"fmt"
 	"math/big"
+	mrand "math/rand"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -48,7 +52,8 @@ func cleanupExpiredCaptcha() {
 }
 
 // GetCaptcha 拉图形验证码
-// 生产环境不返回验证码明文，仅返回 captcha_id
+// 返回 captcha_id + 内联 SVG 图像(base64), 前端 <img src="data:image/svg+xml;base64,..."> 直接展示。
+// 不再依赖任何外部图形库, SVG 由本函数纯字符串生成。
 func GetCaptcha(c *gin.Context) {
 	const length = 4
 	buf := make([]byte, length)
@@ -73,15 +78,81 @@ func GetCaptcha(c *gin.Context) {
 		rdb.Set(c.Request.Context(), "captcha:"+id, code, 10*time.Minute)
 	}
 
+	// 生成 SVG 验证码图像 (120x40), 字符带随机旋转/位置/颜色 + 干扰线
+	svg := buildCaptchaSVG(code, 120, 40)
+	svgB64 := base64.StdEncoding.EncodeToString([]byte(svg))
+
+	data := gin.H{
+		"captcha_id":  id,
+		"captcha_img": "data:image/svg+xml;base64," + svgB64,
+		"expires_in":  600,
+	}
+	// EMAIL_DEBUG=1 时附带明文, 便于自动化测试/本地调试
+	if os.Getenv("EMAIL_DEBUG") == "1" {
+		data["debug"] = code
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"code": 0,
 		"msg":  "ok",
-		"data": gin.H{
-			"captcha_id": id,
-			// 生产环境不返回验证码明文
-			// "debug": code,
-		},
+		"data": data,
 	})
+}
+
+// buildCaptchaSVG 生成验证码 SVG 图像 (纯字符串拼接, 无外部依赖)
+// 每个字符随机: x 偏移、旋转角度、字号、颜色; 再叠加 4 条干扰线段 + 20 个噪点。
+func buildCaptchaSVG(code string, w, h int) string {
+	// 颜色调色板 (深色系, 在浅色背景下清晰)
+	palette := []string{
+		"#0f4c75", "#1b6ca8", "#3a0ca3", "#4361ee",
+		"#7209b7", "#b5179e", "#f72585", "#2a9d8f",
+	}
+	var b []byte
+	add := func(s string) { b = append(b, s...) }
+
+	add(fmt.Sprintf(
+		`<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d">`,
+		w, h, w, h,
+	))
+	// 背景
+	add(fmt.Sprintf(`<rect width="%d" height="%d" fill="#f1f5f9"/>`, w, h))
+
+	// 干扰线 (4 条)
+	for i := 0; i < 4; i++ {
+		x1 := mrand.Intn(w)
+		y1 := mrand.Intn(h)
+		x2 := mrand.Intn(w)
+		y2 := mrand.Intn(h)
+		col := palette[mrand.Intn(len(palette))]
+		add(fmt.Sprintf(
+			`<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="%s" stroke-width="1" opacity="0.5"/>`,
+			x1, y1, x2, y2, col,
+		))
+	}
+
+	// 噪点 (20 个)
+	for i := 0; i < 20; i++ {
+		x := mrand.Intn(w)
+		y := mrand.Intn(h)
+		col := palette[mrand.Intn(len(palette))]
+		add(fmt.Sprintf(`<circle cx="%d" cy="%d" r="1" fill="%s" opacity="0.4"/>`, x, y, col))
+	}
+
+	// 字符 (每个字符占 w/len(code) 区间, 居中带随机扰动)
+	cellW := w / len(code)
+	for i, ch := range code {
+		x := i*cellW + cellW/2 + (mrand.Intn(8) - 4)
+		y := h/2 + (mrand.Intn(8) - 4)
+		rot := mrand.Intn(60) - 30 // -30..+30 度
+		size := 22 + mrand.Intn(6)  // 22..27
+		col := palette[mrand.Intn(len(palette))]
+		add(fmt.Sprintf(
+			`<text x="%d" y="%d" font-family="Arial,Helvetica,sans-serif" font-size="%d" font-weight="bold" fill="%s" text-anchor="middle" dominant-baseline="middle" transform="rotate(%d %d %d)">%s</text>`,
+			x, y, size, col, rot, x, y, string(ch),
+		))
+	}
+	add(`</svg>`)
+	return string(b)
 }
 
 // VerifyCaptcha 校验图形验证码

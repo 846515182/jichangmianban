@@ -56,6 +56,30 @@
             :prefix-icon="Lock"
           />
         </el-form-item>
+        <el-form-item prop="captchaCode">
+          <div class="captcha-row">
+            <el-input
+              v-model="form.captchaCode"
+              size="large"
+              placeholder="请输入图形验证码"
+              :prefix-icon="Key"
+              maxlength="4"
+              @keyup.enter="handleRegister"
+            />
+            <img
+              v-if="captchaImg"
+              :src="captchaImg"
+              class="captcha-img"
+              alt="点击刷新验证码"
+              title="点击刷新"
+              @click="loadCaptcha"
+            />
+            <div v-else class="captcha-placeholder" @click="loadCaptcha">
+              <el-icon><Refresh /></el-icon>
+              <span>加载中</span>
+            </div>
+          </div>
+        </el-form-item>
         <el-form-item>
           <el-button
             type="primary"
@@ -84,10 +108,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
-import { User, Lock, Message, InfoFilled } from '@element-plus/icons-vue'
+import { User, Lock, Message, InfoFilled, Key, Refresh } from '@element-plus/icons-vue'
 import request from '@/utils/request'
 
 const router = useRouter()
@@ -95,11 +119,17 @@ const router = useRouter()
 const formRef = ref<FormInstance>()
 const loading = ref(false)
 
+// 验证码相关状态
+const captchaId = ref('')
+const captchaImg = ref('')
+const captchaLoading = ref(false)
+
 const form = reactive({
   username: '',
   email: '',
   password: '',
   confirmPassword: '',
+  captchaCode: '',
 })
 
 // 表单校验规则
@@ -130,7 +160,32 @@ const rules: FormRules = {
       trigger: 'blur',
     },
   ],
+  captchaCode: [
+    { required: true, message: '请输入图形验证码', trigger: 'blur' },
+    { len: 4, message: '验证码为 4 位字符', trigger: 'blur' },
+  ],
 }
+
+// 拉取图形验证码
+const loadCaptcha = async () => {
+  captchaLoading.value = true
+  try {
+    const res: any = await request.get('/api/v1/captcha')
+    if (res && res.code === 0 && res.data) {
+      captchaId.value = res.data.captcha_id || ''
+      captchaImg.value = res.data.captcha_img || ''
+      form.captchaCode = ''
+    }
+  } catch (e: any) {
+    // 静默失败, 用户点击占位符可重试
+  } finally {
+    captchaLoading.value = false
+  }
+}
+
+onMounted(() => {
+  loadCaptcha()
+})
 
 // 注册处理
 const handleRegister = async () => {
@@ -144,11 +199,14 @@ const handleRegister = async () => {
         username: form.username,
         email: form.email,
         password: form.password,
+        captcha_id: captchaId.value,
+        captcha_code: form.captchaCode,
       })
       ElMessage.success('注册成功，请登录')
       router.push('/login')
     } catch (e: any) {
-      // 接口失败时给出友好提示（具体错误由 request 拦截器统一弹窗）
+      // 注册失败(含验证码错误)后刷新验证码, 避免旧 captcha_id 失效导致一直失败
+      loadCaptcha()
       if (!e || !e.message) {
         ElMessage.error('注册失败，请稍后重试')
       }
@@ -236,6 +294,44 @@ const handleRegister = async () => {
 
 .register-form {
   margin-top: 8px;
+}
+.captcha-row {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+  align-items: center;
+}
+.captcha-row .el-input {
+  flex: 1;
+}
+.captcha-img {
+  height: 40px;
+  width: 120px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid var(--np-border, #2a3245);
+  background: #f1f5f9;
+  flex-shrink: 0;
+}
+.captcha-placeholder {
+  height: 40px;
+  width: 120px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px dashed var(--np-border, #2a3245);
+  background: var(--np-bg-soft, #1a2030);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  color: var(--np-text-muted, #6b7785);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+.captcha-placeholder:hover {
+  border-color: var(--np-primary, #00f5d4);
+  color: var(--np-primary, #00f5d4);
 }
 .register-btn {
   width: 100%;
