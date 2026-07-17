@@ -274,7 +274,7 @@
                 <div class="progress-header" :class="pullDone ? (pullSuccess ? 'is-success' : 'is-error') : 'is-pending'">
                   <span class="status-dot" :class="{ spinning: !pullDone }"></span>
                   <span class="header-text">{{ pullDone ? (pullSuccess ? '更新成功' : '更新失败') : '更新中...' }}</span>
-                  <span v-if="restartingPanel" class="restart-hint">面板正在重启，预计 15-30 秒后自动恢复...</span>
+                  <span v-if="restartingPanel" class="restart-hint">正在重启，稍后自动恢复...</span>
                 </div>
                 <div class="step-list">
                   <div v-for="(step, idx) in pullSteps" :key="idx" class="step-item" :class="step.status">
@@ -723,7 +723,7 @@ const waitForPanelAndReload = () => {
       if (phase === 'disconnect') {
         phase = 'reconnect'
         attempts = 0
-        ElMessage.info('面板正在重启，等待恢复中...')
+        ElMessage.info('面板重启中，等待恢复...')
       }
     }
     // 总超时: disconnect 阶段 15 秒 + reconnect 阶段 60 秒
@@ -779,7 +779,7 @@ const gitPull = async () => {
             pullDone.value = true
             pullSuccess.value = logData.success !== false
             if (pullSuccess.value) {
-              ElMessage.success('更新完成，面板正在重启，预计 15-30 秒后自动恢复...')
+              ElMessage.success('更新完成，面板重启中...')
               restartingPanel.value = true
               waitForPanelAndReload()
             } else {
@@ -810,7 +810,7 @@ const systemRestart = async () => {
     restartingPanel.value = true
     try {
       await request.post('/api/v1/admin/system/restart')
-      ElMessage.success('重启指令已下发，面板正在重启，预计 10-30 秒后自动恢复...')
+      ElMessage.success('重启指令已下发，面板重启中...')
       // 注意: 不在 finally 里清 restarting, 保持按钮 loading 直到面板恢复
       // (面板恢复后 waitForPanelAndReload 会刷新页面, loading 自然消失)
       waitForPanelAndReload()
@@ -924,7 +924,7 @@ onUnmounted(() => {
 
 /* 更新进度步骤列表 */
 .update-progress { margin-top: 12px; background: var(--np-bg-soft); border-radius: 8px; padding: 12px; }
-.progress-header { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; margin-bottom: 12px; }
+.progress-header { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; margin-bottom: 12px; flex-wrap: wrap; }
 .progress-header.is-success { color: #67c23a; }
 .progress-header.is-error { color: #f56c6c; }
 .progress-header.is-pending { color: var(--np-text-muted); }
@@ -934,7 +934,7 @@ onUnmounted(() => {
 .is-error .status-dot { background: #f56c6c; }
 .status-dot.spinning { background: #409eff; animation: np-spin 1s linear infinite; }
 @keyframes np-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-.restart-hint { font-size: 12px; color: var(--np-text-muted); font-weight: normal; }
+.restart-hint { font-size: 12px; color: var(--np-text-muted); font-weight: normal; word-break: break-all; }
 .step-list { display: flex; flex-direction: column; gap: 6px; }
 .step-item { padding: 2px 0; }
 .step-head { display: flex; align-items: center; gap: 8px; font-size: 13px; }
