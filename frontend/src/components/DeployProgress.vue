@@ -209,12 +209,25 @@ const start = async () => {
   events.value = []
   activePhase.value = 'connect_server'
 
+  // 部署前先通过 request 工具校验 token 有效性，触发自动刷新
+  try {
+    await request.get('/api/v1/admin/nodes/' + props.nodeId)
+  } catch {
+    // token 校验失败时不清除已选密码，让用户重新触发
+    running.value = false
+    finished.value = true
+    events.value.push({ step: 'connect_server', status: 'error', msg: '登录状态已过期，请刷新页面重新登录', output: '' })
+    return
+  }
+
   const url = `/api/v1/admin/nodes/${props.nodeId}/auto-deploy`
+  // 部署期间锁定 token，避免刷新后凭证变化
+  const bearerToken = useAuthStore().token
 
   try {
     const resp = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + useAuthStore().token },
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + bearerToken },
       body: JSON.stringify({ password: password.value, username: username.value, port: port.value }),
     })
 

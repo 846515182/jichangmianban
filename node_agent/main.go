@@ -435,10 +435,12 @@ func (a *Agent) doTrafficReport() {
 	}
 	nodeID := a.getNodeID()
 	now := time.Now().Unix()
+	// 使用 nodeID 作为聚合流量标识，替代魔数 UUID
+	aggregateUserID := "node:" + nodeID
 	records := []*proto.TrafficRecord{
 		{
 			NodeId:        nodeID,
-			UserId:        "00000000-0000-0000-0000-000000000000",
+			UserId:        aggregateUserID,
 			UploadBytes:   upload,
 			DownloadBytes: download,
 			LogTime:       now,

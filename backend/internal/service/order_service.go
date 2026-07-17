@@ -303,8 +303,8 @@ func (s *OrderService) AdminMarkPaid(orderID, tradeNo string) error {
 }
 
 // AdminRefund 管理员对已支付订单执行退款
-// 流程: 校验订单存在 + 状态为 paid -> 设置 refunded -> 回退优惠券 -> 不动用户套餐
-// 修复: 退款时回退优惠券使用次数
+// 流程: 校验订单存在 + 状态为 paid -> 设置 refunded -> 回退优惠券 -> 重置用户套餐
+// 修复: 退款时回退优惠券使用次数，同时将用户套餐流量和到期时间复位
 func (s *OrderService) AdminRefund(orderID, reason string) error {
 	o, err := s.orderRepo.GetByID(orderID)
 	if err != nil {
@@ -326,7 +326,6 @@ func (s *OrderService) AdminRefund(orderID, reason string) error {
 		if locked.Status != model.OrderStatusPaid {
 			return errors.New("订单状态已变更, 无法退款")
 		}
-		// 将 reason 写入 trade_no 后缀(便于审计); 截断长度保护列宽
 		if reason != "" {
 			suffix := " [refund:" + reason + "]"
 			if len(suffix) > 120 {
@@ -338,9 +337,23 @@ func (s *OrderService) AdminRefund(orderID, reason string) error {
 		if err := tx.Save(&locked).Error; err != nil {
 			return err
 		}
-		// 回退优惠券使用次数
 		if locked.CouponID != "" {
 			_ = s.couponRepo.DecrUsedSafeTx(tx, locked.CouponID)
+		}
+		// 重置用户套餐：清除 plan_id、重置流量配额、将状态置为 expired
+		u, err := s.userRepo.GetByID(locked.UserID)
+		if err != nil {
+			return fmt.Errorf("退款关联用户不存在: %w", err)
+		}
+		u.PlanID = nil
+		u.TrafficLimit = 0
+		u.TrafficUsed = 0
+		u.UploadBytes = 0
+		u.DownloadBytes = 0
+		u.ExpiredAt = nil
+		u.Status = "expired"
+		if err := tx.Save(u).Error; err != nil {
+			return fmt.Errorf("重置退款用户套餐失败: %w", err)
 		}
 		return nil
 	})

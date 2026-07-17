@@ -170,6 +170,13 @@ func (h *AutoDeployHandler) Deploy(c *gin.Context) {
 	if req.Port == 0 {
 		req.Port = 22
 	}
+	// 安全：将敏感字段移出 req，避免后续误用或日志泄露
+	password := req.Password
+	port := req.Port
+	username := req.Username
+	req.Password = ""
+	req.Port = 0
+	req.Username = ""
 
 	// SSE 响应头
 	c.Header("Content-Type", "text/event-stream")
@@ -222,8 +229,10 @@ func (h *AutoDeployHandler) Deploy(c *gin.Context) {
 		}
 
 		// 执行单次部署
-		ok, errCode, errMsg := h.runDeployOnce(c, sse, node, &req)
+		ok, errCode, errMsg := h.runDeployOnce(c, sse, node, password, port, username)
 		if ok {
+			// 安全：完成部署后清除密码
+			password = ""
 			sse.event("finish", "done", "一键部署完成！请返回节点列表查看在线状态", "")
 			if f, ok2 := c.Writer.(http.Flusher); ok2 {
 				f.Flush()
@@ -254,8 +263,10 @@ func (h *AutoDeployHandler) Deploy(c *gin.Context) {
 	time.Sleep(100 * time.Millisecond)
 }
 
+
+
 // runDeployOnce 执行一次完整部署; 返回 (成功?, 错误码, 错误信息)
-func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *model.Node, req *autoDeployReq) (bool, string, string) {
+func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *model.Node, password string, port int, username string) (bool, string, string) {
 	panelIP := getPanelIP()
 	if panelIP == "" {
 		sse.eventWithCode(PhaseConnectServer, "error",
@@ -290,10 +301,10 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	// ============================================================
 	// Phase 1: 连接服务器
 	// ============================================================
-	sse.event(PhaseConnectServer, "running", "正在连接节点服务器 "+node.ServerAddress+":"+strconv.Itoa(req.Port)+"...", "")
+	sse.event(PhaseConnectServer, "running", "正在连接节点服务器 "+node.ServerAddress+":"+strconv.Itoa(port)+"...", "")
 	sshConfig := &ssh.ClientConfig{
-		User:            req.Username,
-		Auth:            []ssh.AuthMethod{ssh.Password(req.Password)},
+		User:            username,
+		Auth:            []ssh.AuthMethod{ssh.Password(password)},
 		HostKeyCallback: hostKeyCallback(node.ServerAddress),
 		Timeout:         15 * time.Second,
 		Config: ssh.Config{
@@ -321,13 +332,13 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 			},
 		},
 	}
-	addr := fmt.Sprintf("%s:%d", node.ServerAddress, req.Port)
+	addr := fmt.Sprintf("%s:%d", node.ServerAddress, port)
 	client, err := ssh.Dial("tcp", addr, sshConfig)
 	if err != nil {
 		errStr := err.Error()
 		code := classifySSHError(errStr)
 		sse.eventWithCode(PhaseConnectServer, "error",
-			"SSH 连接失败: "+errStr+diagnoseSSHError(err, req.Port), "", code)
+			"SSH 连接失败: "+errStr+diagnoseSSHError(err, port), "", code)
 		return false, code, "SSH 连接失败: " + errStr
 	}
 	defer client.Close()

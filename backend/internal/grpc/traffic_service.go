@@ -3,6 +3,7 @@ package grpc
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,10 +19,10 @@ import (
 )
 
 // isNodeAggregateUser 判定是否为节点级聚合流量上报
-// node-agent 当前版本 (nexus-agent/0.1.0) 用占位 UUID "00000000-0000-0000-0000-000000000000"
-// 上报 /proc/net/dev 汇总流量;旧版可能用字符串 "node"。两种都视为聚合标记。
+// node-agent 用 "node:"+nodeID 作为聚合标识，旧版用占位 UUID "00000000-0000-0000-0000-000000000000"
+// 或 "node"。三种都视为聚合标记。
 func isNodeAggregateUser(uid string) bool {
-	return uid == "node" || uid == "00000000-0000-0000-0000-000000000000"
+	return uid == "node" || uid == "00000000-0000-0000-0000-000000000000" || strings.HasPrefix(uid, "node:")
 }
 
 // s7WarnLimiter 限制每个节点的 S7 警告频率, 避免每 5 分钟刷屏

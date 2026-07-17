@@ -4,8 +4,8 @@ import (
         "context"
         "time"
 
+        "github.com/redis/go-redis/v9"
         "go.uber.org/zap"
-        "gorm.io/gorm"
 
         "nexus-panel/internal/app"
         "nexus-panel/internal/model"
@@ -46,12 +46,35 @@ func (s *CronService) ExpireOrders() {
         }
 }
 
-// RunAll 执行所有定时任务
+// tryLock 尝试获取分布式锁，成功返回解锁函数，失败返回 nil
+func tryLock(rdb *redis.Client, key string, ttl time.Duration) (unlock func()) {
+	if rdb == nil {
+		return nil
+	}
+	token := time.Now().Format(time.RFC3339Nano)
+	ok, err := rdb.SetNX(context.Background(), key, token, ttl).Result()
+	if err != nil || !ok {
+		return nil
+	}
+	return func() {
+		// 仅删除自己的锁（通过 Lua 脚本保证原子性）
+		script := `if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) else return 0 end`
+		rdb.Eval(context.Background(), script, []string{key}, token)
+	}
+}
+
+// RunAll 执行所有定时任务（带分布式锁，防止多副本重复执行）
 func (s *CronService) RunAll() {
-        s.ExpireOverdueUsers()
-        s.ExpireOrders()
-        s.MarkTrafficExhausted()
-        s.CleanAggregateTrafficLogs()
+	unlock := tryLock(app.Get().RDB, "cron:lock:runall", 4*time.Minute)
+	if unlock == nil {
+		s.logger.Debug("定时任务 RunAll 被其它实例占用，跳过本次")
+		return
+	}
+	defer unlock()
+	s.ExpireOverdueUsers()
+	s.ExpireOrders()
+	s.MarkTrafficExhausted()
+	s.CleanAggregateTrafficLogs()
 }
 
 // MarkTrafficExhausted 兜底检测所有超额用户并标记 traffic_exhausted
@@ -76,32 +99,37 @@ func (s *CronService) MarkTrafficExhausted() {
 // node-agent 0.1.0 之前把节点聚合流量写到 user_id="00000000-0000-0000-0000-000000000000",
 // 造成后台 TopUsers/TrafficStats 出现"deleted"幽灵用户,后台显示混乱。
 // 每天清理一次超过 7 天的聚合标记流量日志(给客户端 grace 期间再清)。
-// [BIZ-DATA-04 fix 2026-07-16] traffic_logs.user_id 是 uuid 类型, 不能用 'node' 字符串匹配;
-// 用参数化绑定避免硬编码和 SQL 注入。
+// 现在使用 "node:"+nodeID 前缀标识节点级流量，一并清理。
 func (s *CronService) CleanAggregateTrafficLogs() {
-        db := app.Get().DB
-        if db == nil {
-                return
-        }
-        cutoff := time.Now().AddDate(0, 0, -7)
-        // traffic_logs.user_id 是 uuid, 用 GORM 展开 []string 自动转 uuid
-        result := db.Exec(`
-                DELETE FROM traffic_logs
-                WHERE log_time < ? AND user_id IN (?)
-        `, cutoff, []string{"00000000-0000-0000-0000-000000000000"})
-        if result.Error != nil {
-                s.logger.Error("clean aggregate traffic logs failed", zap.Error(result.Error))
-        } else if result.RowsAffected > 0 {
-                s.logger.Info("已清理幽灵用户流量日志", zap.Int64("count", result.RowsAffected))
-        }
-        _ = gorm.ErrInvalidDB // 保持 gorm 包被使用, 防止 goimports 误删
+	db := app.Get().DB
+	if db == nil {
+		return
+	}
+	cutoff := time.Now().AddDate(0, 0, -7)
+	// 清理旧格式的占位 UUID 与新格式的 "node:" 前缀聚合流量
+	result := db.Exec(`
+		DELETE FROM traffic_logs
+		WHERE log_time < ?
+		AND (user_id = ? OR user_id LIKE ?)
+	`, cutoff, "00000000-0000-0000-0000-000000000000", "node:%")
+	if result.Error != nil {
+		s.logger.Error("clean aggregate traffic logs failed", zap.Error(result.Error))
+	} else if result.RowsAffected > 0 {
+		s.logger.Info("已清理幽灵用户流量日志", zap.Int64("count", result.RowsAffected))
+	}
 }
 
 func (s *CronService) CleanOrphanData() {
-        db := app.Get().DB
-        if db == nil {
-                return
-        }
+	unlock := tryLock(app.Get().RDB, "cron:lock:orphan", 3*time.Hour)
+	if unlock == nil {
+		return
+	}
+	defer unlock()
+
+	db := app.Get().DB
+	if db == nil {
+		return
+	}
 
         result := db.Exec(`
                 UPDATE subscriptions SET is_deleted = true, updated_at = NOW()
@@ -158,6 +186,11 @@ func (s *CronService) MarkStaleNodesOffline() {
 	if s.nodeRepo == nil {
 		return
 	}
+	unlock := tryLock(app.Get().RDB, "cron:lock:markstale", 50*time.Second)
+	if unlock == nil {
+		return
+	}
+	defer unlock()
 	threshold := time.Now().Add(-3 * time.Minute)
 	count, err := s.nodeRepo.MarkStaleNodesOffline(threshold)
 	if err != nil {
