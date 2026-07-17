@@ -28,7 +28,9 @@ const ROLE_KEY = 'np_role'
 const USER_KEY = 'np_user'
 
 // 安全提示: 生产环境建议后端实现 httpOnly Cookie 替代 localStorage 存储 Token
-// 当前实现仅存 refresh_token 做持久化, access_token 仅在内存中
+// access_token 也一并持久化到 sessionStorage, 这样刷新浏览器后能恢复登录态,
+// 不会把用户踢回登录页。sessionStorage 在同标签页刷新时保留, 关闭标签页才清空
+// (相当于登出)。若 access_token 已过期, axios 拦截器的 401 自动 refresh 机制会换新。
 
 const rawAxios = axios.create({ baseURL: '/', timeout: 15000 })
 
@@ -46,6 +48,7 @@ export const useAuthStore = defineStore('auth', {
   },
   actions: {
     restore() {
+      this.token = sessionStorage.getItem(TOKEN_KEY) || ''
       this.refreshToken = sessionStorage.getItem(REFRESH_TOKEN_KEY) || ''
       this.role = (sessionStorage.getItem(ROLE_KEY) as UserRole) || null
       const userStr = sessionStorage.getItem(USER_KEY)
@@ -53,6 +56,7 @@ export const useAuthStore = defineStore('auth', {
     },
 
     persist() {
+      if (this.token) sessionStorage.setItem(TOKEN_KEY, this.token)
       sessionStorage.setItem(REFRESH_TOKEN_KEY, this.refreshToken)
       if (this.role) sessionStorage.setItem(ROLE_KEY, this.role)
       if (this.userInfo) sessionStorage.setItem(USER_KEY, JSON.stringify(this.userInfo))
@@ -154,6 +158,7 @@ export const useAuthStore = defineStore('auth', {
       this.refreshToken = ''
       this.role = null
       this.userInfo = null
+      sessionStorage.removeItem(TOKEN_KEY)
       sessionStorage.removeItem(REFRESH_TOKEN_KEY)
       sessionStorage.removeItem(ROLE_KEY)
       sessionStorage.removeItem(USER_KEY)

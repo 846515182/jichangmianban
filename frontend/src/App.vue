@@ -8,15 +8,11 @@
 
 <script setup lang="ts">
 import { onMounted } from 'vue'
-import { useAuthStore } from '@/stores/auth'
-
-const auth = useAuthStore()
 
 onMounted(() => {
   // 启用 Element Plus 暗色模式
   document.documentElement.classList.add('dark')
-  // 初始化时从本地恢复登录态
-  auth.restore()
+  // 登录态恢复已在 main.ts 的 app.mount 前完成(早于路由守卫首次执行)
 })
 </script>
 

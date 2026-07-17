@@ -17,6 +17,7 @@ import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 
 import App from './App.vue'
 import router from './router'
+import { useAuthStore } from './stores/auth'
 import './style.css'
 
 // 修复 UI-BUNDLE-01 (P1): 旧版同时引入完整 ElementPlus 与全量 CSS:
@@ -56,5 +57,11 @@ for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
 
 app.use(createPinia())
 app.use(router)
+
+// 修复刷新即登出: 在 app.mount 之前从 sessionStorage 恢复登录态。
+// 原因: 路由守卫 beforeEach 会在首次导航时执行(早于 App.vue 的 onMounted),
+// 若此时 store 还是空的, 守卫看到 !auth.token 就会把用户踢回登录页。
+// 这里在 mount 前同步恢复 token/role/userInfo, 确保守卫首次执行时已有登录态。
+useAuthStore().restore()
 
 app.mount('#app')
