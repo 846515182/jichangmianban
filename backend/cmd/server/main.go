@@ -122,7 +122,21 @@ func main() {
 	// MarkStaleNodesOffline 与 CleanOrphanData 定义后从未被调用, 导致
 	// 节点 gRPC 失联后 online 恒真、仪表盘在线节点数失真、孤儿数据堆积。
 	// 新增独立 ticker: 每 1 分钟标记心跳超时节点为离线; 每 6 小时清理孤儿数据。
+	//
+	// 修复 NODE-OFFLINE-01 (P0): 启动后立即巡检会在面板刚重启(如一键更新)
+	// 后立刻把所有节点误判离线——agent 还没来得及重连发心跳, last_seen_at 仍是
+	// 重启前的旧值, 必然 < 5min 阈值。结果用户节点 Xray 还在跑(缓存配置), 用户
+	// 仍能用, 但面板显示"离线"。
+	// 现在启动后延迟 3 分钟再开始巡检, 给 agent gRPC 重连+发首条心跳留足窗口。
 	go func() {
+		// 启动后等待 3 分钟再开始巡检(等 agent 重连), 之后每 1 分钟一次
+		startupGrace := time.NewTimer(3 * time.Minute)
+		defer startupGrace.Stop()
+		select {
+		case <-startupGrace.C:
+		case <-ctx.Done():
+			return
+		}
 		tickerStale := time.NewTicker(1 * time.Minute)
 		defer tickerStale.Stop()
 		for {

@@ -314,6 +314,11 @@ func (a *Agent) applyConfig() error {
 }
 
 // heartbeatLoop 每 30s 上报心跳；若面板提示配置/用户变更则重新拉取并重启 Xray
+//
+// 修复 NODE-OFFLINE-01 (P0): 旧版心跳失败后直接 return, 等下一个 30s tick 才重试。
+// 面板重启(一键更新)期间, agent 心跳连续失败, 面板回来后还要等最多 30s 才能恢复
+// online=true, 这段时间节点在面板上显示离线。现在失败后 10s 内立即补一次心跳,
+// 面板一回来就能尽快把 online 刷新回 true。
 func (a *Agent) heartbeatLoop(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -322,15 +327,28 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			a.doHeartbeat()
+			ok := a.doHeartbeat()
+			if !ok {
+				// 心跳失败(非致命), 10s 后立即补一次, 不等下一个 30s 周期
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(10 * time.Second):
+					a.doHeartbeat()
+				}
+			}
 		}
 	}
 }
 
-func (a *Agent) doHeartbeat() {
+// doHeartbeat 发送一次心跳。返回 true 表示心跳成功(面板已刷新 online=true),
+// 返回 false 表示心跳失败(网络错误/被拒等非致命情况), 调用方可据此决定是否补发。
+// 致命错误(节点被删/token 失效)会触发 handleFatalShutdown, 此时也返回 false 但
+// fatalShutdown 已置位, 后续不会再补发。
+func (a *Agent) doHeartbeat() bool {
 	// 已因致命错误停服，跳过心跳(进程保持运行，避免 docker 重启死循环)
 	if atomic.LoadInt32(&a.fatalShutdown) == 1 {
-		return
+		return false
 	}
 	uptime := time.Since(a.startTime).Seconds()
 	memTotal, memUsed := readMemInfo()
@@ -372,19 +390,19 @@ func (a *Agent) doHeartbeat() {
 		// 致命错误: 节点已被面板删除/token 失效 → 停止 Xray 代理服务
 		if isFatalHeartbeatError(err) {
 			a.handleFatalShutdown(fmt.Sprintf("心跳失败: %v (节点可能已被面板删除或 token 失效)", err))
-			return
+			return false
 		}
 		log.Printf("心跳失败: %v", err)
-		return
+		return false
 	}
 	if resp.GetResp().GetCode() != 0 {
 		msg := resp.GetResp().GetMessage()
 		if isFatalHeartbeatMsg(msg) {
 			a.handleFatalShutdown(fmt.Sprintf("心跳被拒: %s", msg))
-			return
+			return false
 		}
 		log.Printf("心跳被拒: code=%d msg=%s", resp.GetResp().GetCode(), msg)
-		return
+		return false
 	}
 
 	// 配置或用户变更 -> 重新拉取配置并应用
@@ -392,6 +410,7 @@ func (a *Agent) doHeartbeat() {
 		log.Printf("面板提示配置/用户已变更，重新拉取配置...")
 		a.reloadConfig()
 	}
+	return true
 }
 
 // handleFatalShutdown 致命错误停服: 停止 Xray 并标记停服状态

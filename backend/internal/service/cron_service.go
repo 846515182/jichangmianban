@@ -113,19 +113,27 @@ func (s *CronService) MarkTrafficExhausted() {
 // node-agent 0.1.0 之前把节点聚合流量写到 user_id="00000000-0000-0000-0000-000000000000",
 // 造成后台 TopUsers/TrafficStats 出现"deleted"幽灵用户,后台显示混乱。
 // 每天清理一次超过 7 天的聚合标记流量日志(给客户端 grace 期间再清)。
-// 现在使用 "node:"+nodeID 前缀标识节点级流量，一并清理。
+//
+// 修复 SQL-CRON-01 (P0): 旧版 SQL 含 `user_id LIKE 'node:%'`, 但 traffic_logs.user_id
+// 是 PostgreSQL uuid 类型, 不支持 LIKE 操作符, 每 5 分钟报
+// `operator does not exist: uuid ~~ unknown (SQLSTATE 42883)`。
+// 实际上 "node:"+nodeID 前缀只在 gRPC 内存层(grpc.isNodeAggregateUser)用于标识聚合流量,
+// 在 distributeNodeTraffic 中已被分发到真实用户 ID 后才落库, 永远不会以 "node:xxx"
+// 字符串形式写入 user_id 列(uuid 列也根本存不下非 UUID 字符串)。
+// 因此 LIKE 'node:%' 子句既非法又永远匹配 0 行, 直接移除。
+// 仅保留对占位零值 UUID 的清理即可。
 func (s *CronService) CleanAggregateTrafficLogs() {
 	db := app.Get().DB
 	if db == nil {
 		return
 	}
 	cutoff := time.Now().AddDate(0, 0, -7)
-	// 清理旧格式的占位 UUID 与新格式的 "node:" 前缀聚合流量
+	// 仅清理旧版占位零值 UUID 的聚合流量日志("node:" 前缀数据不会落库, 无需 LIKE)
 	result := db.Exec(`
 		DELETE FROM traffic_logs
 		WHERE log_time < ?
-		AND (user_id = ? OR user_id LIKE ?)
-	`, cutoff, "00000000-0000-0000-0000-000000000000", "node:%")
+		AND user_id = ?
+	`, cutoff, "00000000-0000-0000-0000-000000000000")
 	if result.Error != nil {
 		s.logger.Error("clean aggregate traffic logs failed", zap.Error(result.Error))
 	} else if result.RowsAffected > 0 {
@@ -274,10 +282,14 @@ func (s *CronService) dropOldTrafficPartitions(db *gorm.DB) {
 // 避免面板误显示节点在线但实际 Xray 仍在跑旧配置。
 // 同步清除 Redis 缓存，强制节点下次心跳时拉取最新配置。
 //
-// 阈值说明: 5 分钟(原 3 分钟过激)。agent 心跳 30s/次 + 流量上报 60s/次
-// 都会刷新 last_seen_at，因此 5 分钟内必须有连续 10 次心跳 + 5 次流量
-// 上报全部失败才会判离线，能容忍短暂网络抖动/gRPC 重连，避免"显示离线
-// 但节点仍可用"的误判。
+// 阈值说明: 8 分钟。agent 心跳 30s/次 + 流量上报 60s/次 都会刷新 last_seen_at,
+// 因此 8 分钟内必须有连续 16 次心跳 + 8 次流量上报全部失败才会判离线。
+//
+// 修复 NODE-OFFLINE-01 (P0): 旧版 5 分钟阈值在面板一键更新(docker build+restart
+// 常耗时 3~6 分钟)场景下过激——面板重启期间 agent 心跳全部失败, last_seen_at
+// 停在重启前的旧值, 面板一回来 1 分钟内就把节点判离线, 但 agent 还没重连成功。
+// 此时 Xray 仍用缓存配置在跑, 用户能用节点, 但面板显示离线(用户报告的问题)。
+// 调到 8 分钟, 配合 main.go 启动延迟 3 分钟再巡检, 覆盖正常 docker 重建窗口。
 func (s *CronService) MarkStaleNodesOffline() {
 	if s.nodeRepo == nil {
 		return
@@ -287,7 +299,7 @@ func (s *CronService) MarkStaleNodesOffline() {
 		return
 	}
 	defer unlock()
-	threshold := time.Now().Add(-5 * time.Minute)
+	threshold := time.Now().Add(-8 * time.Minute)
 	// 修复 PERF-CRON-01: 旧实现先 UPDATE 再 List(0,0,"") 全表扫描 + 循环 Del,
 	// 会清掉所有启用节点的 configver/usershash 缓存, 触发全节点心跳重算配置风暴。
 	// 现改为先 SELECT id 再 UPDATE WHERE id IN, 只清理真正被标记离线的节点缓存。

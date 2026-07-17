@@ -77,15 +77,20 @@ func NewPanelClient(addr string) (*PanelClient, error) {
 			PermitWithoutStream: true,
 		}),
 		// 修复 NODE-CONN-02: 添加 RPC 级 retry policy, 单次瞬时抖动自动重试
+		// 修复 NODE-OFFLINE-01: 把 INTERNAL/UNKNOWN 也加入重试列表。
+		// 面板重启(一键更新)期间, DB 短暂不可用会让 Heartbeat 返回 codes.Internal
+		// ("查询节点失败"), 旧版只重试 UNAVAILABLE/DEADLINE_EXCEEDED, 导致 Internal
+		// 直接失败, agent 等下一个 30s tick, 节点被面板误判离线。加入 INTERNAL 后,
+		// gRPC 客户端会自动重试, 面板 DB 恢复后下一次 RPC 即可成功。
 		grpc.WithDefaultServiceConfig(`{
 			"methodConfig": [{
 				"name": [{"service": "nexus.NodeService"}, {"service": "nexus.TrafficService"}],
 				"retryPolicy": {
-					"maxAttempts": 3,
+					"maxAttempts": 4,
 					"initialBackoff": "1s",
 					"maxBackoff": "10s",
 					"backoffMultiplier": 2,
-					"retryableStatusCodes": ["UNAVAILABLE", "DEADLINE_EXCEEDED"]
+					"retryableStatusCodes": ["UNAVAILABLE", "DEADLINE_EXCEEDED", "INTERNAL", "UNKNOWN"]
 				}
 			}]
 		}`),
