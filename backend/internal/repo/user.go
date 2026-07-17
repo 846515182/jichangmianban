@@ -93,14 +93,28 @@ func (r *UserRepo) SoftDelete(id string) error {
 // ResetTraffic 重置流量
 // 同时将 status 从 traffic_exhausted 恢复为 active，否则用户即使流量清零也无法使用代理
 // (ListActiveForPlans 仅返回 status='active' 的用户，超额用户不会下发到节点)
+//
+// 修复 TRAFFIC-RESET-01 (P0): 旧版只清 users.traffic_used, 但 QueryUserTraffic 优先取
+// SUM(traffic_logs), 导致重置后节点拉到的仍是历史总量 → 用户立即被判定超额 → 凭证被剔除 → 用户无法连接。
+// 现在同时清理该用户的 traffic_logs 历史(物理删除, 因 traffic_logs 无 is_deleted 字段)。
 func (r *UserRepo) ResetTraffic(id string) error {
-	return r.db.Model(&model.User{}).Where("id = ? AND is_deleted = false", id).
-		Updates(map[string]interface{}{
-			"traffic_used":   0,
-			"upload_bytes":   0,
-			"download_bytes": 0,
-			"status":         "active",
-		}).Error
+	// 事务: 清 users 表 + 清 traffic_logs 历史, 保证原子性
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&model.User{}).Where("id = ? AND is_deleted = false", id).
+			Updates(map[string]interface{}{
+				"traffic_used":   0,
+				"upload_bytes":   0,
+				"download_bytes": 0,
+				"status":         "active",
+			}).Error; err != nil {
+			return err
+		}
+		// 修复 TRAFFIC-RESET-01: 同步清理 traffic_logs, 否则 QueryUserTraffic 汇总仍返回历史总量
+		if err := tx.Where("user_id = ?", id).Delete(&model.TrafficLog{}).Error; err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 // UpdateStatus 更新状态(禁用/启用)
@@ -144,6 +158,46 @@ func (r *UserRepo) ListActive() ([]model.User, error) {
 		Where("traffic_limit = 0 OR traffic_used < traffic_limit").
 		Find(&list).Error
 	return list, err
+}
+
+// ResetTrafficForCycleBatch 修复 TRAFFIC-RESET-02 (P0): 原代码库无周期性自动重置,
+// settings 表 reset_day 配置存在但无任何代码读取, 月付套餐用户流量用完只能手动续费。
+// 此方法批量重置所有 active 且 traffic_used > 0 的用户流量, 同时清理 traffic_logs 历史,
+// 由 cron 在每月 reset_day 日 00:05 触发。
+// 返回重置的用户数。
+func (r *UserRepo) ResetTrafficForCycleBatch() (int64, error) {
+	var count int64
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		// 1) 选出需要重置的用户 ID(避免全表 UPDATE traffic_logs)
+		var ids []string
+		if err := tx.Model(&model.User{}).
+			Where("is_deleted = false AND status = 'active' AND traffic_used > 0").
+			Pluck("id", &ids).Error; err != nil {
+			return err
+		}
+		if len(ids) == 0 {
+			return nil
+		}
+		// 2) 批量重置 users 表(active + traffic_exhausted 都恢复)
+		res := tx.Model(&model.User{}).
+			Where("id IN ? AND is_deleted = false", ids).
+			Updates(map[string]interface{}{
+				"traffic_used":   0,
+				"upload_bytes":   0,
+				"download_bytes": 0,
+				"status":         "active",
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		count = res.RowsAffected
+		// 3) 批量清理 traffic_logs 历史(配合 TRAFFIC-RESET-01 修复)
+		if err := tx.Where("user_id IN ?", ids).Delete(&model.TrafficLog{}).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+	return count, err
 }
 
 // ListActiveForPlans 查询 plan_id 命中给定列表的活跃用户(用于 node_plan_bindings)

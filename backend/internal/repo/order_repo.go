@@ -102,3 +102,16 @@ func (r *OrderRepo) ListExpired(now time.Time) ([]model.Order, error) {
 	}
 	return list, nil
 }
+
+// ListPendingSince 列出 created_at >= since 且仍为 pending 的订单(掉单对账用)
+// 修复 PAY-RECON-01 (P0): 回调因网络/服务重启丢失时, 通过主动查询 EPay 订单状态
+// 兜底完成支付, 防止"用户已付款但订单永远 pending"。仅扫近 N 分钟订单, 避免全表扫描。
+func (r *OrderRepo) ListPendingSince(since time.Time) ([]model.Order, error) {
+	var list []model.Order
+	if err := r.db.Where("is_deleted = false AND status = ? AND created_at >= ?",
+		model.OrderStatusPending, since).
+		Find(&list).Error; err != nil {
+		return nil, err
+	}
+	return list, nil
+}

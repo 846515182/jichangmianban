@@ -119,6 +119,12 @@ func (s *OrderService) GetByOrderNo(orderNo string) (*model.Order, error) {
 	return s.orderRepo.GetByOrderNo(orderNo)
 }
 
+// ListPendingSince 列出 created_at >= since 且仍为 pending 的订单(掉单对账用)
+// 修复 PAY-RECON-01 (P0): 供 CronService.ReconcilePendingOrders 调用。
+func (s *OrderService) ListPendingSince(since time.Time) ([]model.Order, error) {
+	return s.orderRepo.ListPendingSince(since)
+}
+
 // ListUserOrders 用户订单列表
 func (s *OrderService) ListUserOrders(userID string, page, size int) ([]model.Order, int64, error) {
 	return s.orderRepo.ListByUserID(userID, page, size)

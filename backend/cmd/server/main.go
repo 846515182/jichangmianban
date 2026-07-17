@@ -101,8 +101,10 @@ func main() {
 	planRepo := repo.NewPlanRepo(db)
 	couponRepo := repo.NewCouponRepo(db)
 	nodeRepo := repo.NewNodeRepo(db)
+	// 修复 TRAFFIC-RESET-02 (P0): settingRepo 供 CronService 读取 settings.traffic.reset_day
+	settingRepo := repo.NewSettingRepo(db)
 	orderSvc := service.NewOrderService(orderRepo, planRepo, couponRepo, userRepo)
-	cronSvc := service.NewCronService(userRepo, orderSvc, nodeRepo, logger)
+	cronSvc := service.NewCronService(userRepo, orderSvc, nodeRepo, settingRepo, logger)
 	go func() {
 		tickerExpire := time.NewTicker(5 * time.Minute)
 		defer tickerExpire.Stop()
@@ -147,6 +149,76 @@ func main() {
 		}
 	}()
 	logger.Info("节点心跳巡检(1m)与孤儿数据清理(6h)定时任务已启动")
+
+	// 修复 TRAFFIC-RESET-02 (P0): 周期性流量重置 cron。
+	// 每小时检查一次, 当"今日 == settings.traffic.reset_day"时触发批量重置。
+	// 方法内部用 Redis SetNX 当日幂等键, 保证同一天只执行一次(多副本/重启安全)。
+	go func() {
+		tickerReset := time.NewTicker(1 * time.Hour)
+		defer tickerReset.Stop()
+		// 启动后立即检查一次(若今天还没重置且今天是 reset_day, 立即执行)
+		cronSvc.ResetTrafficMonthly()
+		for {
+			select {
+			case <-tickerReset.C:
+				cronSvc.ResetTrafficMonthly()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	logger.Info("周期性流量重置定时任务已启动(每小时检查, 每月 reset_day 日执行)")
+
+	// 修复 STORAGE-DISK-01 (P0): 磁盘阈值告警 cron。每 5 分钟检查根分区使用率,
+	// >=85% WARN 告警, >=95% ERROR 紧急告警, 通过邮件/Telegram 通知(若已配置)。
+	// Redis 1h 冷却键防刷屏。
+	go func() {
+		tickerDisk := time.NewTicker(5 * time.Minute)
+		defer tickerDisk.Stop()
+		for {
+			select {
+			case <-tickerDisk.C:
+				cronSvc.CheckDiskThreshold()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// 修复 STORAGE-BACKUP-02/03 (P0): 自动数据库备份 + 轮转 cron。
+	// 每日 1 次执行 pg_dump 全量备份(无 pg_dump 则降级告警), 并只保留最新 1 份备份。
+	go func() {
+		tickerBackup := time.NewTicker(24 * time.Hour)
+		defer tickerBackup.Stop()
+		// 启动后先跑一次, 立即产生首份备份并清理历史残留
+		cronSvc.AutoBackupDatabase()
+		for {
+			select {
+			case <-tickerBackup.C:
+				cronSvc.AutoBackupDatabase()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	logger.Info("磁盘阈值告警(5m)与数据库自动备份+轮转(24h)定时任务已启动")
+
+	// 修复 PAY-RECON-01 (P0): 掉单对账 cron。
+	// 每 5 分钟扫描近 30 分钟内仍为 pending 的订单, 主动查 EPay 真实支付状态,
+	// 已支付的兜底调 PaySuccess 开通套餐, 防止回调丢失导致"用户已付款但订单永远 pending"。
+	go func() {
+		tickerReconcile := time.NewTicker(5 * time.Minute)
+		defer tickerReconcile.Stop()
+		for {
+			select {
+			case <-tickerReconcile.C:
+				cronSvc.ReconcilePendingOrders()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	logger.Info("掉单对账(5m)定时任务已启动")
 
 	// 10. 启动 HTTP/HTTPS 服务
 	httpSrv := &http.Server{

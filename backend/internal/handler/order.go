@@ -2,6 +2,8 @@ package handler
 
 import (
 	"errors"
+	"fmt"
+	"log"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -163,13 +165,32 @@ type adminOrderActionRequest struct {
 
 // AdminRefund [POST] /api/v1/admin/orders/:id/refund
 // 管理员对已支付订单执行退款
+// 修复 PAY-REFUND-01 (P1): 本地退款成功后, best-effort 同步 EPay 侧退款。
+// 第三方退款失败不影响本地退款结果(用户套餐已重置), 仅记录日志便于人工对账。
 func (h *OrderHandler) AdminRefund(c *gin.Context) {
 	id := c.Param("id")
 	var req adminOrderActionRequest
 	_ = c.ShouldBindJSON(&req)
+	// 先获取订单(含 trade_no / amount)用于第三方退款同步
+	o, err := h.orderSvc.GetOrder(id)
+	if err != nil {
+		response.FailMsg(c, response.CodeServerError, err.Error())
+		return
+	}
 	if err := h.orderSvc.AdminRefund(id, req.Reason); err != nil {
 		response.FailMsg(c, response.CodeServerError, err.Error())
 		return
+	}
+	// 本地退款已成功, 异步 best-effort 同步 EPay 退款, 不阻塞 API 响应
+	if h.paymentSvc != nil && o.TradeNo != "" && o.AmountCents > 0 {
+		orderNo := o.OrderNo
+		tradeNo := o.TradeNo
+		money := fmt.Sprintf("%.2f", float64(o.AmountCents)/100.0)
+		go func() {
+			if err := h.paymentSvc.RequestRefund(orderNo, tradeNo, money); err != nil {
+				log.Printf("[payment] EPay 退款同步失败 order_no=%s trade_no=%s: %v", orderNo, tradeNo, err)
+			}
+		}()
 	}
 	response.OKMsg(c, "已退款")
 }

@@ -80,3 +80,39 @@ func (m *AESManager) DecryptString(encoded string) (string, error) {
 	}
 	return string(b), nil
 }
+
+// EncryptSecret 使用应用主密钥加密敏感字段(供 settings 表存储用)。
+// 返回 base64 密文; 若 masterKey 为空/无效或加密失败, 返回明文(降级, 不阻断业务)。
+// 调用方应在存储前调用本函数, 读取时配对调用 DecryptSecret。
+func EncryptSecret(masterKey, plaintext string) string {
+	if plaintext == "" {
+		return ""
+	}
+	m, err := NewAESManager(masterKey)
+	if err != nil {
+		return plaintext
+	}
+	enc, err := m.EncryptString(plaintext)
+	if err != nil {
+		return plaintext
+	}
+	return enc
+}
+
+// DecryptSecret 解密敏感字段, 兼容明文历史数据:
+// 解密失败时认为旧数据是明文, 原样返回(平滑迁移, 不阻断业务)。
+// 这样旧明文配置在升级后仍可读取, 下次 SaveConfig 时会被加密。
+func DecryptSecret(masterKey, stored string) string {
+	if stored == "" {
+		return ""
+	}
+	m, err := NewAESManager(masterKey)
+	if err != nil {
+		return stored
+	}
+	plain, err := m.DecryptString(stored)
+	if err != nil {
+		return stored // 解密失败 = 旧明文数据, 原样返回
+	}
+	return plain
+}

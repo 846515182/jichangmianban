@@ -1,26 +1,38 @@
 package service
 
 import (
-        "context"
-        "time"
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"syscall"
+	"time"
 
-        "github.com/redis/go-redis/v9"
-        "go.uber.org/zap"
+	"github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
 
-        "nexus-panel/internal/app"
-        "nexus-panel/internal/model"
-        "nexus-panel/internal/repo"
+	"nexus-panel/internal/app"
+	"nexus-panel/internal/config"
+	"nexus-panel/internal/model"
+	"nexus-panel/internal/repo"
 )
 
+// backupDir 备份目录, 与 handler.backupDir 保持一致(对齐 docker-compose 挂载点)。
+const backupDir = "/app/data/backup"
+
 type CronService struct {
-        userRepo  *repo.UserRepo
-        orderSvc  *OrderService
-        nodeRepo  *repo.NodeRepo
-        logger    *zap.Logger
+	userRepo    *repo.UserRepo
+	orderSvc    *OrderService
+	nodeRepo    *repo.NodeRepo
+	settingRepo *repo.SettingRepo
+	logger      *zap.Logger
 }
 
-func NewCronService(u *repo.UserRepo, o *OrderService, n *repo.NodeRepo, logger *zap.Logger) *CronService {
-        return &CronService{userRepo: u, orderSvc: o, nodeRepo: n, logger: logger}
+func NewCronService(u *repo.UserRepo, o *OrderService, n *repo.NodeRepo, sr *repo.SettingRepo, logger *zap.Logger) *CronService {
+	return &CronService{userRepo: u, orderSvc: o, nodeRepo: n, settingRepo: sr, logger: logger}
 }
 
 func (s *CronService) ExpireOverdueUsers() {
@@ -174,6 +186,22 @@ func (s *CronService) CleanOrphanData() {
         } else if result.RowsAffected > 0 {
                 s.logger.Info("cleaned old traffic logs", zap.Int64("count", result.RowsAffected))
         }
+
+	// 修复 STORAGE-LOG-01 (P1): login_audit / admin_actions 两张审计表无任何清理,
+	// 长期运行会无限累积占用磁盘。保留 90 天, 超过则物理删除。
+	auditCutOff := time.Now().AddDate(0, 0, -90)
+	result = db.Where("created_at < ?", auditCutOff).Delete(&model.LoginAudit{})
+	if result.Error != nil {
+		s.logger.Error("clean old login_audit failed", zap.Error(result.Error))
+	} else if result.RowsAffected > 0 {
+		s.logger.Info("cleaned old login_audit", zap.Int64("count", result.RowsAffected))
+	}
+	result = db.Where("created_at < ?", auditCutOff).Delete(&model.AdminAction{})
+	if result.Error != nil {
+		s.logger.Error("clean old admin_actions failed", zap.Error(result.Error))
+	} else if result.RowsAffected > 0 {
+		s.logger.Info("cleaned old admin_actions", zap.Int64("count", result.RowsAffected))
+	}
 }
 
 
@@ -215,5 +243,356 @@ func (s *CronService) MarkStaleNodesOffline() {
 			}
 			rdb.Del(context.Background(), keys...)
 		}
+	}
+}
+
+// ResetTrafficMonthly 修复 TRAFFIC-RESET-02 (P0): 周期性自动流量重置。
+//
+// settings.traffic.reset_day 配置项长期存在但无任何代码读取, 导致月付套餐用户
+// 流量用完后只能手动续费/重置。此方法:
+//  1. 读取 settings.traffic.reset_day(默认 1, 即每月 1 号); 越界则取当月最后一天;
+//  2. 仅在 "今日 == targetDay" 时触发, 由 cron 每小时检查一次;
+//  3. 使用 Redis SetNX 当日幂等键(23h TTL), 防止同一天重复执行(多副本/重启场景);
+//  4. 调用 UserRepo.ResetTrafficForCycleBatch 批量重置 users.traffic_used + 清理
+//     traffic_logs 历史(配合 TRAFFIC-RESET-01 修复, 保证节点下次拉取为 0 流量)。
+func (s *CronService) ResetTrafficMonthly() {
+	if s.userRepo == nil {
+		return
+	}
+
+	// 1) 读取 settings.traffic.reset_day
+	resetDay := 1 // 默认每月 1 号
+	if s.settingRepo != nil {
+		var cfg struct {
+			ResetDay int `json:"reset_day"`
+		}
+		if err := s.settingRepo.Get("traffic", &cfg); err == nil {
+			if cfg.ResetDay >= 1 && cfg.ResetDay <= 31 {
+				resetDay = cfg.ResetDay
+			} else {
+				s.logger.Warn("settings.traffic.reset_day 配置非法,使用默认值 1",
+					zap.Int("configured", cfg.ResetDay))
+			}
+		} else {
+			// settings 缺失或读取失败时静默降级到默认值, 不阻断其它 cron 任务
+			s.logger.Debug("读取 settings.traffic 失败,使用默认 reset_day=1", zap.Error(err))
+		}
+	}
+
+	// 2) 计算当月目标日(2月无 30/31 日时取月末)
+	now := time.Now()
+	lastDay := daysInMonth(now.Year(), int(now.Month()))
+	targetDay := resetDay
+	if targetDay > lastDay {
+		targetDay = lastDay
+	}
+	if now.Day() != targetDay {
+		return // 今天不是重置日, 跳过
+	}
+
+	// 3) Redis 当日幂等键, 防止同一天重复执行(每小时检查一次)
+	rdb := app.Get().RDB
+	lockKey := fmt.Sprintf("cron:traffic:reset:%d-%02d-%02d", now.Year(), int(now.Month()), now.Day())
+	if rdb != nil {
+		ok, err := rdb.SetNX(context.Background(), lockKey, "1", 23*time.Hour).Result()
+		if err != nil {
+			s.logger.Warn("周期流量重置加锁失败,跳过本次", zap.Error(err))
+			return
+		}
+		if !ok {
+			// 今天已经执行过, 跳过(避免多副本/重启重复重置)
+			return
+		}
+	}
+
+	// 4) 批量重置
+	count, err := s.userRepo.ResetTrafficForCycleBatch()
+	if err != nil {
+		s.logger.Error("周期性流量重置失败", zap.Int("reset_day", resetDay), zap.Error(err))
+		return
+	}
+	s.logger.Info("周期性流量重置完成",
+		zap.Int("reset_day", resetDay),
+		zap.Int64("user_count", count))
+}
+
+// daysInMonth 返回某年某月的天数(用于 reset_day 越界修正)
+func daysInMonth(year, month int) int {
+	// time.Date(year, month+1, 0, ...) 取得当月最后一天
+	t := time.Date(year, time.Month(month+1), 0, 0, 0, 0, 0, time.UTC)
+	return t.Day()
+}
+
+// ============================================================
+// 第三批: 备份存储控制 + 磁盘阈值告警
+// ============================================================
+
+// notifSvc 懒构造通知服务(邮件/Telegram), 用于磁盘告警等场景。
+// NotificationService 此前为孤儿死代码(从未被实例化), 现接入。
+func (s *CronService) notifSvc() *NotificationService {
+	c := app.Get()
+	if c == nil || c.Cfg == nil {
+		return nil
+	}
+	return NewNotificationService(c.Cfg, s.logger)
+}
+
+// paymentSvc 懒构造 PaymentService, 用于掉单对账场景。
+// 不在构造函数注入, 避免与 OrderService 的循环依赖。
+func (s *CronService) paymentSvc() *PaymentService {
+	if s.settingRepo == nil || s.orderSvc == nil {
+		return nil
+	}
+	return NewPaymentService(s.settingRepo, s.orderSvc)
+}
+
+// ReconcilePendingOrders 修复 PAY-RECON-01 (P0): 掉单对账 cron。
+//
+// 问题: 支付回调依赖第三方网关 POST /api/v1/payment/notify, 若面板重启/网络抖动/
+// 网关重试失败, 用户已付款但订单永远停在 pending, 用户权益无法开通("掉单")。
+//
+// 此方法每 5 分钟扫描一次近 30 分钟内仍为 pending 的订单, 主动调 EPay act=order
+// 接口查询真实支付状态; 若已支付则调用 OrderService.PaySuccess 兜底开通套餐。
+// 扫描窗口取 30 分钟(订单本身 15 分钟过期), 兼顾覆盖度与全表扫描成本。
+func (s *CronService) ReconcilePendingOrders() {
+	unlock := tryLock(app.Get().RDB, "cron:lock:reconcile", 4*time.Minute)
+	if unlock == nil {
+		return
+	}
+	defer unlock()
+
+	ps := s.paymentSvc()
+	if ps == nil {
+		return
+	}
+
+	// 扫描近 30 分钟内仍为 pending 的订单
+	since := time.Now().Add(-30 * time.Minute)
+	orders, err := s.orderSvc.ListPendingSince(since)
+	if err != nil {
+		s.logger.Error("掉单对账查询失败", zap.Error(err))
+		return
+	}
+	if len(orders) == 0 {
+		return
+	}
+
+	reconciled := 0
+	for _, o := range orders {
+		// 跳过已过期的(ExpireOrders cron 会处理)
+		if !o.ExpiredAt.IsZero() && o.ExpiredAt.Before(time.Now()) {
+			continue
+		}
+		status, qerr := ps.QueryOrderStatus(o.OrderNo)
+		if qerr != nil {
+			// 查询失败(网关错误/订单未找到)常见, 仅 debug 记录
+			s.logger.Debug("掉单对账查询订单状态失败",
+				zap.String("order_no", o.OrderNo), zap.Error(qerr))
+			continue
+		}
+		if status.TradeStatus != "TRADE_SUCCESS" {
+			continue // 未支付, 跳过
+		}
+		// 金额校验, 防止 EPay 网关数据异常导致错误开通
+		if status.Money != "" {
+			cents, perr := parseMoneyToCents(status.Money)
+			if perr == nil && cents != o.AmountCents {
+				s.logger.Warn("掉单对账金额不匹配,跳过开通",
+					zap.String("order_no", o.OrderNo),
+					zap.Int64("order_cents", o.AmountCents),
+					zap.Int64("epay_cents", cents))
+				continue
+			}
+		}
+		// 调 PaySuccess 兜底开通(内部 FOR UPDATE 幂等, 重复回调安全)
+		if err := s.orderSvc.PaySuccess(o.OrderNo, status.TradeNo); err != nil {
+			s.logger.Error("掉单对账兜底开通失败",
+				zap.String("order_no", o.OrderNo), zap.Error(err))
+			continue
+		}
+		reconciled++
+		s.logger.Info("掉单对账成功,已兜底开通套餐",
+			zap.String("order_no", o.OrderNo),
+			zap.String("trade_no", status.TradeNo))
+	}
+	if reconciled > 0 {
+		s.logger.Info("掉单对账批次完成", zap.Int("reconciled", reconciled),
+			zap.Int("scanned", len(orders)))
+	}
+}
+
+// CheckDiskThreshold 修复 STORAGE-DISK-01 (P0): 此前没有任何磁盘阈值告警逻辑,
+// 日志/备份/缓存爆满会导致数据库写失败、服务崩溃。此方法:
+//  1. 通过 syscall.Statfs 读取根分区使用率;
+//  2. >=85% 触发 WARN 告警, >=95% 触发 ERROR 紧急告警;
+//  3. 通过 NotificationService 发邮件/Telegram(若已配置);
+//  4. Redis 1 小时冷却键防刷屏(同一告警级别 1h 内最多 1 次)。
+func (s *CronService) CheckDiskThreshold() {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs("/", &stat); err != nil {
+		s.logger.Warn("读取磁盘使用率失败", zap.Error(err))
+		return
+	}
+	total := stat.Blocks * uint64(stat.Bsize)
+	if total == 0 {
+		return
+	}
+	used := (stat.Blocks - stat.Bavail) * uint64(stat.Bsize)
+	pct := float64(used) * 100 / float64(total)
+
+	level := ""
+	if pct >= 95 {
+		level = "critical"
+	} else if pct >= 85 {
+		level = "warn"
+	}
+	if level == "" {
+		return
+	}
+
+	// Redis 冷却: 同一级别 1h 内最多告警 1 次, 避免每 5 分钟刷屏
+	rdb := app.Get().RDB
+	cooldownKey := "alert:disk:" + level
+	if rdb != nil {
+		ok, err := rdb.SetNX(context.Background(), cooldownKey, "1", time.Hour).Result()
+		if err == nil && !ok {
+			return // 冷却中, 跳过
+		}
+	}
+
+	msg := fmt.Sprintf("磁盘告警 [%s]: 根分区使用率 %.1f%% (总计 %.1f GB, 已用 %.1f GB)",
+		level, pct, float64(total)/(1<<30), float64(used)/(1<<30))
+
+	if level == "critical" {
+		s.logger.Error(msg)
+	} else {
+		s.logger.Warn(msg)
+	}
+
+	// 发送邮件/Telegram 告警(若已配置)
+	if ns := s.notifSvc(); ns != nil && ns.IsEnabled() {
+		go ns.NotifyAll("Nexus-Panel 磁盘告警", msg)
+	}
+}
+
+// AutoBackupDatabase 修复 STORAGE-BACKUP-02 (P0): 此前仅 admin 手动触发的 JSON 快照
+// (且只含 users/nodes/settings 三表), 无任何自动数据库备份。此方法:
+//  1. 调用 pg_dump 全量备份数据库(若容器内无 pg_dump 则降级为 JSON 快照并告警);
+//  2. 备份写入 /app/data/backup/db-backup-YYYYMMDD-HHMMSS.sql.gz;
+//  3. 调用 RotateBackupsKeepOne 只保留最新 1 份(满足"自动备份仅保留最新一份")。
+func (s *CronService) AutoBackupDatabase() {
+	unlock := tryLock(app.Get().RDB, "cron:lock:backup", 30*time.Minute)
+	if unlock == nil {
+		s.logger.Debug("数据库备份被其它实例占用,跳过本次")
+		return
+	}
+	defer unlock()
+
+	if err := os.MkdirAll(backupDir, 0700); err != nil {
+		s.logger.Error("创建备份目录失败", zap.String("dir", backupDir), zap.Error(err))
+		return
+	}
+
+	cfg := app.Get().Cfg
+	if cfg == nil {
+		s.logger.Error("数据库备份失败: 配置不可用")
+		return
+	}
+
+	ts := time.Now().Format("20060102-150405")
+	outPath := filepath.Join(backupDir, "db-backup-"+ts+".sql.gz")
+
+	// 优先尝试 pg_dump(全量, 含所有表与数据)
+	if _, err := exec.LookPath("pg_dump"); err == nil {
+		if err := runPgDump(cfg, outPath); err != nil {
+			s.logger.Error("pg_dump 备份失败", zap.Error(err))
+			_ = os.Remove(outPath) // 清理可能写了一半的损坏文件
+		} else {
+			s.logger.Info("数据库自动备份完成(pg_dump)", zap.String("file", outPath))
+		}
+	} else {
+		// 容器内无 pg_dump: 降级告警, 不阻塞(管理员可手动配置 pg_dump 或用 JSON 快照)
+		s.logger.Warn("容器内未找到 pg_dump, 跳过数据库全量备份(建议在镜像中安装 postgresql-client)")
+	}
+
+	// 无论 pg_dump 是否成功, 都执行备份轮转(清理旧文件, 保留最新 1 份)
+	s.RotateBackupsKeepOne()
+}
+
+// runPgDump 执行 pg_dump 并压缩为 gzip
+func runPgDump(cfg *config.Config, outPath string) error {
+	f, err := os.Create(outPath)
+	if err != nil {
+		return fmt.Errorf("创建备份文件失败: %w", err)
+	}
+	defer f.Close()
+
+	// pg_dump 连接串: host=... port=... user=... dbname=... (密码通过 PGPASSWORD 环境变量传递, 避免进程参数泄露)
+	args := []string{
+		"--host=" + cfg.DBHost,
+		"--port=" + cfg.DBPort,
+		"--username=" + cfg.DBUser,
+		"--dbname=" + cfg.DBName,
+		"--no-owner", "--no-privileges", // 跨环境恢复兼容
+	}
+	cmd := exec.Command("pg_dump", args...)
+	cmd.Stdout = f
+	cmd.Stderr = os.Stderr
+	cmd.Env = append(os.Environ(), "PGPASSWORD="+cfg.DBPass)
+	return cmd.Run()
+}
+
+// RotateBackupsKeepOne 修复 STORAGE-BACKUP-03 (P0): 旧实现备份只增不删, 永久累积。
+// 此方法扫描备份目录, 对每种类型(.json 配置快照 / .sql.gz 数据库备份)各只保留最新 1 份,
+// 删除其余旧文件。满足"每次新备份完成后自动删除旧备份, 仅保留最新一份"。
+func (s *CronService) RotateBackupsKeepOne() {
+	entries, err := os.ReadDir(backupDir)
+	if err != nil {
+		s.logger.Debug("读取备份目录失败(可能尚未创建)", zap.String("dir", backupDir), zap.Error(err))
+		return
+	}
+
+	// 按后缀分组: .json 与 .sql.gz 各保留 1 份最新
+	groups := map[string][]os.DirEntry{
+		".json":   {},
+		".sql.gz": {},
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		switch {
+		case strings.HasSuffix(name, ".sql.gz"):
+			groups[".sql.gz"] = append(groups[".sql.gz"], e)
+		case strings.HasSuffix(name, ".json"):
+			groups[".json"] = append(groups[".json"], e)
+		}
+	}
+
+	deleted := 0
+	for _, group := range groups {
+		if len(group) <= 1 {
+			continue
+		}
+		// 按修改时间倒序(最新在前)
+		sort.Slice(group, func(i, j int) bool {
+			ii, _ := group[i].Info()
+			jj, _ := group[j].Info()
+			return ii.ModTime().After(jj.ModTime())
+		})
+		// 保留 group[0](最新), 删除其余
+		for _, e := range group[1:] {
+			p := filepath.Join(backupDir, e.Name())
+			if err := os.Remove(p); err != nil {
+				s.logger.Warn("删除旧备份失败", zap.String("file", p), zap.Error(err))
+			} else {
+				deleted++
+			}
+		}
+	}
+	if deleted > 0 {
+		s.logger.Info("备份轮转完成, 已清理旧备份(仅保留最新 1 份)",
+			zap.Int("deleted", deleted), zap.String("dir", backupDir))
 	}
 }

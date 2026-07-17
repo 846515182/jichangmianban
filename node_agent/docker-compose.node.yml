@@ -36,6 +36,13 @@ services:
       - "${LISTEN_PORT:-443}:${LISTEN_PORT:-443}"
     cap_add:
       - NET_ADMIN
+    # 修复 STORAGE-LOG-02 (P1): 旧版无 logging 段, Docker 默认 json-file 驱动无大小上限,
+    # node-agent 日志(Xray stdout 转发)会无限增长撑爆节点磁盘。与面板容器保持一致: 50m × 3。
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     volumes:
       # Xray 二进制和配置缓存(避免每次重启重新下载)，每节点独立目录
       # 用绑定挂载(相对路径)，避免 docker compose 顶层 volumes 不支持变量插值的问题

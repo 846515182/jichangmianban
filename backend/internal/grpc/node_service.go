@@ -128,6 +128,8 @@ func (s *NodeServiceServer) Heartbeat(ctx context.Context, req *nexuspb.Heartbea
 	}
 
 	// 运行时信息存 Redis(节点 agent 仪表盘用)
+	// 修复 NODE-HEALTH-01: 新增 proxy_reachable / proxy_latency_ms / proxy_error 字段
+	// 让面板区分"agent 进程可达"和"代理服务可用"
 	if rdb := app.Get().RDB; rdb != nil {
 		hb := map[string]interface{}{
 			"node_id":            node.ID,
@@ -137,33 +139,52 @@ func (s *NodeServiceServer) Heartbeat(ctx context.Context, req *nexuspb.Heartbea
 			"memory_total":       req.GetMemoryTotal(),
 			"online_connections": req.GetOnlineConnections(),
 			"uptime_seconds":     req.GetUptimeSeconds(),
-			"traffic_limit":      req.GetTrafficLimit(),
-			"traffic_used":       req.GetTrafficUsed(),
 			"updated_at":         now.Unix(),
+			// 修复 NODE-HEALTH-01: 代理自检结果, 面板用它显示真实在线状态
+			"proxy_reachable": req.GetProxyReachable(),
+			"proxy_latency":   req.GetProxyLatencyMs(),
+			"proxy_error":     req.GetProxyError(),
 		}
 		key := fmt.Sprintf("node:heartbeat:%s", node.ID)
 		if err := rdb.HSet(ctx, key, hb).Err(); err != nil {
 			s.logger.Warn("写入心跳 Redis 失败", zap.String("key", key), zap.Error(err))
 		}
-		_ = rdb.Expire(ctx, key, 2*time.Minute).Err()
+		// 修复 NODE-REDIS-TTL: 原 2min TTL 与 MarkStale 5min 阈值不一致, 心跳延迟 >2min 时
+		// Redis key 过期导致 runtime 全 0, 而 DB online 仍 true, 状态割裂 2-5min。
+		// 调到 10min(2 倍 MarkStale 阈值), 心跳恢复后自动刷新。
+		_ = rdb.Expire(ctx, key, 10*time.Minute).Err()
 	}
 
-	// 存储当前配置版本到 Redis，每次心跳检查是否需要更新
-	configVer := strconv.FormatInt(node.UpdatedAt.Unix(), 10)
+	// 修复 NODE-CONFIGVER-01: 原 configVer = UpdatedAt.Unix() 秒级精度,
+	// 同秒内多次更新会漏判(如先改 name 再改 port), agent 拿到旧配置。
+	// 改用 UpdatedAt.UnixNano() 纳秒精度, 配合 GORM 微秒精度足够区分。
+	configVer := strconv.FormatInt(node.UpdatedAt.UnixNano(), 10)
 	configChanged := false
-	if rdb := app.Get().RDB; rdb != nil {
+	// 修复 NODE-REDIS-DEGRADE: 原 Redis 不可用时 configChanged 恒 false,
+	// 用户超额后 agent 永远不重拉配置, 超额用户继续可用。
+	// 降级策略: Redis 不可用时强制 configChanged=true, 让 agent 每次(30s)重拉一次,
+	// 虽然增加开销, 但保证状态最终一致。
+	rdb := app.Get().RDB
+	if rdb != nil {
 		key := fmt.Sprintf("node:configver:%s", node.ID)
 		oldVer, _ := rdb.Get(ctx, key).Result()
 		if oldVer != configVer {
 			configChanged = true
-			rdb.Set(ctx, key, configVer, 0)
+			if err := rdb.Set(ctx, key, configVer, 0).Err(); err != nil {
+				// Set 失败(如 Redis 只读), 下次心跳仍会触发, 可接受
+				s.logger.Warn("写入 configVer 失败", zap.String("key", key), zap.Error(err))
+			}
 		}
+	} else {
+		configChanged = true
+		s.logger.Warn("Redis 不可用, 强制 configChanged=true 保证最终一致",
+			zap.String("node_id", node.ID))
 	}
 
 	// 用户变更检测：对当前活跃用户列表做指纹哈希，与 Redis 缓存比较
 	// 修复 BIZ-FATAL-02: 原有实现只比较 node.UpdatedAt，用户增删改时不会触发 ConfigChanged
 	usersChanged := false
-	if rdb := app.Get().RDB; rdb != nil {
+	if rdb != nil {
 		users, err := s.listActiveUsersForNode(node)
 		if err == nil {
 			// 计算用户列表指纹：user_id 排序拼接后取 hash
@@ -182,12 +203,16 @@ func (s *NodeServiceServer) Heartbeat(ctx context.Context, req *nexuspb.Heartbea
 			oldHash, _ := rdb.Get(ctx, key).Result()
 			if oldHash != hash {
 				usersChanged = true
-				rdb.Set(ctx, key, hash, 0)
+				if err := rdb.Set(ctx, key, hash, 0).Err(); err != nil {
+					s.logger.Warn("写入 usershash 失败", zap.String("key", key), zap.Error(err))
+				}
 				s.logger.Info("检测到用户列表变更，触发配置更新",
 					zap.String("node_id", node.ID),
 					zap.Int("user_count", len(users)))
 			}
 		}
+	} else {
+		usersChanged = true
 	}
 
 	return &nexuspb.HeartbeatResponse{

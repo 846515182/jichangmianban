@@ -24,6 +24,7 @@ import (
 	"nexus-panel/internal/model"
 	"nexus-panel/internal/repo"
 	"nexus-panel/internal/response"
+	"nexus-panel/internal/security"
 	"nexus-panel/internal/service"
 )
 
@@ -515,11 +516,31 @@ func (h *AdminSystemHandler) GetNotifyConfig(c *gin.Context) {
 }
 
 // UpdateNotifyConfig PUT /api/v1/admin/system/notify-config
+// 修复 SEC-ENCRYPT-01 (P1): 此前直接把前端原始 map 写入 settings, email_password 明文落库。
+// 现在处理 email_password: 空值/脱敏值(含*)保留原存储值, 新明文值 AES 加密后存储。
 func (h *AdminSystemHandler) UpdateNotifyConfig(c *gin.Context) {
 	var cfg map[string]interface{}
 	if err := c.ShouldBindJSON(&cfg); err != nil {
 		response.Fail(c, response.CodeParamError)
 		return
+	}
+	if pwd, ok := cfg["email_password"].(string); ok {
+		masterKey := ""
+		if a := app.Get(); a != nil && a.Cfg != nil {
+			masterKey = a.Cfg.AESMasterKey
+		}
+		if pwd == "" || containsAsterisk(pwd) {
+			// 空值或脱敏值: 保留原存储值(密文或旧明文, DecryptSecret 均可正确读取)
+			var existing map[string]interface{}
+			if err := h.settingRepo.Get("notification", &existing); err == nil {
+				if ep, ok := existing["email_password"].(string); ok {
+					cfg["email_password"] = ep
+				}
+			}
+		} else {
+			// 新明文密码: AES 加密后存储
+			cfg["email_password"] = security.EncryptSecret(masterKey, pwd)
+		}
 	}
 	if err := h.settingRepo.Set("notification", cfg); err != nil {
 		response.Fail(c, response.CodeDBError)
@@ -578,7 +599,11 @@ func (h *AdminSystemHandler) TestNotifyConfig(c *gin.Context) {
 // 备份文件管理
 // ============================================================
 
-const backupDir = "/var/backups/nexus"
+// backupDir 备份目录。
+// 修复 STORAGE-BACKUP-01 (P0): 旧值 "/var/backups/nexus" 与 docker-compose.yml
+// 挂载点 "./backups:/app/data/backup" 不一致, 导致备份写入容器内非挂载路径,
+// 容器重建即丢失全部备份。现对齐为挂载目录 /app/data/backup, 备份持久化到宿主。
+var backupDir = "/app/data/backup"
 
 // ensureBackupDir 确保备份目录存在
 func ensureBackupDir() error {
@@ -894,6 +919,10 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		}
 		// 写入临时路径，然后 mv 替换（防止写一半被读取）
 		tmpPath := "/app/nexus-panel.new"
+		// 修复 STORAGE-RESIDUAL-01 (P2): 写入临时二进制后若 Rename 失败/进程崩溃,
+		// /app/nexus-panel.new 会永久残留占用磁盘。defer 兜底删除(Rename 成功后文件
+		// 已不存在, Remove 是 no-op; Rename 失败时清理残留)。
+		defer os.Remove(tmpPath)
 		if err := os.WriteFile(tmpPath, newBinary, 0755); err != nil {
 			logWrite("写入新二进制失败: %v", err)
 			gitPullOK = false

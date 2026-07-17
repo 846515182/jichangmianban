@@ -1,7 +1,13 @@
 .env
 *.log
 backups/
+# 修复 STORAGE-RESIDUAL-02 (P2): 覆盖所有面板二进制残留变体
+# nexus-panel(主二进制) / nexus-panel.new(更新临时) / nexus-panel-fix / nexus-panel.backup.*
 nexus-panel
+nexus-panel.new
+nexus-panel-fix
+nexus-panel.backup.*
+nexus-panel-new
 node_modules/
 dist/
 *.bak*
@@ -12,4 +18,3 @@ deployments/
 docker-cli/
 _out/
 backend/_out/
-nexus-panel-new

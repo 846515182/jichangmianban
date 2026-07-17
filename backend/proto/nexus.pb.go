@@ -503,6 +503,10 @@ type HeartbeatRequest struct {
 	UptimeSeconds     float64                `protobuf:"fixed64,7,opt,name=uptime_seconds,json=uptimeSeconds,proto3" json:"uptime_seconds,omitempty"`
 	TrafficLimit      int64                  `protobuf:"varint,8,opt,name=traffic_limit,json=trafficLimit,proto3" json:"traffic_limit,omitempty"`
 	TrafficUsed       int64                  `protobuf:"varint,9,opt,name=traffic_used,json=trafficUsed,proto3" json:"traffic_used,omitempty"`
+	// 修复 NODE-HEALTH-01: agent REALITY 自检结果上报, 区分 agent 进程可达 vs 代理服务可用
+	ProxyReachable    bool                   `protobuf:"varint,11,opt,name=proxy_reachable,json=proxyReachable,proto3" json:"proxy_reachable,omitempty"`
+	ProxyLatencyMs    int64                  `protobuf:"varint,12,opt,name=proxy_latency_ms,json=proxyLatencyMs,proto3" json:"proxy_latency_ms,omitempty"`
+	ProxyError        string                 `protobuf:"bytes,13,opt,name=proxy_error,json=proxyError,proto3" json:"proxy_error,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -605,6 +609,28 @@ func (x *HeartbeatRequest) GetTrafficUsed() int64 {
 		return x.TrafficUsed
 	}
 	return 0
+}
+
+// 修复 NODE-HEALTH-01: REALITY 自检结果 Getter
+func (x *HeartbeatRequest) GetProxyReachable() bool {
+	if x != nil {
+		return x.ProxyReachable
+	}
+	return false
+}
+
+func (x *HeartbeatRequest) GetProxyLatencyMs() int64 {
+	if x != nil {
+		return x.ProxyLatencyMs
+	}
+	return 0
+}
+
+func (x *HeartbeatRequest) GetProxyError() string {
+	if x != nil {
+		return x.ProxyError
+	}
+	return ""
 }
 
 type HeartbeatResponse struct {

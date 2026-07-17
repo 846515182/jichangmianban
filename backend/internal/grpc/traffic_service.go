@@ -263,24 +263,14 @@ func (s *TrafficServiceServer) QueryUserTraffic(ctx context.Context, req *nexusp
 		return nil, status.Error(codes.Internal, "查询用户失败")
 	}
 
-	// 取流量日志汇总(traffic_logs)
-	ids := make([]string, 0, len(users))
-	for _, u := range users {
-		ids = append(ids, u.ID)
-	}
-	sumMap, err := s.trafficRepo.SumByUsers(ids)
-	if err != nil {
-		s.logger.Warn("查询流量汇总失败", zap.Error(err))
-		sumMap = map[string]int64{} // 容错：失败时返回 users 表里的 traffic_used
-	}
-
+	// 修复 TRAFFIC-RESET-01 (P0): 旧版优先取 traffic_logs 汇总,
+	// 但 ResetTraffic 后 traffic_logs 已清(本批修复), 优先级反转会导致节点拉到 0 流量。
+	// 现在以 users.traffic_used 为唯一真相源(实时累加字段, 由 AddTrafficTx 维护),
+	// traffic_logs 仅用于历史趋势展示, 不参与计费判定。
+	// (配套清理: 旧版残留的 SumByUsers 调用 + sumMap 变量已废弃, 移除避免"declared and not used"编译错误)
 	summaries := make([]*nexuspb.UserTrafficSummary, 0, len(users))
 	for _, u := range users {
-		// 优先取 traffic_logs 汇总；若汇总为 0 则回退到 users.traffic_used
-		total := sumMap[u.ID]
-		if total == 0 {
-			total = u.TrafficUsed
-		}
+		total := u.TrafficUsed
 		summaries = append(summaries, &nexuspb.UserTrafficSummary{
 			UserId:       u.ID,
 			TotalUsed:    total,

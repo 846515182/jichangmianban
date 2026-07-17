@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strconv"
 	"strings"
@@ -56,6 +57,11 @@ type Agent struct {
 	// 实际 Xray 监听端口（面板分配或 LISTEN_PORT 覆盖）
 	// 用于健康检查，保证始终与 Xray 实际监听端口一致
 	effectivePort int
+
+	// 修复 NODE-HEALTH-02: Xray 崩溃自动重启的限流记录
+	// restartHistory 保存最近 10 分钟窗口内的重启时间戳, 超 3 次暂停自动重启
+	restartMu       sync.Mutex
+	restartHistory  []time.Time
 }
 
 
@@ -333,6 +339,16 @@ func (a *Agent) doHeartbeat() {
 		memUsage = float64(memUsed) / float64(memTotal) * 100
 	}
 
+	// 修复 NODE-HEALTH-02: Xray 进程崩溃后自动重启
+	// 旧版 Xray 退出后 agent 仍发心跳, 面板 online=true 但代理已不可用
+	// 这里检测 Xray 进程是否存活, 不存活则尝试重启(最多 3 次/10 分钟窗口)
+	if a.xray != nil && !a.xray.IsRunning() {
+		log.Printf("[health][WARN] Xray 进程未运行, 尝试自动重启...")
+		if err := a.autoRestartXray(); err != nil {
+			log.Printf("[health][ERROR] Xray 自动重启失败: %v", err)
+		}
+	}
+
 	// REALITY 自连健康检查(每次心跳时执行，约 30s 一次)
 	health := a.CheckProxyHealth()
 	if health.ProxyReachable {
@@ -341,9 +357,17 @@ func (a *Agent) doHeartbeat() {
 		log.Printf("[health][ERROR] 代理自连失败: %s (latency=%dms)", health.ProxyError, health.ProxyLatencyMs)
 	}
 
-	//
-	trafficDown, trafficUp := a.traffic.Total()
-	resp, err := a.client.Heartbeat(a.getNodeID(), a.cfg.NodeToken, agentVersion, 0, memUsage, memTotal, 0, uptime, trafficDown, trafficUp)
+	// 修复 NODE-HEALTH-01: 上报 proxy 健康结果, 让面板区分 agent 进程可达 vs 代理服务可用
+	// 修复 NODE-DATA-01: cpuUsage/onlineConns 原硬编码 0, 现在用真实值
+	// 修复 NODE-DATA-02: trafficDown/Up 原塞进 trafficLimit/Used, 现在传 0 让 DB 字段为准
+	cpuUsage := readCPUUsage()
+	onlineConns := a.readOnlineConnections()
+	resp, err := a.client.Heartbeat(
+		a.getNodeID(), a.cfg.NodeToken, agentVersion,
+		cpuUsage, memUsage, memTotal, onlineConns, uptime,
+		0, 0, // trafficLimit/Used 由 DB 维护, 心跳不再上报流量
+		health.ProxyReachable, health.ProxyLatencyMs, health.ProxyError,
+	)
 	if err != nil {
 		// 致命错误: 节点已被面板删除/token 失效 → 停止 Xray 代理服务
 		if isFatalHeartbeatError(err) {
@@ -503,4 +527,113 @@ func hostname() string {
 		return "unknown"
 	}
 	return h
+}
+
+// autoRestartXray Xray 进程崩溃后自动重启, 限流: 10 分钟窗口内最多 3 次
+// 修复 NODE-HEALTH-02: 旧版 Xray 退出后 agent 继续发心跳但代理不可用, 无任何恢复机制
+// 限流防止 Xray 配置错误导致无限重启死循环
+func (a *Agent) autoRestartXray() error {
+	now := time.Now()
+	a.restartMu.Lock()
+	defer a.restartMu.Unlock()
+
+	// 清理 10 分钟窗口外的重启记录
+	cutoff := now.Add(-10 * time.Minute)
+	valid := a.restartHistory[:0]
+	for _, t := range a.restartHistory {
+		if t.After(cutoff) {
+			valid = append(valid, t)
+		}
+	}
+	a.restartHistory = valid
+
+	if len(a.restartHistory) >= 3 {
+		return fmt.Errorf("Xray 10 分钟内已重启 %d 次, 暂停自动重启防止死循环(需人工检查配置)", len(a.restartHistory))
+	}
+
+	a.restartHistory = append(a.restartHistory, now)
+	log.Printf("[health] 开始重启 Xray (窗口内第 %d 次)", len(a.restartHistory))
+
+	// 用上次缓存的配置重启
+	if err := a.applyConfig(); err != nil {
+		return fmt.Errorf("重启 Xray 失败: %w", err)
+	}
+	log.Printf("[health] Xray 重启成功")
+	return nil
+}
+
+// readCPUUsage 读取 CPU 使用率(简化版: 读 /proc/stat 两次取差)
+// 修复 NODE-DATA-01: 原 doHeartbeat 硬编码 cpuUsage=0, 面板 CPU 永远显示 0
+func readCPUUsage() float64 {
+	// 读两次 /proc/stat 取差值, 间隔 100ms
+	readStat := func() (idle, total uint64) {
+		data, err := os.ReadFile("/proc/stat")
+		if err != nil {
+			return 0, 0
+		}
+		// 只解析第一行(aggregate)
+		line := strings.SplitN(string(data), "\n", 2)[0]
+		fields := strings.Fields(line)
+		if len(fields) < 5 || fields[0] != "cpu" {
+			return 0, 0
+		}
+		var sums [10]uint64
+		for i := 1; i < len(fields) && i <= 10; i++ {
+			v, _ := strconv.ParseUint(fields[i], 10, 64)
+			sums[i-1] = v
+		}
+		idle = sums[3] + sums[4] // idle + iowait
+		for _, v := range sums {
+			total += v
+		}
+		return idle, total
+	}
+	idle1, total1 := readStat()
+	time.Sleep(100 * time.Millisecond)
+	idle2, total2 := readStat()
+	if total2 <= total1 {
+		return 0
+	}
+	totalDiff := total2 - total1
+	idleDiff := idle2 - idle1
+	if totalDiff == 0 {
+		return 0
+	}
+	usage := float64(totalDiff-idleDiff) / float64(totalDiff) * 100
+	if usage < 0 {
+		return 0
+	}
+	if usage > 100 {
+		return 100
+	}
+	return usage
+}
+
+// readOnlineConnections 读取 Xray 当前活跃连接数(简化版: ss 命令统计 ESTAB 连接)
+// 修复 NODE-DATA-01: 原 doHeartbeat 硬编码 onlineConns=0, 面板连接数永远显示 0
+func (a *Agent) readOnlineConnections() int32 {
+	port := a.effectivePort
+	if port == 0 {
+		return 0
+	}
+	// 用 ss 统计本节点 listen 端口上的 ESTABLISHED 连接数
+	// 兜底: ss 不存在时返回 0, 不阻断心跳
+	out, err := execCommand("ss", "-ant", fmt.Sprintf("( dport = :%d or sport = :%d )", port, port))
+	if err != nil {
+		return 0
+	}
+	var count int32
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.Contains(line, "ESTAB") {
+			count++
+		}
+	}
+	return count
+}
+
+// execCommand 在 agent 进程内执行命令并返回输出(简化版, 不超时控制)
+// 注: 实际使用场景(ss 命令)非常快, 不需要长超时
+func execCommand(name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...)
+	return cmd.Output()
 }

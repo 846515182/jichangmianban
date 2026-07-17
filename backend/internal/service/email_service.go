@@ -10,6 +10,7 @@ import (
 
 	"nexus-panel/internal/config"
 	"nexus-panel/internal/repo"
+	"nexus-panel/internal/security"
 )
 
 // EmailService 邮件服务
@@ -49,6 +50,8 @@ type notifyConfig struct {
 }
 
 // GetConfig 获取邮件配置（仅读数据库 notification 设置，供管理后台展示/脱敏使用）
+// 修复 SEC-ENCRYPT-01 (P1): email_password 入库前已 AES 加密, 读取时解密;
+// 兼容旧明文数据(DecryptSecret 解密失败时原样返回)。
 func (s *EmailService) GetConfig() (*EmailConfig, error) {
 	var cfg notifyConfig
 	if err := s.settingRepo.Get("notification", &cfg); err != nil {
@@ -57,9 +60,13 @@ func (s *EmailService) GetConfig() (*EmailConfig, error) {
 			User: "", Password: "", From: "",
 		}, nil
 	}
+	masterKey := ""
+	if s.cfg != nil {
+		masterKey = s.cfg.AESMasterKey
+	}
 	return &EmailConfig{
 		Enabled: cfg.EmailEnabled, Host: cfg.EmailHost, Port: cfg.EmailPort,
-		User: cfg.EmailUser, Password: cfg.EmailPassword, From: cfg.EmailFrom,
+		User: cfg.EmailUser, Password: security.DecryptSecret(masterKey, cfg.EmailPassword), From: cfg.EmailFrom,
 	}, nil
 }
 
@@ -94,6 +101,7 @@ func mergeConfig(dbCfg *EmailConfig, cfg *config.Config) *EmailConfig {
 }
 
 // SaveConfig 保存邮件配置
+// 修复 SEC-ENCRYPT-01 (P1): email_password 入库前 AES 加密, 防止数据库拖库后 SMTP 凭据泄露。
 func (s *EmailService) SaveConfig(cfg *EmailConfig) error {
 	var existing notifyConfig
 	_ = s.settingRepo.Get("notification", &existing)
@@ -101,7 +109,11 @@ func (s *EmailService) SaveConfig(cfg *EmailConfig) error {
 	existing.EmailHost = cfg.Host
 	existing.EmailPort = cfg.Port
 	existing.EmailUser = cfg.User
-	existing.EmailPassword = cfg.Password
+	masterKey := ""
+	if s.cfg != nil {
+		masterKey = s.cfg.AESMasterKey
+	}
+	existing.EmailPassword = security.EncryptSecret(masterKey, cfg.Password)
 	existing.EmailFrom = cfg.From
 	return s.settingRepo.Set("notification", existing)
 }

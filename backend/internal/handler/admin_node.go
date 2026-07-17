@@ -61,13 +61,17 @@ func (h *AdminNodeHandler) NodeList(c *gin.Context) {
 	snapMap := make(map[string]map[string]string, len(list))
 	if rdb != nil && len(nodeIDs) > 0 {
 		pipe := rdb.Pipeline()
-		hbCmds := make([]*redis.StringStringMapCmd, len(list))
-		snapCmds := make([]*redis.StringStringMapCmd, len(list))
+		// 修复 BUILD-REDIS-01 (P0): go-redis v9.5.1 中 HGetAll 返回 *MapStringStringCmd,
+		// 而非旧版的 *StringStringMapCmd; 旧代码使用了不存在的类型名导致编译失败。
+		hbCmds := make([]*redis.MapStringStringCmd, len(list))
+		snapCmds := make([]*redis.MapStringStringCmd, len(list))
 		for i, id := range nodeIDs {
 			hbCmds[i] = pipe.HGetAll(ctx, fmt.Sprintf("node:heartbeat:%s", id))
 			snapCmds[i] = pipe.HGetAll(ctx, fmt.Sprintf("node:speed_snap:%s", id))
 		}
-		_ = pipe.Exec(ctx)
+		// 修复 BUILD-REDIS-02 (P0): pipe.Exec 返回 ([]Cmder, error), 需用 2 个变量接收,
+		// 旧代码 `_ = pipe.Exec(ctx)` 只有 1 个变量导致 "assignment mismatch" 编译错误。
+		_, _ = pipe.Exec(ctx)
 		for i, id := range nodeIDs {
 			hb, _ := hbCmds[i].Result()
 			hbMap[id] = hb
@@ -136,7 +140,8 @@ func (h *AdminNodeHandler) NodeList(c *gin.Context) {
 			pipe.HSet(ctx, w.key, "traffic_used", w.trafficUsed, "ts", now)
 			pipe.Expire(ctx, w.key, 10*time.Minute)
 		}
-		_ = pipe.Exec(ctx)
+		// 修复 BUILD-REDIS-02 (P0): pipe.Exec 返回 2 个值, 需用 2 个变量接收。
+		_, _ = pipe.Exec(ctx)
 	}
 
 	// 按 server_address 聚合流量(管理员统一流量展示)

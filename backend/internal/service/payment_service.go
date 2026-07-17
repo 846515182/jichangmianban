@@ -19,6 +19,7 @@ import (
 	"nexus-panel/internal/app"
 	"nexus-panel/internal/model"
 	"nexus-panel/internal/repo"
+	"nexus-panel/internal/security"
 
 	"go.uber.org/zap"
 )
@@ -85,7 +86,13 @@ func (s *PaymentService) loadConfig() (*EPayConfig, error) {
 	}
 	key, err := s.settingRepo.GetString(settingKeyEPayKey)
 	if err == nil {
-		cfg.Key = key
+		// 修复 SEC-ENCRYPT-02 (P1): epay_key 入库前已 AES 加密, 读取时解密;
+		// 兼容旧明文数据(DecryptSecret 解密失败时原样返回)。
+		masterKey := ""
+		if c := app.Get(); c != nil && c.Cfg != nil {
+			masterKey = c.Cfg.AESMasterKey
+		}
+		cfg.Key = security.DecryptSecret(masterKey, key)
 	}
 	apiURL, err := s.settingRepo.GetString(settingKeyEPayAPIURL)
 	if err == nil {
@@ -122,7 +129,13 @@ func (s *PaymentService) SaveConfig(cfg *EPayConfig) error {
 		}
 	}
 	if cfg.Key != "" {
-		if err := s.settingRepo.Set(settingKeyEPayKey, cfg.Key); err != nil {
+		// 修复 SEC-ENCRYPT-02 (P1): epay_key 入库前 AES 加密, 防止数据库拖库后商户密钥泄露。
+		masterKey := ""
+		if c := app.Get(); c != nil && c.Cfg != nil {
+			masterKey = c.Cfg.AESMasterKey
+		}
+		encKey := security.EncryptSecret(masterKey, cfg.Key)
+		if err := s.settingRepo.Set(settingKeyEPayKey, encKey); err != nil {
 			return err
 		}
 	}
@@ -372,4 +385,144 @@ func httpGetWithTimeout(rawURL string, timeout time.Duration) (*http.Response, e
 	}
 	req.Header.Set("User-Agent", "NexusPanel/1.0")
 	return http.DefaultClient.Do(req)
+}
+
+// EPayOrderStatus EPay act=order 查询返回的关键字段
+type EPayOrderStatus struct {
+	TradeStatus string // TRADE_SUCCESS 表示已支付
+	TradeNo     string // 第三方流水号
+	Money       string // 实付金额(元)
+	OutTradeNo  string // 商户订单号
+	Type        string // 支付方式 alipay/wxpay/qqpay
+}
+
+// QueryOrderStatus 修复 PAY-RECON-01 (P0): 主动查询 EPay 订单真实状态。
+// 用于掉单对账 cron(回调丢失时主动拉取支付结果)。
+// EPay act=order 接口: GET /api.php?act=order&pid=&out_trade_no=&sign=&sign_type=MD5
+// 返回 code=1 表示查询成功, trade_status=TRADE_SUCCESS 表示已支付。
+func (s *PaymentService) QueryOrderStatus(orderNo string) (*EPayOrderStatus, error) {
+	cfg, err := s.loadConfig()
+	if err != nil {
+		return nil, err
+	}
+	if cfg.PID == 0 || cfg.Key == "" || cfg.APIURL == "" {
+		return nil, errors.New("EPay 配置不完整")
+	}
+	params := map[string]string{
+		"act":           "order",
+		"pid":           fmt.Sprintf("%d", cfg.PID),
+		"out_trade_no":  orderNo,
+	}
+	sign := epaySign(params, cfg.Key)
+	queryURL := strings.TrimRight(cfg.APIURL, "/") + "/api.php?act=order" +
+		"&pid=" + fmt.Sprintf("%d", cfg.PID) +
+		"&out_trade_no=" + url.QueryEscape(orderNo) +
+		"&sign=" + sign +
+		"&sign_type=MD5"
+
+	resp, err := httpGetWithTimeout(queryURL, 10*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("查询支付订单失败: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("读取查询响应失败: %w", err)
+	}
+	var result struct {
+		Code        interface{} `json:"code"`
+		Msg         string      `json:"msg"`
+		TradeStatus string      `json:"trade_status"`
+		TradeNo     string      `json:"trade_no"`
+		OutTradeNo  string      `json:"out_trade_no"`
+		Money       string      `json:"money"`
+		Type        string      `json:"type"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("解析查询响应失败: %w, body=%s", err, string(body))
+	}
+	// code 兼容数字 1 与字符串 "1"
+	codeOK := false
+	switch v := result.Code.(type) {
+	case float64:
+		codeOK = v == 1
+	case string:
+		codeOK = v == "1"
+	}
+	if !codeOK {
+		return nil, fmt.Errorf("EPay 查询失败: %s", result.Msg)
+	}
+	return &EPayOrderStatus{
+		TradeStatus: result.TradeStatus,
+		TradeNo:     result.TradeNo,
+		Money:       result.Money,
+		OutTradeNo:  result.OutTradeNo,
+		Type:        result.Type,
+	}, nil
+}
+
+// RequestRefund 修复 PAY-REFUND-01 (P1): 退款 API 集成。
+// 部分易支付网关支持退款接口(act=refund), 部分不支持。
+// 本方法采用 best-effort 策略:
+//   - 若网关支持退款, 调用并返回 nil;
+//   - 若网关返回"不支持退款"等业务错误, 返回 nil(本地已退款, 第三方侧人工对账);
+//   - 仅网络/系统错误返回 err, 由调用方决定是否告警。
+// 已在 OrderService.AdminRefund 之外被调用, 不阻塞本地退款流程。
+func (s *PaymentService) RequestRefund(orderNo, tradeNo, money string) error {
+	cfg, err := s.loadConfig()
+	if err != nil {
+		return err
+	}
+	if cfg.PID == 0 || cfg.Key == "" || cfg.APIURL == "" {
+		return errors.New("EPay 配置不完整,跳过退款同步")
+	}
+	params := map[string]string{
+		"act":          "refund",
+		"pid":          fmt.Sprintf("%d", cfg.PID),
+		"out_trade_no": orderNo,
+		"trade_no":     tradeNo,
+		"money":        money,
+	}
+	sign := epaySign(params, cfg.Key)
+	queryURL := strings.TrimRight(cfg.APIURL, "/") + "/api.php?act=refund" +
+		"&pid=" + fmt.Sprintf("%d", cfg.PID) +
+		"&out_trade_no=" + url.QueryEscape(orderNo) +
+		"&trade_no=" + url.QueryEscape(tradeNo) +
+		"&money=" + url.QueryEscape(money) +
+		"&sign=" + sign +
+		"&sign_type=MD5"
+
+	resp, err := httpGetWithTimeout(queryURL, 10*time.Second)
+	if err != nil {
+		return fmt.Errorf("退款请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("读取退款响应失败: %w", err)
+	}
+	var result struct {
+		Code interface{} `json:"code"`
+		Msg  string      `json:"msg"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		// 非 JSON 响应, 通常是不支持退款的网关, 视为 best-effort 成功
+		return nil
+	}
+	codeVal := -1.0
+	switch v := result.Code.(type) {
+	case float64:
+		codeVal = v
+	case string:
+		// 解析字符串 code
+		var f float64
+		if _, err := fmt.Sscanf(v, "%f", &f); err == nil {
+			codeVal = f
+		}
+	}
+	// code=1 退款成功; code=-1 通常为"不支持退款"等业务错误, 视为 best-effort 成功
+	if codeVal == 1 || codeVal == -1 {
+		return nil
+	}
+	return fmt.Errorf("EPay 退款失败: %s", result.Msg)
 }

@@ -341,7 +341,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import request from '@/utils/request'
 import { formatTime } from '@/utils/format'
@@ -677,6 +677,9 @@ const gitPull = async () => {
     pullResult.value = ''
     pullSuccess.value = false
     pullDone.value = false
+    // 修复 UI-POLL-01 (P1): 重置前先清掉可能残留的旧定时器, 防止用户重复点击
+    // 触发"多个并行轮询"导致日志互相覆盖、pulling 状态错乱。
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
     try {
       const res: any = await request.post('/api/v1/admin/system/git-pull')
       pullResult.value = (res?.data?.msg || '更新已开始') + '\n'
@@ -696,7 +699,7 @@ const gitPull = async () => {
               ElMessage.error('更新过程中出现错误')
             }
             loadGitStatus()
-            clearInterval(pollTimer)
+            if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
           }
         } catch { /* 忽略轮询错误 */ }
       }
@@ -791,6 +794,12 @@ onMounted(() => {
   loadBackups()
   loadGitStatus()
   loadDiskUsage()
+})
+
+// 修复 UI-POLL-02 (P1): 离开页面时清理 git-pull 日志轮询定时器,
+// 防止组件卸载后定时器仍在跑, 造成内存泄漏 + 已卸载组件状态更新报错。
+onUnmounted(() => {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
 })
 </script>
 
