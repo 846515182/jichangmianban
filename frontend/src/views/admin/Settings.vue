@@ -258,16 +258,16 @@
               </div>
               <div class="git-actions">
                 <el-button type="primary" @click="gitPull" :loading="pulling">
-                  <el-icon><Download /></el-icon>一键在线更新
+                  <el-icon><Download /></el-icon><span>一键在线更新</span>
                 </el-button>
                 <el-button type="success" @click="gitPushDialog = true" :disabled="!gitStatus.status">
-                  <el-icon><Upload /></el-icon>推送代码
+                  <el-icon><Upload /></el-icon><span>推送代码</span>
                 </el-button>
                 <el-button type="warning" @click="systemRestart" :loading="restarting">
-                  <el-icon><RefreshRight /></el-icon>重启面板
+                  <el-icon><RefreshRight /></el-icon><span>重启面板</span>
                 </el-button>
                 <el-button @click="loadGitStatus" :loading="loadingGitStatus">
-                  <el-icon><Refresh /></el-icon>刷新状态
+                  <el-icon><Refresh /></el-icon><span>刷新状态</span>
                 </el-button>
               </div>
               <div v-if="pullResult" class="update-progress">
@@ -303,10 +303,10 @@
               </div>
               <div class="disk-actions">
                 <el-button @click="loadDiskUsage" :loading="loadingDisk">
-                  <el-icon><Refresh /></el-icon>刷新
+                  <el-icon><Refresh /></el-icon><span>刷新</span>
                 </el-button>
                 <el-button type="danger" @click="diskCleanup" :loading="cleaning">
-                  <el-icon><Delete /></el-icon>清理磁盘
+                  <el-icon><Delete /></el-icon><span>清理磁盘</span>
                 </el-button>
               </div>
               <div v-if="cleanupResult" class="cmd-output">
@@ -907,12 +907,16 @@ onUnmounted(() => {
 
 /* 系统维护 */
 .git-status-box { background: var(--np-bg-soft); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
-.git-info { margin-bottom: 8px; }
-.git-label { font-size: 12px; color: var(--np-text-muted); margin-right: 8px; }
-.git-log { margin: 4px 0 0; padding: 8px; background: var(--np-card); border-radius: 4px; font-size: 12px; color: var(--np-text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 120px; overflow-y: auto; }
+.git-info { margin-bottom: 8px; display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
+.git-label { font-size: 12px; color: var(--np-text-muted); flex-shrink: 0; line-height: 24px; }
+.git-log { margin: 0; padding: 8px; background: var(--np-card); border-radius: 4px; font-size: 12px; color: var(--np-text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 120px; overflow-y: auto; flex: 1; min-width: 0; }
 .git-log.has-changes { color: var(--np-warning); }
 .git-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-.disk-actions { margin-top: 12px; display: flex; gap: 8px; }
+.git-actions .el-button { margin-left: 0 !important; }
+.git-actions .el-button span { margin-left: 4px; }
+.disk-actions { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+.disk-actions .el-button { margin-left: 0 !important; }
+.disk-actions .el-button span { margin-left: 4px; }
 .disk-output { background: var(--np-bg-soft); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
 .disk-output pre { margin: 0; font-size: 12px; color: var(--np-text-secondary); white-space: pre-wrap; max-height: 200px; overflow-y: auto; }
 .cmd-output { margin-top: 12px; background: var(--np-bg-soft); border-radius: 8px; padding: 12px; }
