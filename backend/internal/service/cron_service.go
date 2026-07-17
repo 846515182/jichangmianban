@@ -404,12 +404,18 @@ func daysInMonth(year, month int) int {
 
 // notifSvc 懒构造通知服务(邮件/Telegram), 用于磁盘告警等场景。
 // NotificationService 此前为孤儿死代码(从未被实例化), 现接入。
+// 修复 NOTIFY-CONFIG-01 (P1): 注入 EmailService 使通知复用 DB 配置,
+// 管理员在 UI 配的 SMTP 对 cron 告警也生效。
 func (s *CronService) notifSvc() *NotificationService {
 	c := app.Get()
 	if c == nil || c.Cfg == nil {
 		return nil
 	}
-	return NewNotificationService(c.Cfg, s.logger)
+	ns := NewNotificationService(c.Cfg, s.logger)
+	if c.DB != nil {
+		ns.SetEmailService(NewEmailService(repo.NewSettingRepo(c.DB), c.Cfg))
+	}
+	return ns
 }
 
 // paymentSvc 懒构造 PaymentService, 用于掉单对账场景。

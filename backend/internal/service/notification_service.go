@@ -16,12 +16,21 @@ import (
 )
 
 type NotificationService struct {
-	cfg    *config.Config
-	logger *zap.Logger
+	cfg         *config.Config
+	logger      *zap.Logger
+	emailSvc    *EmailService
 }
 
 func NewNotificationService(cfg *config.Config, logger *zap.Logger) *NotificationService {
 	return &NotificationService{cfg: cfg, logger: logger}
+}
+
+// SetEmailService 注入 EmailService, 使通知服务复用 DB 配置(管理后台配的 SMTP)
+// 修复 NOTIFY-CONFIG-01 (P1): 旧版 NotificationService 只读环境变量 SMTP_*,
+// 管理员在 UI 配的邮件对 cron 磁盘告警无效。注入后 SendEmail 优先用 DB 配置,
+// DB 未启用/不完整时回退环境变量(保持向后兼容)。
+func (s *NotificationService) SetEmailService(e *EmailService) {
+	s.emailSvc = e
 }
 
 type EmailPayload struct {
@@ -30,7 +39,20 @@ type EmailPayload struct {
 	Body    string
 }
 
+// SendEmail 发送通知邮件。
+// 修复 NOTIFY-CONFIG-01 (P1): 优先用 EmailService(DB 配置优先 + 环境变量回退),
+// 统一邮件发送链路。EmailService 注入前回退到旧逻辑(仅环境变量, 兼容启动顺序)。
 func (s *NotificationService) SendEmail(payload EmailPayload) error {
+	// 优先走 EmailService(读 DB 配置 + 环境变量回退 + STARTTLS/465 支持)
+	if s.emailSvc != nil {
+		if err := s.emailSvc.SendMail([]string{payload.To}, payload.Subject, payload.Body); err != nil {
+			s.logger.Error("通知邮件发送失败(DB配置)", zap.String("to", payload.To), zap.Error(err))
+			return err
+		}
+		s.logger.Info("通知邮件发送成功(DB配置)", zap.String("to", payload.To))
+		return nil
+	}
+	// 回退: EmailService 未注入(启动早期/cron 首次触发), 用环境变量
 	if !s.cfg.SMTPEnabled() {
 		return nil
 	}
@@ -97,12 +119,14 @@ func (s *NotificationService) SendTelegram(payload TelegramPayload) error {
 func (s *NotificationService) NotifyAll(subject, message string) {
 	var wg sync.WaitGroup
 
-	if s.cfg.SMTPEnabled() {
+	// 修复 NOTIFY-CONFIG-01 (P1): 邮件收件人优先用 DB 配置的 email_from,
+	// 回退到环境变量 SMTP_FROM; 都没有则跳过(避免发到空地址)
+	if s.emailEnabled() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			_ = s.SendEmail(EmailPayload{
-				To:      s.cfg.SMTPFrom,
+				To:      s.notifyRecipient(),
 				Subject: subject,
 				Body:    message,
 			})
@@ -122,8 +146,33 @@ func (s *NotificationService) NotifyAll(subject, message string) {
 	wg.Wait()
 }
 
+// emailEnabled 邮件是否启用(DB 配置或环境变量任一启用即 true)
+func (s *NotificationService) emailEnabled() bool {
+	if s.emailSvc != nil {
+		if cfg, err := s.emailSvc.effectiveConfig(); err == nil && cfg != nil && cfg.Enabled {
+			return true
+		}
+	}
+	return s.cfg.SMTPEnabled()
+}
+
+// notifyRecipient 通知收件人(DB email_from 优先, 回退环境变量 SMTP_FROM)
+func (s *NotificationService) notifyRecipient() string {
+	if s.emailSvc != nil {
+		if cfg, err := s.emailSvc.effectiveConfig(); err == nil && cfg != nil && cfg.Enabled {
+			if cfg.From != "" {
+				return cfg.From
+			}
+			if cfg.User != "" {
+				return cfg.User
+			}
+		}
+	}
+	return s.cfg.SMTPFrom
+}
+
 func (s *NotificationService) IsEnabled() bool {
-	return s.cfg.SMTPEnabled() || s.cfg.TelegramEnabled()
+	return s.emailEnabled() || s.cfg.TelegramEnabled()
 }
 
 func base64Encode(s string) string {

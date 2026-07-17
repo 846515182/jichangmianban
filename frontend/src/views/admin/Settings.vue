@@ -181,11 +181,13 @@
                   <el-input-number v-model="email.port" :min="1" :max="65535" controls-position="right" style="width: 100%" />
                   <span class="form-tip">Mailtrap 推荐 587(TLS)，QQ/163 用 465(SSL)</span>
                 </el-form-item>
-                <el-form-item label="发件人邮箱">
-                  <el-input v-model="email.user" placeholder="noreply@example.com" />
+                <el-form-item label="SMTP 用户名">
+                  <el-input v-model="email.user" placeholder="APIsmtp@mailtrap.io 或 noreply@example.com" />
+                  <span class="form-tip">SMTP 登录用户名。Mailtrap 填 APIsmtp@mailtrap.io，QQ邮箱填完整邮箱地址</span>
                 </el-form-item>
-                <el-form-item label="发件人名称">
-                  <el-input v-model="email.from" placeholder="Nexus-Panel" />
+                <el-form-item label="发件人地址">
+                  <el-input v-model="email.from" placeholder="noreply@yourdomain.com" />
+                  <span class="form-tip">收件人看到的发件人邮箱，必须是 SMTP 服务商已验证域名的邮箱</span>
                 </el-form-item>
                 <el-form-item label="邮箱密码">
                   <el-input v-model="email.password" :type="showEmailPwd ? 'text' : 'password'" show-password placeholder="已保存，如需修改请输入新密码">
