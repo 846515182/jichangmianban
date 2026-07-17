@@ -47,7 +47,8 @@
         </el-collapse-item>
       </el-collapse>
 
-      <el-table :data="filteredList" stripe v-loading="loading">
+      <!-- PC 端：表格视图 -->
+      <el-table v-if="!isMobile" :data="filteredList" stripe v-loading="loading">
         <el-table-column prop="name" label="名称" min-width="120" />
         <el-table-column prop="country_code" label="地区" width="70">
           <template #default="{ row }">{{ row.country_code || '-' }}</template>
@@ -130,13 +131,79 @@
           </template>
         </el-table-column>
       </el-table>
+
+      <!-- 移动端：卡片视图(竖向展开所有信息, 避免表格水平滚动看不到列) -->
+      <div v-else class="node-cards" v-loading="loading">
+        <div v-for="row in filteredList" :key="row.id" class="node-card">
+          <div class="nc-header">
+            <div class="nc-title-wrap">
+              <span class="nc-name">{{ row.name }}</span>
+              <el-tag size="small" effect="dark" :type="protocolTagType(row.protocol)">{{ (row.protocol || 'vless').toUpperCase() }}</el-tag>
+              <el-tag size="small" :type="row.is_enabled ? 'success' : 'info'" effect="plain">{{ row.is_enabled ? '启用' : '停用' }}</el-tag>
+            </div>
+            <span class="nc-online" :class="row.online ? 'online' : 'offline'">
+              <i class="np-dot" :class="row.online ? 'online' : 'offline'"></i>
+              {{ row.online ? '在线' : '离线' }}
+            </span>
+          </div>
+          <div class="nc-row">
+            <span class="nc-label">地区</span>
+            <span class="nc-value">{{ row.country_code || '-' }}</span>
+          </div>
+          <div class="nc-row">
+            <span class="nc-label">地址</span>
+            <span class="nc-value nc-mono">{{ row.server_address }}:{{ row.port }}</span>
+          </div>
+          <div class="nc-row nc-plans">
+            <span class="nc-label">套餐</span>
+            <div v-if="row.plan_ids && row.plan_ids.length" class="nc-tags">
+              <el-tag v-for="pid in row.plan_ids" :key="pid" size="small" effect="plain" type="success">{{ planName(pid) }}</el-tag>
+            </div>
+            <span v-else class="nc-value nc-warn">未绑定</span>
+          </div>
+          <div class="nc-load" v-if="row.runtime && row.runtime.updated_at > 0">
+            <div class="nc-row">
+              <span class="nc-label">CPU</span>
+              <div class="rt-bar">
+                <div class="rt-bar-inner" :style="{ width: Math.min(100, row.runtime.cpu_usage || 0) + '%', background: loadColor(row.runtime.cpu_usage) }"></div>
+              </div>
+              <span class="nc-value">{{ (row.runtime.cpu_usage || 0).toFixed(1) }}%</span>
+            </div>
+            <div class="nc-row">
+              <span class="nc-label">内存</span>
+              <div class="rt-bar">
+                <div class="rt-bar-inner" :style="{ width: Math.min(100, row.runtime.memory_usage || 0) + '%', background: loadColor(row.runtime.memory_usage) }"></div>
+              </div>
+              <span class="nc-value">{{ (row.runtime.memory_usage || 0).toFixed(1) }}%</span>
+            </div>
+            <div class="nc-row">
+              <span class="nc-label">连接</span>
+              <span class="nc-value">{{ row.runtime.online_connections || 0 }}</span>
+              <span class="nc-label" style="margin-left:12px">速度</span>
+              <span class="nc-value">{{ formatSpeed(row.runtime.speed_bps) }}</span>
+            </div>
+          </div>
+          <div class="nc-row nc-load-empty" v-else>
+            <span class="nc-label">负载</span>
+            <span class="nc-value nc-muted">无数据</span>
+          </div>
+          <div class="nc-actions">
+            <el-button size="small" type="warning" plain @click="startAutoDeploy(row)">一键部署</el-button>
+            <el-button size="small" type="success" plain @click="showDeployInfo(row)">部署信息</el-button>
+            <el-button size="small" plain @click="rotateToken(row)">轮换Token</el-button>
+            <el-button size="small" type="primary" plain @click="openDialog(row)">编辑</el-button>
+            <el-button size="small" type="danger" plain @click="handleDelete(row)">删除</el-button>
+          </div>
+        </div>
+        <el-empty v-if="!loading && !filteredList.length" description="暂无节点" />
+      </div>
     </div>
 
     <!-- 新增/编辑对话框 -->
     <el-dialog
       v-model="dialogVisible"
       :title="editing ? '编辑节点' : '新增节点'"
-      width="560px"
+      :width="dialogWidth"
       destroy-on-close
     >
       <el-form ref="formRef" :model="form" :rules="rules" label-width="100px">
@@ -201,7 +268,7 @@
     />
 
     <!-- 部署信息对话框(创建节点后展示 node_token 等) -->
-    <el-dialog v-model="deployVisible" title="节点部署信息" width="820px" top="5vh" class="deploy-dialog">
+    <el-dialog v-model="deployVisible" title="节点部署信息" :width="deployDialogWidth" top="5vh" class="deploy-dialog">
       <el-alert
         type="warning"
         :closable="false"
@@ -317,13 +384,19 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, h, defineComponent } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, h, defineComponent } from 'vue'
 import { ElMessage, ElMessageBox, ElIcon, type FormInstance, type FormRules } from 'element-plus'
 import { Search, Plus, CopyDocument } from '@element-plus/icons-vue'
 import WebTerminal from '@/components/WebTerminal.vue'
 import DeployProgress from '@/components/DeployProgress.vue'
 import request from '@/utils/request'
 import { formatTraffic } from '@/utils/format'
+
+// 移动端检测: <768px 切换为卡片视图, 避免表格水平滚动看不到列
+const isMobile = ref(false)
+const checkMobile = () => { isMobile.value = window.innerWidth < 768 }
+const dialogWidth = computed(() => (isMobile.value ? '92%' : '560px'))
+const deployDialogWidth = computed(() => (isMobile.value ? '95%' : '820px'))
 
 // 后端响应格式: { code: 0, msg: "ok", data: ... }
 interface ApiResponse<T> { code: number; msg: string; data: T }
@@ -850,8 +923,13 @@ const fetchPlans = async () => {
 }
 
 onMounted(() => {
+  checkMobile()
+  window.addEventListener('resize', checkMobile)
   fetchList()
   fetchPlans()
+})
+onUnmounted(() => {
+  window.removeEventListener('resize', checkMobile)
 })
 </script>
 
@@ -940,6 +1018,62 @@ onMounted(() => {
   height: 100%;
   border-radius: 2px;
   transition: width 0.3s;
+}
+
+/* 移动端节点卡片视图 */
+.node-cards { display: flex; flex-direction: column; gap: 12px; }
+.node-card {
+  border: 1px solid var(--np-border, #e4e7ed);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--np-card, #fafbfc);
+}
+.nc-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px dashed var(--np-border, #ebeef5);
+  flex-wrap: wrap;
+}
+.nc-title-wrap { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; flex: 1; }
+.nc-name { font-size: 15px; font-weight: 600; color: var(--np-text, #303133); word-break: break-all; }
+.nc-online {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 12px; padding: 2px 8px; border-radius: 10px;
+  flex-shrink: 0;
+}
+.nc-online.online { color: #67c23a; background: #f0f9eb; }
+.nc-online.offline { color: #909399; background: #f4f4f5; }
+.nc-row {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; margin-bottom: 6px; flex-wrap: wrap;
+}
+.nc-label { color: var(--np-text-muted, #909399); min-width: 40px; flex-shrink: 0; }
+.nc-value { color: var(--np-text, #303133); word-break: break-all; }
+.nc-mono { font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px; }
+.nc-warn { color: #f56c6c; font-size: 12px; }
+.nc-muted { color: #909399; font-size: 12px; }
+.nc-plans { align-items: flex-start; }
+.nc-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.nc-load { margin-top: 4px; padding-top: 8px; border-top: 1px dashed var(--np-border, #ebeef5); }
+.nc-load .rt-bar { flex: 1; min-width: 60px; }
+.nc-load-empty { color: #909399; }
+.nc-actions {
+  display: flex; gap: 6px; flex-wrap: wrap;
+  margin-top: 10px; padding-top: 10px;
+  border-top: 1px dashed var(--np-border, #ebeef5);
+}
+.nc-actions .el-button { margin-left: 0 !important; flex: 1; min-width: 80px; }
+
+/* 移动端: page-header 改为竖向, 搜索框占满宽度 */
+@media (max-width: 768px) {
+  .page-card { padding: 12px; }
+  .page-header { flex-direction: column; align-items: stretch; }
+  .header-actions { flex-direction: column; align-items: stretch; }
+  .header-actions .el-input { width: 100% !important; }
 }
 </style>
 
