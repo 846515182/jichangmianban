@@ -8,16 +8,17 @@ import (
 	"fmt"
 	"log"
 	"math/big"
-	"net/smtp"
 	"os"
-	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 
+	"nexus-panel/internal/app"
 	"nexus-panel/internal/model"
+	"nexus-panel/internal/repo"
+	"nexus-panel/internal/service"
 )
 
 // EmailService 邮件服务
@@ -195,20 +196,20 @@ func (s *EmailService) SendVerifyCodeAsync(userID string, email, typ string) err
 	return nil
 }
 
-// send 真实 SMTP 发送
+// send 通过 service.EmailService 发送邮件
+// 修复: 原实现直接读取 os.Getenv(SMTP_*) + smtp.SendMail，缺少对端口465(隐式TLS)的支持，
+// 并且使用 SMTP 用户名作为 From 地址导致 Mailtrap 等平台失败。改为使用 service.EmailService。
 func (s *EmailService) send(to, subject, body string) error {
-	host := os.Getenv("SMTP_HOST")
-	port, _ := strconv.Atoi(os.Getenv("SMTP_PORT"))
-	user := os.Getenv("SMTP_USER")
-	pass := os.Getenv("SMTP_PASS")
-	if host == "" || port == 0 {
-		return fmt.Errorf("SMTP 未配置")
+	if to == "" {
+		return fmt.Errorf("收件人为空")
 	}
-	auth := smtp.PlainAuth("", user, pass, host)
-	msg := []byte(fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s",
-		user, to, subject, body))
-	addr := fmt.Sprintf("%s:%d", host, port)
-	return smtp.SendMail(addr, auth, user, []string{to}, msg)
+	// 从 app 容器获取 config 和 DB，构造 service.EmailService 发送邮件
+	ct := app.Get()
+	if ct == nil || ct.Cfg == nil || ct.DB == nil {
+		return fmt.Errorf("app 尚未初始化")
+	}
+	emailSvc := service.NewEmailService(repo.NewSettingRepo(ct.DB), ct.Cfg)
+	return emailSvc.SendMail([]string{to}, subject, body)
 }
 
 // normalizeEmail 邮箱归一化 (lowercase + trim)
