@@ -15,6 +15,9 @@ import (
 	"syscall"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"nexus-agent/proto"
 )
 
@@ -49,6 +52,10 @@ type Agent struct {
 	// fatalShutdown=1 表示因致命错误(节点被删/token失效)已停止 Xray 代理服务
 	// 进入停服状态后不再发心跳，进程不退出(避免 docker unless-stopped 重启死循环)
 	fatalShutdown int32
+
+	// 实际 Xray 监听端口（面板分配或 LISTEN_PORT 覆盖）
+	// 用于健康检查，保证始终与 Xray 实际监听端口一致
+	effectivePort int
 }
 
 
@@ -145,7 +152,7 @@ func loadConfig() (*Config, error) {
 		PanelGrpcAddr: os.Getenv("PANEL_GRPC_ADDR"),
 		NodeToken:     os.Getenv("NODE_TOKEN"),
 		XrayVersion:   getenvDefault("XRAY_VERSION", "v26.6.1"),
-		ListenPort:    getenvInt("LISTEN_PORT", 443),
+		ListenPort:    getenvInt("LISTEN_PORT", 0),
 		HealthPort:    getenvInt("HEALTH_PORT", 50052),
 	}
 	if cfg.PanelGrpcAddr == "" {
@@ -266,12 +273,16 @@ func (a *Agent) applyConfig() error {
 	nodePort := a.nodePort
 	a.mu.RUnlock()
 
-	// 优先使用用户显式设置的 LISTEN_PORT，否则使用面板返回的节点端口
+	// 优先使用用户显式设置的 LISTEN_PORT（非0），否则使用面板返回的节点端口
 	// 这样可以确保订阅中的端口与 Xray 实际监听的端口一致
 	listenPort := a.cfg.ListenPort
-	if listenPort == 0 && nodePort > 0 {
+	if listenPort == 0 {
 		listenPort = nodePort
 	}
+	if listenPort == 0 {
+		listenPort = 443 // 最终兜底
+	}
+	a.effectivePort = listenPort
 
 	finalCfg, err := OverrideListenPort(cfgJSON, listenPort)
 	if err != nil {
@@ -330,7 +341,9 @@ func (a *Agent) doHeartbeat() {
 		log.Printf("[health][ERROR] 代理自连失败: %s (latency=%dms)", health.ProxyError, health.ProxyLatencyMs)
 	}
 
-	resp, err := a.client.Heartbeat(a.getNodeID(), a.cfg.NodeToken, agentVersion, 0, memUsage, memTotal, 0, uptime, 0, 0)
+	//
+	trafficDown, trafficUp := a.traffic.Total()
+	resp, err := a.client.Heartbeat(a.getNodeID(), a.cfg.NodeToken, agentVersion, 0, memUsage, memTotal, 0, uptime, trafficDown, trafficUp)
 	if err != nil {
 		// 致命错误: 节点已被面板删除/token 失效 → 停止 Xray 代理服务
 		if isFatalHeartbeatError(err) {
@@ -374,24 +387,29 @@ func (a *Agent) handleFatalShutdown(reason string) {
 
 // isFatalHeartbeatError 判断 gRPC 错误是否为致命错误(节点被删/token失效/被禁用)
 // 这类错误不可恢复，继续运行 Xray 会导致"已删节点仍代理流量"的安全漏洞
+// 修复: 使用 gRPC 标准状态码而非子串匹配，避免依赖语言环境
 func isFatalHeartbeatError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "节点不存在") ||
-		strings.Contains(msg, "NotFound") ||
-		strings.Contains(msg, "节点 token 无效") ||
-		strings.Contains(msg, "Unauthenticated") ||
-		strings.Contains(msg, "PermissionDenied") ||
-		strings.Contains(msg, "节点已禁用")
+	st, ok := status.FromError(err)
+	if !ok {
+		// 非 gRPC 错误（如网络错误），不致命
+		return false
+	}
+	switch st.Code() {
+	case codes.NotFound, codes.Unauthenticated, codes.PermissionDenied:
+		return true
+	}
+	return false
 }
 
 // isFatalHeartbeatMsg 判断心跳被拒消息是否为致命错误
 func isFatalHeartbeatMsg(msg string) bool {
-	return strings.Contains(msg, "节点不存在") ||
+	return msg != "" && (strings.Contains(msg, "token") ||
+		strings.Contains(msg, "节点不存在") ||
 		strings.Contains(msg, "节点已禁用") ||
-		strings.Contains(msg, "token")
+		strings.Contains(msg, "节点 token 无效"))
 }
 
 // reloadConfig 重新拉取 Xray 配置并重启进程
@@ -448,11 +466,20 @@ func (a *Agent) doTrafficReport() {
 	}
 	resp, err := a.client.ReportRealtime(nodeID, a.cfg.NodeToken, records)
 	if err != nil {
+		if isFatalHeartbeatError(err) {
+			a.handleFatalShutdown(fmt.Sprintf("流量上报时节点已被删除/token失效: %v", err))
+			return
+		}
 		log.Printf("流量上报失败: %v", err)
 		return
 	}
 	if resp.GetResp().GetCode() != 0 {
-		log.Printf("流量上报被拒: code=%d msg=%s", resp.GetResp().GetCode(), resp.GetResp().GetMessage())
+		msg := resp.GetResp().GetMessage()
+		if isFatalHeartbeatMsg(msg) {
+			a.handleFatalShutdown(fmt.Sprintf("流量上报被拒: %s", msg))
+			return
+		}
+		log.Printf("流量上报被拒: code=%d msg=%s", resp.GetResp().GetCode(), msg)
 	}
 }
 

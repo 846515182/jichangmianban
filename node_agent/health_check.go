@@ -26,7 +26,7 @@ func (a *Agent) CheckProxyHealth() ProxyHealth {
 		LastCheckTime: time.Now().Unix(),
 	}
 
-	port := a.cfg.ListenPort
+	port := a.effectivePort
 	if port == 0 {
 		port = 443
 	}

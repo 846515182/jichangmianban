@@ -11,10 +11,12 @@ import (
 // TrafficCounter 节点级流量计数器，基于 /proc/net/dev 读取增量
 // 第一版只做节点级流量汇总；用户级精确统计留 TODO
 type TrafficCounter struct {
-	mu      sync.Mutex
-	prevRx  int64
-	prevTx  int64
-	hasPrev bool
+	mu          sync.Mutex
+	prevRx      int64
+	prevTx      int64
+	hasPrev     bool
+	totalRx     int64 // 累计下载字节（自进程启动）
+	totalTx     int64 // 累计上传字节（自进程启动）
 }
 
 // NewTrafficCounter 创建流量计数器
@@ -83,7 +85,16 @@ func (t *TrafficCounter) Delta() (upload, download int64) {
 	}
 	t.prevRx = rx
 	t.prevTx = tx
+	t.totalRx += download
+	t.totalTx += upload
 	return upload, download
+}
+
+// Total 返回自进程启动以来的累计下载和上传字节数
+func (t *TrafficCounter) Total() (download, upload int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.totalRx, t.totalTx
 }
 
 // readMemInfo 读取 /proc/meminfo，返回(总内存, 已用内存)字节

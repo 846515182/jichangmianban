@@ -15,7 +15,7 @@
               :key="t.id"
               class="ticket-item"
               :class="{ active: current?.id === t.id }"
-              @click="current = t"
+              @click="current = t; loadDetail(t.id)"
             >
               <div class="ticket-top">
                 <span class="ticket-subject">{{ t.subject }}</span>

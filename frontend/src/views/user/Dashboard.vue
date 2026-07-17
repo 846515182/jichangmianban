@@ -245,8 +245,25 @@ const copyLink = async () => {
   }
 }
 
-const quickImport = (c: { name: string }) => {
-  ElMessage.success(`正在为 ${c.name} 生成导入链接`)
+const quickImport = async (c: { name: string }) => {
+  if (!subscribeUrl.value) {
+    ElMessage.warning('订阅链接为空')
+    return
+  }
+  const encoded = encodeURIComponent(subscribeUrl.value)
+  const importLinks: Record<string, string> = {
+    'Clash': `clash://install-config?url=${encoded}`,
+    'Sing-Box': `sing-box://import-remote-profile?url=${encoded}`,
+    'V2RayN': subscribeUrl.value,
+    'Shadowrocket': `shadowrocket://add/sub?subscribe=${encoded}`,
+  }
+  const link = importLinks[c.name] || subscribeUrl.value
+  const ok = await copyToClipboard(link)
+  if (ok) {
+    ElMessage.success(`已为 ${c.name} 复制导入链接，请打开客户端自动导入`)
+  } else {
+    ElMessage.success(`请复制订阅链接后手动导入 ${c.name}`)
+  }
 }
 
 const fetchUserInfo = async () => {

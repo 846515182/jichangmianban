@@ -219,10 +219,10 @@ const changePwd = async () => {
     if (!valid) return
     changing.value = true
     try {
-      try { await request.post('/api/v1/auth/change-password', { old_password: pwdForm.oldPwd, new_password: pwdForm.newPwd }) } catch { /* */ }
+      await request.post('/api/v1/auth/change-password', { old_password: pwdForm.oldPwd, new_password: pwdForm.newPwd })
       ElMessage.success('密码修改成功')
       Object.assign(pwdForm, { oldPwd: '', newPwd: '', confirmPwd: '' })
-    } finally {
+    } catch { /* 错误由 request 拦截器自动提示 */ } finally {
       changing.value = false
     }
   })
