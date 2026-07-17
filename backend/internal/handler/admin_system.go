@@ -787,10 +787,70 @@ var (
 	gitPullOK    bool
 )
 
-// logWrite 写入日志并在末尾追加换行
+// gitPullLogFile 持久化更新日志的文件路径。
+// 修复 UI-LOG-01 (P1): 旧版日志只存内存(strings.Builder), syscall.Exec 原地
+// 重启后新进程的 gitPullLog/gitPullDone 被重置为空/false, 前端轮询拿到空日志
+// + done=false, 误以为新一轮更新开始却没日志, 显示"更新中"卡住。
+// 改为同时写文件, 新进程启动时 init 恢复上次状态, 前端能正确看到"已完成"。
+const gitPullLogFile = "/tmp/nexus-git-pull.log"
+
+// gitPullStateFile 持久化完成状态(done/success), 供新进程启动时恢复
+const gitPullStateFile = "/tmp/nexus-git-pull.state"
+
+func init() {
+	// 启动时恢复上次更新状态(syscall.Exec 重启后生效)
+	if data, err := os.ReadFile(gitPullStateFile); err == nil {
+		var st struct {
+			Done    bool `json:"done"`
+			Success bool `json:"success"`
+		}
+		if json.Unmarshal(data, &st) == nil {
+			gitPullDone = st.Done
+			gitPullOK = st.Success
+		}
+	}
+}
+
+// logWrite 写入日志: 同时写内存(供本次运行实时轮询)和文件(供重启后恢复)
 func logWrite(format string, args ...interface{}) {
-	gitPullLog.WriteString(fmt.Sprintf(format, args...))
-	gitPullLog.WriteString("\n")
+	line := fmt.Sprintf(format, args...)
+	line += "\n"
+	gitPullLog.WriteString(line)
+	// 追加写文件, 重启后可读回完整日志
+	f, err := os.OpenFile(gitPullLogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err == nil {
+		f.WriteString(line)
+		f.Close()
+	}
+}
+
+// gitPullWriteState 持久化完成状态(done/success), 供 syscall.Exec 重启后恢复
+func gitPullWriteState(done, success bool) {
+	st := struct {
+		Done    bool `json:"done"`
+		Success bool `json:"success"`
+	}{Done: done, Success: success}
+	if data, err := json.Marshal(st); err == nil {
+		os.WriteFile(gitPullStateFile, data, 0644)
+	}
+}
+
+// gitPullReadLogFromFile 从文件读取完整日志(重启后内存为空时使用)
+func gitPullReadLogFromFile() string {
+	data, err := os.ReadFile(gitPullLogFile)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+// setPullDone 统一设置更新完成状态(内存 + 持久化文件)
+// 修复 UI-LOG-01 (P1): 所有完成点都通过此函数同步状态到文件,
+// syscall.Exec 重启后 init 能恢复 done/success, 前端不会误判为新更新。
+func setPullDone(success bool) {
+	gitPullOK = success
+	gitPullDone = true
+	gitPullWriteState(true, success)
 }
 
 // execCommandLog 执行命令并将输出同时写入日志（默认 600s 超时）
@@ -843,6 +903,10 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 	gitPullLog.Reset()
 	gitPullDone = false
 	gitPullOK = false
+	// 修复 UI-LOG-01 (P1): 同时清空持久化日志文件和状态文件, 避免新更新读到旧日志
+	os.Remove(gitPullLogFile)
+	os.Remove(gitPullStateFile)
+	gitPullWriteState(false, false)
 
 	go func() {
 		defer gitPullMu.Unlock()
@@ -872,16 +936,14 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		logWrite(">>> 2/6 拉取代码 git fetch origin (branch=%s)", branch)
 		if !execCommandLog(gitRoot, "git", "fetch", "origin") {
 			logWrite("git fetch 失败")
-			gitPullOK = false
-			gitPullDone = true
+			setPullDone(false)
 			return
 		}
 
 		logWrite(">>> 3/6 同步代码 git reset --hard origin/%s", branch)
 		if !execCommandLog(gitRoot, "git", "reset", "--hard", "origin/"+branch) {
 			logWrite("git reset 失败")
-			gitPullOK = false
-			gitPullDone = true
+			setPullDone(false)
 			return
 		}
 
@@ -901,8 +963,7 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		logWrite("（首次构建约3-5分钟，后续有缓存会快很多）")
 		if !execCommandLogTimeout(gitRoot, "docker", 1800, "compose", "build", "panel", "frontend") {
 			logWrite("镜像构建失败，请查看上方日志")
-			gitPullOK = false
-			gitPullDone = true
+			setPullDone(false)
 			return
 		}
 
@@ -913,8 +974,7 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		newBinary, err := extractCmd.Output()
 		if err != nil {
 			logWrite("提取二进制失败: %v", err)
-			gitPullOK = false
-			gitPullDone = true
+			setPullDone(false)
 			return
 		}
 		// 写入临时路径，然后 mv 替换（防止写一半被读取）
@@ -925,14 +985,12 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		defer os.Remove(tmpPath)
 		if err := os.WriteFile(tmpPath, newBinary, 0755); err != nil {
 			logWrite("写入新二进制失败: %v", err)
-			gitPullOK = false
-			gitPullDone = true
+			setPullDone(false)
 			return
 		}
 		if err := os.Rename(tmpPath, "/app/nexus-panel"); err != nil {
 			logWrite("替换二进制失败: %v", err)
-			gitPullOK = false
-			gitPullDone = true
+			setPullDone(false)
 			return
 		}
 		logWrite("二进制已更新")
@@ -940,8 +998,7 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		logWrite(">>> 6/6 重建前端容器 docker compose up -d --no-deps frontend")
 		if !execCommandLog(gitRoot, "docker", "compose", "up", "-d", "--no-deps", "frontend") {
 			logWrite("重启前端失败")
-			gitPullOK = false
-			gitPullDone = true
+			setPullDone(false)
 			return
 		}
 
@@ -953,8 +1010,7 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		_ = execCommandLog(gitRoot, "docker", "builder", "prune", "-f")
 
 		logWrite("在线更新完成！面板将在3秒后自动重启生效（页面会短暂不可用）")
-		gitPullOK = true
-		gitPullDone = true
+		setPullDone(true)
 
 		// 延迟重启面板自身（sleep 后 exec 替换当前进程）
 		time.Sleep(3 * time.Second)
@@ -967,9 +1023,16 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 
 // GitPullLog GET /api/v1/admin/system/git-pull-log
 // 轮询获取在线更新的实时日志
+// 修复 UI-LOG-01 (P1): syscall.Exec 重启后内存 gitPullLog 为空,
+// 但 gitPullDone 已从状态文件恢复, 此时从日志文件读取完整内容返回前端。
 func (h *AdminSystemHandler) GitPullLog(c *gin.Context) {
+	logStr := gitPullLog.String()
+	// 内存为空但 done=true(从文件恢复的状态), 说明是重启后, 从文件读日志
+	if logStr == "" && gitPullDone {
+		logStr = gitPullReadLogFromFile()
+	}
 	response.OK(c, gin.H{
-		"log":     gitPullLog.String(),
+		"log":     logStr,
 		"done":    gitPullDone,
 		"success": gitPullOK,
 	})
