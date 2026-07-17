@@ -628,26 +628,62 @@ func readCPUUsage() float64 {
 	return usage
 }
 
-// readOnlineConnections 读取 Xray 当前活跃连接数(简化版: ss 命令统计 ESTAB 连接)
-// 修复 NODE-DATA-01: 原 doHeartbeat 硬编码 onlineConns=0, 面板连接数永远显示 0
+// readOnlineConnections 读取 Xray 当前活跃连接数(用 ss 统计 listen 端口上的 ESTABLISHED 连接)
+//
+// 修复 NODE-DATA-01 (P0): 原 doHeartbeat 硬编码 onlineConns=0, 面板连接数永远显示 0。
+// 之前尝试用 ss 修复但有两个 bug:
+//   1. Dockerfile 没装 iproute2, 容器内根本没有 ss 命令 → exec 必然失败
+//   2. ss 过滤语法错误: "ss -ant '( dport = :N or sport = :N )'" 是非法 filter,
+//      ss 要求 filter 以 state/src/dst 等关键字开头, 且必须用单引号包裹。
+//      正确写法: ss -H -ant state established '( sport = :N or dport = :N )'
+//   3. 失败后静默 return 0, 运维无法感知采集失败。
+// 本次修复: 装 iproute2 + 修正语法 + 失败时限频打日志。
 func (a *Agent) readOnlineConnections() int32 {
 	port := a.effectivePort
 	if port == 0 {
 		return 0
 	}
-	// 用 ss 统计本节点 listen 端口上的 ESTABLISHED 连接数
-	// 兜底: ss 不存在时返回 0, 不阻断心跳
-	out, err := execCommand("ss", "-ant", fmt.Sprintf("( dport = :%d or sport = :%d )", port, port))
+	// -H 去表头; state established 只看已建立连接;
+	// filter 用 sport/dport 匹配本节点 listen 端口(进/出方向都算)。
+	// Go 的 exec.Command 不走 shell, 参数分开传, 单引号是 shell 语法不需要写进参数。
+	out, err := execCommand("ss", "-H", "-ant", "state", "established",
+		fmt.Sprintf("( sport = :%d or dport = :%d )", port, port))
 	if err != nil {
+		// 限频日志: 同一错误每 10 分钟最多打一次, 避免每 30s 心跳刷屏
+		if shouldLogConnErr() {
+			log.Printf("[conn][WARN] ss 命令执行失败, 连接数返回 0: %v (请检查容器是否安装 iproute2)", err)
+		}
 		return 0
 	}
 	var count int32
 	for _, line := range strings.Split(string(out), "\n") {
-		if strings.Contains(line, "ESTAB") {
-			count++
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
 		}
+		// -H 已去表头, 每行都是一条已建立连接; 按行计数即可。
+		// (行内已含 ESTAB 标记, 但用 state established 过滤后不需要再判断)
+		count++
 	}
 	return count
+}
+
+// connErrLimiter 限制 ss 失败日志频率, 避免每 30s 心跳刷一次
+var connErrLimiter struct {
+	sync.Mutex
+	last time.Time
+}
+
+// shouldLogConnErr 同一错误 10 分钟内最多打一次日志
+func shouldLogConnErr() bool {
+	connErrLimiter.Lock()
+	defer connErrLimiter.Unlock()
+	now := time.Now()
+	if now.Sub(connErrLimiter.last) < 10*time.Minute {
+		return false
+	}
+	connErrLimiter.last = now
+	return true
 }
 
 // execCommand 在 agent 进程内执行命令并返回输出(简化版, 不超时控制)

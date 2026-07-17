@@ -82,12 +82,6 @@ func (h *AdminNodeHandler) NodeList(c *gin.Context) {
 
 	// 为每个节点附加实时状态(CPU/内存/连接/速度)和套餐绑定
 	items := make([]gin.H, 0, len(list))
-	// 收集需要回写快照的节点(避免在循环里逐个 HSet/Expire)
-	type snapWrite struct {
-		key         string
-		trafficUsed int64
-	}
-	snapWrites := make([]snapWrite, 0, len(list))
 	for i := range list {
 		n := &list[i]
 		item := gin.H{
@@ -113,12 +107,10 @@ func (h *AdminNodeHandler) NodeList(c *gin.Context) {
 		item["plan_ids"] = planIDsMap[n.ID]
 
 		// 实时状态: 从预取结果计算
+		// 修复 NODE-SPEED-01: snap 不再由 admin 回写, 改由 traffic_service 维护;
+		// speed_bps 直接读 heartbeat hash, snap/dbTrafficUsed 仅作兼容参数传入(已忽略)
 		if rdb != nil {
 			item["runtime"] = h.buildNodeRuntimeFromCache(hbMap[n.ID], snapMap[n.ID], n.TrafficUsed)
-			snapWrites = append(snapWrites, snapWrite{
-				key:         fmt.Sprintf("node:speed_snap:%s", n.ID),
-				trafficUsed: n.TrafficUsed,
-			})
 		} else {
 			item["runtime"] = gin.H{
 				"cpu_usage":          0,
@@ -130,18 +122,6 @@ func (h *AdminNodeHandler) NodeList(c *gin.Context) {
 			}
 		}
 		items = append(items, item)
-	}
-
-	// 批量回写速度快照(1 个 Pipeline 替代原来的 4N 次 Redis 往返)
-	if rdb != nil && len(snapWrites) > 0 {
-		now := time.Now().Unix()
-		pipe := rdb.Pipeline()
-		for _, w := range snapWrites {
-			pipe.HSet(ctx, w.key, "traffic_used", w.trafficUsed, "ts", now)
-			pipe.Expire(ctx, w.key, 10*time.Minute)
-		}
-		// 修复 BUILD-REDIS-02 (P0): pipe.Exec 返回 2 个值, 需用 2 个变量接收。
-		_, _ = pipe.Exec(ctx)
 	}
 
 	// 按 server_address 聚合流量(管理员统一流量展示)
@@ -184,9 +164,13 @@ func (h *AdminNodeHandler) readNodeRuntime(ctx context.Context, rdb *redis.Clien
 	return rt
 }
 
-// buildNodeRuntimeFromCache 从已预取的心跳和快照数据计算运行时状态(纯计算, 无 IO)。
+// buildNodeRuntimeFromCache 从已预取的心跳数据计算运行时状态(纯计算, 无 IO)。
 // 修复 PERF-NPLUS1-01: 抽离自 readNodeRuntime, 供 NodeList 批量预取后复用。
-func (h *AdminNodeHandler) buildNodeRuntimeFromCache(hb map[string]string, snap map[string]string, dbTrafficUsed int64) gin.H {
+//
+// 修复 NODE-SPEED-01 (P1): speed_bps 不再在 admin 端用 snap 时间差算, 改为直接读
+// heartbeat hash 的 speed_bps 字段(由 traffic_service.ReportRealtime 在 agent 上报
+// 流量时计算并写入)。snap 参数保留兼容但不再使用, dbTrafficUsed 也不再使用。
+func (h *AdminNodeHandler) buildNodeRuntimeFromCache(hb map[string]string, _ map[string]string, _ int64) gin.H {
 	rt := gin.H{
 		"cpu_usage":          0,
 		"memory_usage":       0,
@@ -206,6 +190,8 @@ func (h *AdminNodeHandler) buildNodeRuntimeFromCache(hb map[string]string, snap 
 	onlineConn, _ := strconv.ParseInt(hb["online_connections"], 10, 64)
 	uptime, _ := strconv.ParseInt(hb["uptime_seconds"], 10, 64)
 	hbUpdatedAt, _ := strconv.ParseInt(hb["updated_at"], 10, 64)
+	// speed_bps 由 traffic_service 写入, 直接读; 缺失时为 0
+	speedBps, _ := strconv.ParseInt(hb["speed_bps"], 10, 64)
 
 	rt["cpu_usage"] = cpuUsage
 	rt["memory_usage"] = memUsage
@@ -213,19 +199,7 @@ func (h *AdminNodeHandler) buildNodeRuntimeFromCache(hb map[string]string, snap 
 	rt["online_connections"] = onlineConn
 	rt["uptime_seconds"] = uptime
 	rt["updated_at"] = hbUpdatedAt
-
-	// 计算实时速度: 与上次管理端查询的快照对比
-	// 快照: {traffic_used, ts}
-	if len(snap) > 0 {
-		prevUsed, _ := strconv.ParseInt(snap["traffic_used"], 10, 64)
-		prevTs, _ := strconv.ParseInt(snap["ts"], 10, 64)
-		curTs := time.Now().Unix()
-		dt := curTs - prevTs
-		if dt > 0 && dbTrafficUsed >= prevUsed {
-			speedBps := (dbTrafficUsed - prevUsed) / dt
-			rt["speed_bps"] = speedBps
-		}
-	}
+	rt["speed_bps"] = speedBps
 	return rt
 }
 

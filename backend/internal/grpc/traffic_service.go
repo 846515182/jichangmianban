@@ -3,6 +3,8 @@ package grpc
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -202,10 +204,54 @@ func (s *TrafficServiceServer) ReportRealtime(ctx context.Context, req *nexuspb.
 			zap.String("node_id", req.GetNodeId()), zap.Error(err))
 	}
 
+	// 修复 NODE-SPEED-01 (P1): 计算节点瞬时速度并写入 Redis heartbeat hash。
+	// 旧版面板在 admin API 调用时用 (dbTrafficUsed 差值 / admin 调用时间差) 算速度,
+	// 导致首次访问/快速刷新/agent 60s 未上报时 speed_bps 恒为 0, 且口径是 admin 视角
+	// 平均速率而非节点真实速率。现改为: agent 每次上报流量时(60s 一次), 面板用
+	// (本次上报字节增量 / 距上次上报时间差) 算出 60s 平均瞬时速度, 写入 heartbeat
+	// hash 的 speed_bps 字段。admin API 直接读该字段, 不再自己算。
+	if nodeTotal > 0 {
+		s.recordNodeSpeed(req.GetNodeId(), nodeTotal)
+	}
+
 	return &nexuspb.ReportRealtimeResponse{
 		Resp:     &nexuspb.Response{Code: 0, Message: "ok"},
 		Accepted: accepted,
 	}, nil
+}
+
+// recordNodeSpeed 计算节点瞬时速度(bytes/s)并写入 Redis node:heartbeat:{id} 的 speed_bps 字段。
+// 速度 = 本次上报字节增量 / 距上次上报时间差。首次上报无法算 dt, 跳过(保持 0)。
+// snap key node:speed_snap:{id} 复用为"上次上报时间戳"记录, TTL 10 分钟。
+func (s *TrafficServiceServer) recordNodeSpeed(nodeID string, deltaBytes int64) {
+	rdb := app.Get().RDB
+	if rdb == nil {
+		return
+	}
+	ctx := context.Background()
+	snapKey := fmt.Sprintf("node:speed_snap:%s", nodeID)
+	hbKey := fmt.Sprintf("node:heartbeat:%s", nodeID)
+	now := time.Now().Unix()
+
+	// 读上次上报时间戳
+	prevTsStr, err := rdb.HGet(ctx, snapKey, "ts").Result()
+	var speedBps int64
+	if err == nil && prevTsStr != "" {
+		prevTs, _ := strconv.ParseInt(prevTsStr, 10, 64)
+		dt := now - prevTs
+		// dt > 0 防止除零; dt 上限 600s 防止节点长时间未上报后算出异常小值
+		if dt > 0 && dt <= 600 {
+			speedBps = deltaBytes / dt
+		}
+	}
+
+	// 写入 heartbeat hash 的 speed_bps 字段(HSet 单字段不覆盖其他字段)
+	// heartbeat hash 由 agent 30s 心跳整体 HSet, 但 Redis HSet 是部分更新,
+	// 只设置指定字段, agent 心跳不会清掉 speed_bps 字段。
+	rdb.HSet(ctx, hbKey, "speed_bps", speedBps)
+	// 更新 snap 时间戳(下次上报时算 dt 用)
+	rdb.HSet(ctx, snapKey, "ts", now)
+	rdb.Expire(ctx, snapKey, 10*time.Minute)
 }
 
 // markUserExhaustedTx 在事务内检测用户是否超额，若是则将 status 改为 traffic_exhausted

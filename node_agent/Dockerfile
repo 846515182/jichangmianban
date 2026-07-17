@@ -10,7 +10,9 @@
 
 FROM alpine:3.18
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apk/repositories && \
-    apk add --no-cache ca-certificates wget tzdata
+    apk add --no-cache ca-certificates wget tzdata iproute2
+# iproute2 提供 ss 命令, agent 用它统计 Xray 监听端口上的 ESTABLISHED 连接数
+# (readOnlineConnections)。不装则 ss 不存在, 连接数永远返回 0。
 # 预编译好的二进制由面板通过 docker build 上下文提供
 COPY agent /app/agent
 RUN chmod +x /app/agent
