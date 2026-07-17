@@ -197,22 +197,23 @@ func (s *CronService) MarkStaleNodesOffline() {
 	}
 	defer unlock()
 	threshold := time.Now().Add(-5 * time.Minute)
-	count, err := s.nodeRepo.MarkStaleNodesOffline(threshold)
+	// 修复 PERF-CRON-01: 旧实现先 UPDATE 再 List(0,0,"") 全表扫描 + 循环 Del,
+	// 会清掉所有启用节点的 configver/usershash 缓存, 触发全节点心跳重算配置风暴。
+	// 现改为先 SELECT id 再 UPDATE WHERE id IN, 只清理真正被标记离线的节点缓存。
+	ids, count, err := s.nodeRepo.MarkStaleNodesOfflineWithIDs(threshold)
 	if err != nil {
 		s.logger.Error("mark stale nodes offline failed", zap.Error(err))
 		return
 	}
-	if count > 0 {
+	if count > 0 && len(ids) > 0 {
 		s.logger.Warn("节点心跳超时,已自动标记为离线", zap.Int64("count", count), zap.Time("threshold", threshold))
-		// 清除 Redis 中这些节点的 configver/usershash 缓存,确保节点恢复后能拉取新配置
+		// 只清除被标记离线节点的 Redis 缓存, 一次 Del 多 key, 避免循环往返
 		if rdb := app.Get().RDB; rdb != nil {
-			nodes, _, _ := s.nodeRepo.List(0, 0, "")
-			for _, n := range nodes {
-				if !n.IsEnabled || n.IsDeleted {
-					continue
-				}
-				rdb.Del(context.Background(), "node:configver:"+n.ID, "node:usershash:"+n.ID)
+			keys := make([]string, 0, len(ids)*2)
+			for _, id := range ids {
+				keys = append(keys, "node:configver:"+id, "node:usershash:"+id)
 			}
+			rdb.Del(context.Background(), keys...)
 		}
 	}
 }

@@ -44,8 +44,46 @@ func (h *AdminNodeHandler) NodeList(c *gin.Context) {
 	rdb := app.Get().RDB
 	ctx := context.Background()
 
+	// 修复 PERF-NPLUS1-01: 旧实现对每个节点循环调 GetPlanIDsByNode + readNodeRuntime
+	// (readNodeRuntime 内部又 4 次 Redis 往返), N 个节点 = N 次 DB + 4N 次 Redis, 全部串行。
+	// 现改为:
+	//   1) 1 次 SQL WHERE node_id IN (...) 拿全部 plan_ids
+	//   2) 1 个 Redis Pipeline 拿全部节点的 heartbeat + speed_snap
+	//   3) 1 个 Redis Pipeline 回写全部节点的 speed_snap
+	nodeIDs := make([]string, 0, len(list))
+	for i := range list {
+		nodeIDs = append(nodeIDs, list[i].ID)
+	}
+	planIDsMap, _ := h.nodeRepo.GetPlanIDsByNodeIDs(nodeIDs)
+
+	// 批量预取 Redis 心跳 + 速度快照
+	hbMap := make(map[string]map[string]string, len(list))
+	snapMap := make(map[string]map[string]string, len(list))
+	if rdb != nil && len(nodeIDs) > 0 {
+		pipe := rdb.Pipeline()
+		hbCmds := make([]*redis.StringStringMapCmd, len(list))
+		snapCmds := make([]*redis.StringStringMapCmd, len(list))
+		for i, id := range nodeIDs {
+			hbCmds[i] = pipe.HGetAll(ctx, fmt.Sprintf("node:heartbeat:%s", id))
+			snapCmds[i] = pipe.HGetAll(ctx, fmt.Sprintf("node:speed_snap:%s", id))
+		}
+		_ = pipe.Exec(ctx)
+		for i, id := range nodeIDs {
+			hb, _ := hbCmds[i].Result()
+			hbMap[id] = hb
+			snap, _ := snapCmds[i].Result()
+			snapMap[id] = snap
+		}
+	}
+
 	// 为每个节点附加实时状态(CPU/内存/连接/速度)和套餐绑定
 	items := make([]gin.H, 0, len(list))
+	// 收集需要回写快照的节点(避免在循环里逐个 HSet/Expire)
+	type snapWrite struct {
+		key         string
+		trafficUsed int64
+	}
+	snapWrites := make([]snapWrite, 0, len(list))
 	for i := range list {
 		n := &list[i]
 		item := gin.H{
@@ -67,13 +105,16 @@ func (h *AdminNodeHandler) NodeList(c *gin.Context) {
 			"last_seen_at":   n.LastSeenAt,
 		}
 
-		// 套餐绑定 ID 列表(前端编辑时回显)
-		planIDs, _ := h.nodeRepo.GetPlanIDsByNode(n.ID)
-		item["plan_ids"] = planIDs
+		// 套餐绑定 ID 列表(前端编辑时回显) - 已批量预取
+		item["plan_ids"] = planIDsMap[n.ID]
 
-		// 实时状态: 从 Redis 心跳读取
+		// 实时状态: 从预取结果计算
 		if rdb != nil {
-			item["runtime"] = h.readNodeRuntime(ctx, rdb, n.ID, n.TrafficUsed)
+			item["runtime"] = h.buildNodeRuntimeFromCache(hbMap[n.ID], snapMap[n.ID], n.TrafficUsed)
+			snapWrites = append(snapWrites, snapWrite{
+				key:         fmt.Sprintf("node:speed_snap:%s", n.ID),
+				trafficUsed: n.TrafficUsed,
+			})
 		} else {
 			item["runtime"] = gin.H{
 				"cpu_usage":          0,
@@ -85,6 +126,17 @@ func (h *AdminNodeHandler) NodeList(c *gin.Context) {
 			}
 		}
 		items = append(items, item)
+	}
+
+	// 批量回写速度快照(1 个 Pipeline 替代原来的 4N 次 Redis 往返)
+	if rdb != nil && len(snapWrites) > 0 {
+		now := time.Now().Unix()
+		pipe := rdb.Pipeline()
+		for _, w := range snapWrites {
+			pipe.HSet(ctx, w.key, "traffic_used", w.trafficUsed, "ts", now)
+			pipe.Expire(ctx, w.key, 10*time.Minute)
+		}
+		_ = pipe.Exec(ctx)
 	}
 
 	// 按 server_address 聚合流量(管理员统一流量展示)
@@ -114,6 +166,34 @@ func (h *AdminNodeHandler) readNodeRuntime(ctx context.Context, rdb *redis.Clien
 		return rt
 	}
 
+	// 计算实时速度: 与上次管理端查询的快照对比
+	snapKey := fmt.Sprintf("node:speed_snap:%s", nodeID)
+	snap, _ := rdb.HGetAll(ctx, snapKey).Result()
+	rt = h.buildNodeRuntimeFromCache(hb, snap, dbTrafficUsed)
+
+	// 更新快照(用 DB traffic_used，TTL 10 分钟)
+	now := time.Now().Unix()
+	rdb.HSet(ctx, snapKey, "traffic_used", dbTrafficUsed, "ts", now)
+	rdb.Expire(ctx, snapKey, 10*time.Minute)
+
+	return rt
+}
+
+// buildNodeRuntimeFromCache 从已预取的心跳和快照数据计算运行时状态(纯计算, 无 IO)。
+// 修复 PERF-NPLUS1-01: 抽离自 readNodeRuntime, 供 NodeList 批量预取后复用。
+func (h *AdminNodeHandler) buildNodeRuntimeFromCache(hb map[string]string, snap map[string]string, dbTrafficUsed int64) gin.H {
+	rt := gin.H{
+		"cpu_usage":          0,
+		"memory_usage":       0,
+		"online_connections": 0,
+		"speed_bps":          0,
+		"uptime_seconds":     0,
+		"updated_at":         0,
+	}
+	if len(hb) == 0 {
+		return rt
+	}
+
 	// 解析心跳字段
 	cpuUsage, _ := strconv.ParseFloat(hb["cpu_usage"], 64)
 	memUsage, _ := strconv.ParseFloat(hb["memory_usage"], 64)
@@ -130,13 +210,10 @@ func (h *AdminNodeHandler) readNodeRuntime(ctx context.Context, rdb *redis.Clien
 	rt["updated_at"] = hbUpdatedAt
 
 	// 计算实时速度: 与上次管理端查询的快照对比
-	// 快照 key: node:speed_snap:{id} = {traffic_used, ts}
-	snapKey := fmt.Sprintf("node:speed_snap:%s", nodeID)
-	snap, _ := rdb.HGetAll(ctx, snapKey).Result()
+	// 快照: {traffic_used, ts}
 	if len(snap) > 0 {
 		prevUsed, _ := strconv.ParseInt(snap["traffic_used"], 10, 64)
 		prevTs, _ := strconv.ParseInt(snap["ts"], 10, 64)
-		// 使用 DB 的 traffic_used(最准确，ReportRealtime 已累加)
 		curTs := time.Now().Unix()
 		dt := curTs - prevTs
 		if dt > 0 && dbTrafficUsed >= prevUsed {
@@ -144,11 +221,6 @@ func (h *AdminNodeHandler) readNodeRuntime(ctx context.Context, rdb *redis.Clien
 			rt["speed_bps"] = speedBps
 		}
 	}
-	// 更新快照(用 DB traffic_used，TTL 10 分钟)
-	now := time.Now().Unix()
-	rdb.HSet(ctx, snapKey, "traffic_used", dbTrafficUsed, "ts", now)
-	rdb.Expire(ctx, snapKey, 10*time.Minute)
-
 	return rt
 }
 

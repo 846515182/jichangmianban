@@ -212,9 +212,13 @@ func initDB(cfg *config.Config, logger *zap.Logger) (*gorm.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	sqlDB.SetMaxIdleConns(10)
-	sqlDB.SetMaxOpenConns(100)
-	sqlDB.SetConnMaxLifetime(time.Hour)
+	// 修复 PERF-DBPOOL-01: 旧值 MaxIdle=10/MaxOpen=100 在仪表盘并发(4 路请求) +
+	// 节点 gRPC(心跳/流量/GetConfig) + 管理员操作同时进行时容易打满, 导致请求排队等待连接,
+	// 表现为面板整体卡顿。调大上限并缩短连接复用周期, 让连接池更稳定地承载峰值。
+	sqlDB.SetMaxIdleConns(25)
+	sqlDB.SetMaxOpenConns(200)
+	sqlDB.SetConnMaxLifetime(30 * time.Minute)
+	sqlDB.SetConnMaxIdleTime(10 * time.Minute)
 	logger.Info("数据库已连接", zap.String("host", cfg.DBHost), zap.String("db", cfg.DBName))
 	return db, nil
 }
@@ -342,6 +346,7 @@ func runSQLMigrations(db *gorm.DB, logger *zap.Logger) error {
 		{"2026_07_14_account_flow", "migrations/2026_07_14_account_flow.sql"},
 		{"2026_07_16_fix_missing_updated_at", "migrations/2026_07_16_fix_missing_updated_at.sql"},
 		{"2026_07_16_drop_node_level_add_coupon", "migrations/2026_07_16_drop_node_level_add_coupon.sql"},
+		{"2026_07_17_perf_indexes", "migrations/2026_07_17_perf_indexes.sql"},
 	}
 
 	for _, m := range migrations {

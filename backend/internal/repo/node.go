@@ -102,6 +102,32 @@ func (r *NodeRepo) GetPlanIDsByNode(nodeID string) ([]string, error) {
 	return ids, err
 }
 
+// GetPlanIDsByNodeIDs 修复 PERF-NPLUS1-01: admin_node.go NodeList 旧实现
+// 在 for 循环里对每个节点调 GetPlanIDsByNode, N 个节点 = N 次 DB 往返。
+// 这里一次 WHERE node_id IN (...) 拉全部绑定, 然后内存分组, 1 次 SQL 解决。
+func (r *NodeRepo) GetPlanIDsByNodeIDs(nodeIDs []string) (map[string][]string, error) {
+	result := make(map[string][]string, len(nodeIDs))
+	if len(nodeIDs) == 0 {
+		return result, nil
+	}
+	type binding struct {
+		NodeID string
+		PlanID string
+	}
+	var rows []binding
+	err := r.db.Model(&model.NodePlanBinding{}).
+		Where("node_id IN ?", nodeIDs).
+		Select("node_id, plan_id").
+		Scan(&rows).Error
+	if err != nil {
+		return result, err
+	}
+	for _, r := range rows {
+		result[r.NodeID] = append(result[r.NodeID], r.PlanID)
+	}
+	return result, nil
+}
+
 // CreatePlanBindings 为节点创建套餐绑定(批量插入)
 func (r *NodeRepo) CreatePlanBindings(nodeID string, planIDs []string) error {
 	if len(planIDs) == 0 {
@@ -161,6 +187,29 @@ func (r *NodeRepo) MarkStaleNodesOffline(threshold time.Time) (int64, error) {
 			"updated_at": time.Now(),
 		})
 	return res.RowsAffected, res.Error
+}
+
+// MarkStaleNodesOfflineWithIDs 与 MarkStaleNodesOffline 相同语义，但额外返回被标记的节点 ID 列表。
+// 修复 PERF-CRON-01: 旧实现返回 count 后, 调用方用 nodeRepo.List(0,0,"") 全表扫描
+// 再循环清 Redis, 把所有启用节点的缓存都清了, 触发全节点配置重算风暴。
+// 这里先 SELECT id 再 UPDATE WHERE id IN(...), 只清理真正被标记离线的节点缓存。
+func (r *NodeRepo) MarkStaleNodesOfflineWithIDs(threshold time.Time) ([]string, int64, error) {
+	var ids []string
+	if err := r.db.Model(&model.Node{}).
+		Where("is_deleted = false AND online = true AND (last_seen_at IS NULL OR last_seen_at < ?)", threshold).
+		Pluck("id", &ids).Error; err != nil {
+		return nil, 0, err
+	}
+	if len(ids) == 0 {
+		return nil, 0, nil
+	}
+	res := r.db.Model(&model.Node{}).
+		Where("id IN ?", ids).
+		Updates(map[string]interface{}{
+			"online":     false,
+			"updated_at": time.Now(),
+		})
+	return ids, res.RowsAffected, res.Error
 }
 // MarkOffline 清零节点 online 状态(不过滤 is_deleted，用于软删除后清理 stale 在线标记)
 // 修复: 删除节点后 online 字段残留 true，导致后台误显示在线
