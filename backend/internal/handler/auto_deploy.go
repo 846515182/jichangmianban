@@ -344,11 +344,22 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	defer client.Close()
 	sse.event(PhaseConnectServer, "done", "SSH 连接成功", "")
 
-	// 清理同节点旧容器 (容错: 容器可能本来就不存在)
-	if _, err := sshRun(client, fmt.Sprintf(
-		"docker stop %s 2>/dev/null; docker rm -f %s 2>/dev/null; echo OK", containerName, containerName)); err != nil {
-		app.Get().Logger.Warn("清理旧容器失败 (通常无害)", zap.String("container", containerName), zap.Error(err))
+	// 清理同节点旧容器 + 旧部署目录 (容错: 可能本来就不存在)
+	// 修复 NODE-RETRY-01 (P0): 旧版只清同名容器, 不清部署目录。
+	//   3 次重试间若上次失败留下了脏 .env.node / 半截 agent 二进制 / 旧 xray-cache,
+	//   下次部署 mkdir -p 不会删旧文件, 可能与新版本冲突(xray-cache 版本不匹配等)。
+	//   现在重试前先 docker compose down + rm -rf 部署目录, 确保每次部署都是干净状态。
+	sse.event(PhaseConnectServer, "running", "正在清理旧部署残留(容器+目录)...", "")
+	cleanOut, cleanErr := sshRun(client, fmt.Sprintf(
+		"cd %s 2>/dev/null && docker compose -f docker-compose.node.yml down 2>/dev/null; "+
+			"docker stop %s 2>/dev/null; docker rm -f %s 2>/dev/null; "+
+			"rm -rf %s 2>/dev/null; echo CLEANED",
+		deployDir, containerName, containerName, deployDir))
+	if cleanErr != nil {
+		app.Get().Logger.Warn("清理旧残留失败 (通常无害, 可能首次部署无残留)",
+			zap.String("container", containerName), zap.Error(cleanErr))
 	}
+	sse.event(PhaseConnectServer, "done", "旧残留清理完成", strings.TrimSpace(cleanOut))
 
 	// ============================================================
 	// Phase 2: 环境检测 (含 preDeployCheck)
@@ -518,10 +529,14 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	}
 
 	// 等待节点注册到面板
-	sse.event(PhaseVerify, "running", "等待节点注册到面板...", "")
+	// 修复 NODE-VERIFY-01 (P1): 旧版 12×3s=36s 验证窗口太短。
+	//   Xray-core 二进制从 GitHub release 下载(几 MB~几十 MB), 境外节点或网络抖动时
+	//   >36s 是常见的, 会被误判为 VERIFY_FAIL。延长到 40×3s=120s 覆盖下载场景。
+	//   同时 agent bootstrap 有 30 次重试(150s), 120s 窗口能覆盖首次注册成功。
+	sse.event(PhaseVerify, "running", "等待节点注册到面板(最多 120 秒, 含 Xray 下载)...", "")
 	var verifyOut string
 	var success bool
-	for i := 0; i < 12; i++ {
+	for i := 0; i < 40; i++ {
 		time.Sleep(3 * time.Second)
 		verifyOut, _ = sshRun(client, fmt.Sprintf("docker logs --tail 50 %s 2>&1", containerName))
 		if strings.Contains(verifyOut, "注册成功") || strings.Contains(verifyOut, "已注册到面板") || strings.Contains(verifyOut, "Xray 已启动") || strings.Contains(verifyOut, "Xray 进程已启动") {

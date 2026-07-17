@@ -220,6 +220,9 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 		admin.POST("/nodes/:id/rotate-token", middleware.RBAC(middleware.PermKeyManage), middleware.AuditAction("node.rotate_token"), adminNodeH.RotateToken)
 		// 一键部署涉及远程 root 权限, 仅 super_admin 可用
 		admin.POST("/nodes/:id/auto-deploy", middleware.RBAC(middleware.PermNodeManage), middleware.AuditAction("node.auto_deploy"), NewAutoDeployHandler(deps.NodeRepo, deps.JWTMgr).Deploy)
+		// 节点清理并删除: SSE 流式, SSH 到节点服务器清理容器/目录/镜像 + DB 删除
+		// 比 DELETE /nodes/:id 更彻底, 解决旧版只删 DB 不清节点服务器残留的问题
+		admin.DELETE("/nodes/:id/cleanup", middleware.RBAC(middleware.PermNodeManage), middleware.AuditAction("node.delete"), NewNodeCleanupHandler(deps.NodeSvc, deps.NodeRepo, app.Get().Logger).CleanupWithProgress)
 
 		admin.GET("/users", adminUserH.UserList)
 		admin.POST("/users", middleware.AuditAction("user.create"), adminUserH.UserCreate)

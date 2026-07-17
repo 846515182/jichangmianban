@@ -115,9 +115,15 @@ func main() {
 		log.Printf("警告: 准备 Xray 二进制失败(将继续尝试): %v", err)
 	}
 
-	// 4. 注册节点 + 拉取配置 + 启动 Xray(带重试，直到成功)
+	// 4. 注册节点 + 拉取配置 + 启动 Xray
+	// 修复 NODE-BOOTSTRAP-01 (P0): 旧版 bootstrap 失败后 log.Fatalf 退出进程,
+	// 配合 docker restart=unless-stopped 会进入死循环: 退出→重启→注册失败→退出→...
+	// 持续刷 docker 日志、占 CPU。现改为: bootstrap 失败进入"休眠+周期重试"模式,
+	// 进程不退出, 等待运维在面板侧恢复节点(token 复用/节点重新创建)后自动注册成功。
+	// 这样避免 docker 死循环; 同时也给运维时间在面板侧排查问题。
 	if err := agent.bootstrap(); err != nil {
-		log.Fatalf("启动失败: %v", err)
+		log.Printf("[FATAL] 首次启动失败, 进入等待重试模式(不退出进程, 避免 docker 死循环): %v", err)
+		agent.waitForBootstrapRecovery()
 	}
 
 	// 5. 启动心跳定时器(每 30s)
@@ -271,6 +277,34 @@ func (a *Agent) bootstrap() error {
 
 	// 写入配置并启动 Xray
 	return a.applyConfig()
+}
+
+// waitForBootstrapRecovery bootstrap 首次失败后的等待重试模式。
+//
+// 修复 NODE-BOOTSTRAP-01 (P0): 旧版 bootstrap 失败 log.Fatalf 退出进程,
+// 配合 docker restart=unless-stopped 进入死循环(退出→重启→注册失败→退出→...),
+// 持续刷 docker 日志、占 CPU。
+//
+// 现改为: 每 5 分钟重试一次 bootstrap, 进程不退出。
+// 适用场景:
+//   - 面板重启中 gRPC 暂时不可达
+//   - 节点 token 被误删, 运维在面板重新创建节点后能自动恢复
+//   - 面板 IP 变化后运维修正 .env 后能自动恢复
+// 一旦 bootstrap 成功则返回, 主流程继续启动心跳/流量上报。
+func (a *Agent) waitForBootstrapRecovery() {
+	const retryInterval = 5 * time.Minute
+	attempt := 0
+	for {
+		attempt++
+		log.Printf("[recovery] 等待 %v 后第 %d 次重试 bootstrap...", retryInterval, attempt)
+		time.Sleep(retryInterval)
+		if err := a.bootstrap(); err != nil {
+			log.Printf("[recovery] 第 %d 次重试失败: %v", attempt, err)
+			continue
+		}
+		log.Printf("[recovery] 第 %d 次重试成功, 继续启动心跳/流量上报", attempt)
+		return
+	}
 }
 
 // applyConfig 写入 Xray 配置文件并(重启)启动 Xray 进程

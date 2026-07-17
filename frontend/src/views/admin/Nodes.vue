@@ -267,6 +267,14 @@
       @done="fetchList"
     />
 
+    <!-- 清理并删除节点进度弹窗 (SSE 流式, 自动 SSH 清理节点服务器) -->
+    <CleanupProgress
+      v-model="cleanupProgressVisible"
+      :nodeId="cleanupProgressNodeId"
+      :nodeName="cleanupProgressNodeName"
+      @done="fetchList"
+    />
+
     <!-- 部署信息对话框(创建节点后展示 node_token 等) -->
     <el-dialog v-model="deployVisible" title="节点部署信息" :width="deployDialogWidth" top="5vh" class="deploy-dialog">
       <el-alert
@@ -389,6 +397,7 @@ import { ElMessage, ElMessageBox, ElIcon, type FormInstance, type FormRules } fr
 import { Search, Plus, CopyDocument } from '@element-plus/icons-vue'
 import WebTerminal from '@/components/WebTerminal.vue'
 import DeployProgress from '@/components/DeployProgress.vue'
+import CleanupProgress from '@/components/CleanupProgress.vue'
 import request from '@/utils/request'
 import { formatTraffic } from '@/utils/format'
 
@@ -756,18 +765,42 @@ const handleSave = async () => {
   })
 }
 
+// ---- 清理并删除节点 (SSE 流式进度) ----
+const cleanupProgressVisible = ref(false)
+const cleanupProgressNodeId = ref('')
+const cleanupProgressNodeName = ref('')
+
 const handleDelete = (row: NodeRow) => {
-  ElMessageBox.confirm(`确定删除节点「${row.name}」吗？`, '提示', {
-    type: 'warning',
-    confirmButtonText: '删除',
-    cancelButtonText: '取消',
-  }).then(async () => {
-    try {
-      await request.delete(`/api/v1/admin/nodes/${row.id}`)
-      ElMessage.success('节点已删除')
-      await fetchList()
-    } catch { /* */ }
-  }).catch(() => {})
+  ElMessageBox.confirm(
+    `确定删除节点「${row.name}」吗？\n\n推荐: 点击「清理并删除」自动 SSH 清理节点服务器残留资源(容器/目录/镜像)。\n快速: 点击「仅删除」只在面板侧删除(节点服务器残留资源需手动清理)。`,
+    '删除节点',
+    {
+      type: 'warning',
+      distinguishCancelAndClose: true,
+      confirmButtonText: '清理并删除',
+      cancelButtonText: '仅删除',
+    },
+  ).then(() => {
+    // 清理并删除: 打开 SSE 进度弹窗
+    cleanupProgressNodeId.value = row.id
+    cleanupProgressNodeName.value = row.name
+    cleanupProgressVisible.value = true
+  }).catch((action: string) => {
+    if (action === 'cancel') {
+      // 仅删除: 走旧接口 DELETE /nodes/:id
+      ElMessageBox.confirm(`确认仅面板侧删除「${row.name}」? 节点服务器上的容器/目录/镜像不会被清理。`, '仅删除', {
+        type: 'warning',
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+      }).then(async () => {
+        try {
+          await request.delete(`/api/v1/admin/nodes/${row.id}`)
+          ElMessage.success('节点已删除')
+          await fetchList()
+        } catch { /* */ }
+      }).catch(() => {})
+    }
+  })
 }
 
 const rotateToken = (row: NodeRow) => {
