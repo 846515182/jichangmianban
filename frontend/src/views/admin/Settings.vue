@@ -702,36 +702,50 @@ const pullSteps = computed(() => {
 })
 
 // 轮询面板健康, 恢复后自动刷新页面(用于更新/重启后面板短暂不可用的场景)
-// 关键: 必须先等面板"断开"(确认重启已真正开始), 再等面板"恢复"。
-// 否则接口刚返回时面板还活着, 立即轮询会误判为"已恢复", 刷新后页面反而打不开。
+// 修复 UI-RELOAD-01 (P1): 旧版用"先等断开再等恢复"两阶段, 但后端 syscall.Exec
+// 原地重启的 HTTP 断开窗口可能 <2s, 前端 2s 轮询容易错过断开瞬间, 导致永远
+// 卡在"等待断开"阶段不刷新(用户看到"更新中"一直转)。
+// 新方案: 记录调用前的 boot_time, 轮询 /healthz 对比 boot_time 是否变化,
+// 变化 = 新进程已起来 = 重启完成, 直接刷新。同时保留"请求失败"作为断开信号。
 const waitForPanelAndReload = () => {
-  // 第一阶段: 等面板断开(请求失败 = 重启已开始), 最多等 15 秒
-  let phase = 'disconnect'
+  const oldBootTime = currentBootTime.value // 调用前缓存的面板启动时间
   let attempts = 0
+  let sawDisconnect = false // 是否观察到过面板断开(用于区分"还没重启"和"已快速重启完")
   const check = setInterval(async () => {
     attempts++
     try {
-      await request.get('/api/v1/admin/system/git-status', { timeout: 3000 })
-      if (phase === 'disconnect') {
-        // 面板还活着, 还没开始重启, 继续等
+      const res: any = await request.get('/healthz', { timeout: 3000 })
+      const newBootTime = res?.data?.boot_time || res?.boot_time
+      // boot_time 变化 = 新进程已起来, 重启完成
+      if (newBootTime && oldBootTime && newBootTime !== oldBootTime) {
+        clearInterval(check)
+        ElMessage.success('面板已恢复，刷新中...')
+        setTimeout(() => location.reload(), 500)
         return
       }
-      // phase === 'reconnect': 面板已恢复
-      clearInterval(check)
-      ElMessage.success('面板已恢复，正在刷新页面...')
-      setTimeout(() => location.reload(), 800)
-    } catch {
-      // 请求失败 = 面板已断开(正在重启), 切换到等待恢复阶段
-      if (phase === 'disconnect') {
-        phase = 'reconnect'
-        attempts = 0
-        ElMessage.info('面板重启中，等待恢复...')
+      // boot_time 没变但曾断开过 → 面板已恢复(只是 boot_time 没更新, 兼容旧版)
+      if (sawDisconnect) {
+        clearInterval(check)
+        ElMessage.success('面板已恢复，刷新中...')
+        setTimeout(() => location.reload(), 500)
+        return
       }
+      // boot_time 没变也没断开过 → 面板可能还没开始重启, 继续等
+      // 但如果 oldBootTime 为空(页面加载时获取失败), 直接靠 sawDisconnect 判断
+      if (!oldBootTime && attempts > 3) {
+        // 没有基线 boot_time, 等 3 次后若面板一直活着, 视为已恢复
+        clearInterval(check)
+        ElMessage.success('面板已恢复，刷新中...')
+        setTimeout(() => location.reload(), 500)
+      }
+    } catch {
+      // 请求失败 = 面板正在重启(断开中), 标记已观察到断开
+      sawDisconnect = true
     }
-    // 总超时: disconnect 阶段 15 秒 + reconnect 阶段 60 秒
-    if ((phase === 'disconnect' && attempts > 7) || (phase === 'reconnect' && attempts > 30)) {
+    // 超时: 90 秒(45 次 × 2s), 覆盖 docker 重建等慢场景
+    if (attempts > 45) {
       clearInterval(check)
-      ElMessage.warning('面板恢复超时，请手动刷新页面')
+      ElMessage.warning('面板恢复超时，请手动刷新')
       restartingPanel.value = false
       restarting.value = false
     }
@@ -883,12 +897,22 @@ const diskCleanup = async () => {
   }).catch(() => {})
 }
 
+// 修复 UI-RELOAD-01 (P1): 缓存当前面板启动时间, 用于一键更新/重启后判断面板是否已重启
+const currentBootTime = ref<number | string>('')
+const loadBootTime = async () => {
+  try {
+    const res: any = await request.get('/healthz', { timeout: 3000 })
+    currentBootTime.value = res?.data?.boot_time || res?.boot_time || ''
+  } catch { /* 面板不可用时忽略 */ }
+}
+
 onMounted(() => {
   loadPaymentConfig()
   loadEmailConfig()
   loadBackups()
   loadGitStatus()
   loadDiskUsage()
+  loadBootTime()
 })
 
 // 修复 UI-POLL-02 (P1): 离开页面时清理 git-pull 日志轮询定时器,

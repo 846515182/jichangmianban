@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"time"
+
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
@@ -11,6 +13,10 @@ import (
 	"nexus-panel/internal/security"
 	"nexus-panel/internal/service"
 )
+
+// bootTime 进程启动时间(Unix 秒)。用于 /healthz 让前端判断面板是否已重启完成。
+// syscall.Exec 原地重启后此值会变(新进程重新初始化包级变量)。
+var bootTime = time.Now().Unix()
 
 type Deps struct {
 	JWTMgr *security.JWTManager
@@ -93,8 +99,13 @@ func NewDeps() *Deps {
 }
 
 func RegisterRoutes(r *gin.Engine, deps *Deps) {
+	// 修复 UI-RELOAD-01 (P1): /healthz 返回进程启动时间(boot_time),
+	// 前端一键更新/重启面板后用它判断面板是否已重启完成:
+	// 后端用 syscall.Exec 原地重启, HTTP 断开窗口可能 <2s, 前端 2s 轮询
+	// 容易错过断开瞬间, 导致永远卡在"等待断开"阶段。改为对比 boot_time,
+	// 启动时间变化 = 新进程已起来 = 重启完成。
 	r.GET("/healthz", func(c *gin.Context) {
-		c.JSON(200, gin.H{"status": "ok"})
+		c.JSON(200, gin.H{"status": "ok", "boot_time": bootTime})
 	})
 
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
