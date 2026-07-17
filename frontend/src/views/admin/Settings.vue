@@ -250,6 +250,19 @@
                   <el-tag size="small" type="success">{{ gitStatus.branch }}</el-tag>
                 </div>
                 <div class="git-info">
+                  <span class="git-label">版本状态:</span>
+                  <el-tag v-if="gitStatus.up_to_date" size="small" type="success" effect="dark">已是最新版本</el-tag>
+                  <el-tag v-else-if="gitStatus.behind > 0" size="small" type="warning" effect="dark">有 {{ gitStatus.behind }} 个更新可用</el-tag>
+                  <el-tag v-else-if="gitStatus.ahead > 0" size="small" type="info" effect="dark">本地有 {{ gitStatus.ahead }} 个未推送提交</el-tag>
+                  <el-tag v-else size="small" type="info">检测中...</el-tag>
+                </div>
+                <div class="git-info">
+                  <span class="git-label">当前版本:</span>
+                  <code class="git-commit-hash">{{ gitStatus.local_head || '-' }}</code>
+                  <span v-if="gitStatus.behind > 0" class="git-arrow">→</span>
+                  <code v-if="gitStatus.behind > 0" class="git-commit-hash git-commit-new">{{ gitStatus.remote_head || '-' }}</code>
+                </div>
+                <div class="git-info">
                   <span class="git-label">最近提交:</span>
                   <pre class="git-log">{{ gitStatus.recent5 || '加载中...' }}</pre>
                 </div>
@@ -755,6 +768,11 @@ const gitStatus = reactive({
   branch: '',
   recent5: '',
   status: '',
+  local_head: '',
+  remote_head: '',
+  behind: 0,
+  ahead: 0,
+  up_to_date: false,
 })
 
 const loadGitStatus = async () => {
@@ -765,6 +783,11 @@ const loadGitStatus = async () => {
     gitStatus.branch = d.branch || ''
     gitStatus.recent5 = d.recent_5 || ''
     gitStatus.status = d.status || ''
+    gitStatus.local_head = d.local_head || ''
+    gitStatus.remote_head = d.remote_head || ''
+    gitStatus.behind = d.behind || 0
+    gitStatus.ahead = d.ahead || 0
+    gitStatus.up_to_date = !!d.up_to_date
   } catch { /* */ } finally {
     loadingGitStatus.value = false
   }
@@ -937,6 +960,9 @@ onUnmounted(() => {
 .git-label { font-size: 12px; color: var(--np-text-muted); flex-shrink: 0; line-height: 24px; }
 .git-log { margin: 0; padding: 8px; background: var(--np-card); border-radius: 4px; font-size: 12px; color: var(--np-text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 120px; overflow-y: auto; flex: 1; min-width: 0; }
 .git-log.has-changes { color: var(--np-warning); }
+.git-commit-hash { font-family: 'JetBrains Mono', monospace; font-size: 12px; padding: 2px 6px; background: var(--np-bg-soft); border-radius: 3px; color: var(--np-text-secondary); }
+.git-commit-new { color: var(--np-primary); border: 1px dashed var(--np-primary-dim); }
+.git-arrow { color: var(--np-text-muted); font-size: 12px; }
 .git-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .git-actions .el-button { margin-left: 0 !important; }
 .git-actions .el-button span { margin-left: 4px; }

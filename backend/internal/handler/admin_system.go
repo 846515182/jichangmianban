@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -1091,15 +1092,65 @@ func (h *AdminSystemHandler) GitPush(c *gin.Context) {
 
 // GitStatus GET /api/v1/admin/system/git-status
 // 查看当前 git 状态
+// 返回:
+//   - branch: 当前分支
+//   - status: 工作树变更(git status --short)
+//   - recent_5: 最近 5 条提交(用于查看历史)
+//   - local_head / remote_head: 本地与远程最新提交哈希(短)
+//   - behind: 本地落后远程多少个提交(>0 表示有可更新)
+//   - ahead:  本地领先远程多少个提交(本地有未推送的提交)
+//   - up_to_date: 本地是否与远程一致(behind==0 && ahead==0)
+//
+// 修复 UI-GITSTATUS-01: 旧版只返回 recent_5 历史提交, 前端无法判断
+// "是否有新版本可更新"。用户更新到最新后, 历史提交列表照常显示, 看起来
+// 像"更新了还在显示", 体验混乱。新增 behind/up_to_date 让前端能明确展示
+// "已是最新版本"或"有 N 个更新可用"。
 func (h *AdminSystemHandler) GitStatus(c *gin.Context) {
+	gitRoot := getGitRoot()
 	statusResult := execCommand("git", "status", "--short")
 	logResult := execCommand("git", "log", "--oneline", "-5")
 	branch := getCurrentBranch()
 
+	// 先 fetch 远程引用(不修改工作树), 拿到 origin/<branch> 最新位置
+	// 静默执行, 失败(如离线)不影响返回历史提交
+	execCommandDir(gitRoot, "git", "fetch", "origin")
+
+	localHead := execCommand("git", "rev-parse", "--short", "HEAD").Output
+	remoteRef := "origin/" + branch
+	if branch == "" {
+		remoteRef = "origin/main"
+	}
+	remoteHead := execCommand("git", "rev-parse", "--short", remoteRef).Output
+	// 去除可能的换行
+	localHead = strings.TrimSpace(localHead)
+	remoteHead = strings.TrimSpace(remoteHead)
+
+	behind := 0
+	ahead := 0
+	if localHead != "" && remoteHead != "" && localHead != remoteHead {
+		// 落后数: 远程有而本地没有的提交
+		if c := execCommand("git", "rev-list", "--count", "HEAD.."+remoteRef).Output; c != "" {
+			if n, err := strconv.Atoi(strings.TrimSpace(c)); err == nil {
+				behind = n
+			}
+		}
+		// 领先数: 本地有而远程没有的提交(未推送)
+		if c := execCommand("git", "rev-list", "--count", remoteRef+"..HEAD").Output; c != "" {
+			if n, err := strconv.Atoi(strings.TrimSpace(c)); err == nil {
+				ahead = n
+			}
+		}
+	}
+
 	response.OK(c, gin.H{
-		"status":   statusResult.Output,
-		"recent_5": logResult.Output,
-		"branch":   branch,
+		"status":      statusResult.Output,
+		"recent_5":    logResult.Output,
+		"branch":      branch,
+		"local_head":  localHead,
+		"remote_head": remoteHead,
+		"behind":      behind,
+		"ahead":       ahead,
+		"up_to_date":  behind == 0 && ahead == 0,
 	})
 }
 

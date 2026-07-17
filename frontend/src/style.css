@@ -194,14 +194,22 @@ html.dark {
 }
 
 /* ElMessageBox 垂直居中
-   Element Plus 的 MessageBox 默认偏上(遮罩 align-items: flex-start +
-   .el-message-box margin-top: 15vh)，与 el-dialog(默认居中)不一致，
-   导致确认框总显示在屏幕顶部。强制遮罩居中并清掉偏移，使其与 Dialog 位置统一。 */
+   根因: 项目用 unplugin-vue-components 按需导入, 只对模板里用到的组件
+   自动导入样式。但 ElMessageBox 是命令式调用(ElMessageBox.confirm()),
+   模板里没有 <el-message-box>, 所以它的样式(.is-message-box 规则 +
+   ::after 伪元素垂直居中)根本没被打包进 CSS, 导致确认框 inline-block
+   元素默认顶部对齐, 显示在屏幕最上方。
+   修复: 直接用 flex 让遮罩容器居中, 不依赖 Element Plus 的 ::after hack。
+   注意 .el-overlay-message-box 是 Element Plus 在 ElMessageBox 调用时
+   自动给遮罩 div 加的类名(配合 body.is-message-box), 即使样式没按需
+   导入, 类名仍会加上, 所以这里能命中。 */
 .el-overlay-message-box {
+  display: flex !important;
   align-items: center !important;
+  justify-content: center !important;
 }
 .el-message-box {
-  margin-top: 0 !important;
+  margin: 0 !important;
 }
 
 /* ===== 全局移动端适配 (max-width: 768px) ===== */
