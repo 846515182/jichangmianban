@@ -171,7 +171,7 @@
               <div class="section-title"><el-icon><Message /></el-icon> SMTP 邮件配置</div>
               <el-form label-width="120px" label-position="right">
                 <el-form-item label="启用邮件">
-                  <el-switch v-model="email.enabled" active-text="启用" inactive-text="关闭" />
+                  <el-switch v-model="email.enabled" active-text="开启邮件" inactive-text="关闭邮件" />
                   <span class="form-tip">关闭后用户将无法收到验证邮件</span>
                 </el-form-item>
                 <el-form-item label="SMTP 服务器">
@@ -275,13 +275,10 @@
                 <el-button type="primary" @click="gitPull" :loading="pulling">
                   <el-icon><Download /></el-icon><span>一键在线更新</span>
                 </el-button>
-                <el-button type="success" @click="gitPushDialog = true" :disabled="!gitStatus.status">
-                  <el-icon><Upload /></el-icon><span>推送代码</span>
-                </el-button>
                 <el-button type="warning" @click="systemRestart" :loading="restarting">
                   <el-icon><RefreshRight /></el-icon><span>重启面板</span>
                 </el-button>
-                <el-button @click="loadGitStatus" :loading="loadingGitStatus">
+                <el-button type="info" @click="loadGitStatus" :loading="loadingGitStatus">
                   <el-icon><Refresh /></el-icon><span>刷新状态</span>
                 </el-button>
               </div>
@@ -317,7 +314,7 @@
                 <pre>{{ diskUsage }}</pre>
               </div>
               <div class="disk-actions">
-                <el-button @click="loadDiskUsage" :loading="loadingDisk">
+                <el-button type="info" @click="loadDiskUsage" :loading="loadingDisk">
                   <el-icon><Refresh /></el-icon><span>刷新</span>
                 </el-button>
                 <el-button type="danger" @click="diskCleanup" :loading="cleaning">
@@ -354,20 +351,6 @@
       </template>
     </el-dialog>
 
-    <!-- Git Push 对话框 -->
-    <el-dialog v-model="gitPushDialog" title="推送代码到 GitHub" width="480px">
-      <el-form>
-        <el-form-item label="提交信息">
-          <el-input v-model="gitPushMessage" type="textarea" :rows="3" placeholder="请输入本次提交的描述..." />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="gitPushDialog = false">取消</el-button>
-        <el-button type="success" @click="gitPush" :loading="pushing">
-          <el-icon><Upload /></el-icon>确认推送
-        </el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
 
@@ -673,10 +656,7 @@ const savePwd = async () => {
 // ========== Git 同步 & 系统更新 ==========
 const loadingGitStatus = ref(false)
 const pulling = ref(false)
-const pushing = ref(false)
 const restarting = ref(false)
-const gitPushDialog = ref(false)
-const gitPushMessage = ref('')
 const pullResult = ref('')
 const pullSuccess = ref(false)
 const pullDone = ref(false)
@@ -858,23 +838,6 @@ const systemRestart = async () => {
       restartingPanel.value = false
     }
   }).catch(() => {})
-}
-
-const gitPush = async () => {
-  if (!gitPushMessage.value.trim()) {
-    ElMessage.warning('请填写提交信息')
-    return
-  }
-  pushing.value = true
-  try {
-    await request.post('/api/v1/admin/system/git-push', { message: gitPushMessage.value })
-    ElMessage.success('代码已推送到 GitHub')
-    gitPushDialog.value = false
-    gitPushMessage.value = ''
-    loadGitStatus()
-  } catch (e: any) {
-    ElMessage.error(e?.response?.data?.msg || e?.message || '推送失败')
-  } finally { pushing.value = false }
 }
 
 // ========== 磁盘管理 ==========
