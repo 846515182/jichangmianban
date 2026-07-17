@@ -826,13 +826,23 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 
 		logWrite(">>> 1/6 预检工作树")
 		statusResult := execCommand("git", "status", "--short")
+		stashed := false
 		if statusResult.Output != "" {
-			logWrite("工作树有未提交的修改:\n%s", statusResult.Output)
-			gitPullOK = false
-			gitPullDone = true
-			return
+			// 工作树有未提交修改：自动 stash 保留(仅已跟踪文件)，更新后 pop 恢复。
+			// 未跟踪文件(如运行时二进制/备份)不影响 git reset --hard，无需处理。
+			logWrite("工作树有未提交的修改，自动 stash 保留:\n%s", statusResult.Output)
+			stashResult := execCommand("git", "stash", "push", "-m", "nexus-panel-auto-stash-before-pull")
+			if !stashResult.Success {
+				logWrite("git stash 失败: %s", stashResult.Error)
+				gitPullOK = false
+				gitPullDone = true
+				return
+			}
+			stashed = true
+			logWrite("本地修改已 stash 保存，更新完成后将自动恢复")
+		} else {
+			logWrite("工作树干净")
 		}
-		logWrite("工作树干净")
 
 		logWrite(">>> 2/6 拉取代码 git fetch origin (branch=%s)", branch)
 		if !execCommandLog(gitRoot, "git", "fetch", "origin") {
@@ -848,6 +858,18 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 			gitPullOK = false
 			gitPullDone = true
 			return
+		}
+
+		// 更新成功后恢复之前 stash 的本地修改
+		if stashed {
+			logWrite(">>> 恢复 stash 的本地修改 git stash pop")
+			popResult := execCommand("git", "stash", "pop")
+			if !popResult.Success {
+				logWrite("警告: git stash pop 失败(可能有冲突)，本地修改保留在 stash 中: %s", popResult.Error)
+				logWrite("可手动执行 git stash list / git stash pop 处理")
+			} else {
+				logWrite("本地修改已恢复")
+			}
 		}
 
 		logWrite(">>> 4/6 构建镜像 docker compose build panel frontend")

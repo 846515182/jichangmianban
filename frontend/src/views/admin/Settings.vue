@@ -257,7 +257,7 @@
                 </div>
               </div>
               <div class="git-actions">
-                <el-button type="primary" @click="gitPull" :loading="pulling" :disabled="!!gitStatus.status">
+                <el-button type="primary" @click="gitPull" :loading="pulling">
                   <el-icon><Download /></el-icon>一键在线更新
                 </el-button>
                 <el-button type="success" @click="gitPushDialog = true" :disabled="!gitStatus.status">
