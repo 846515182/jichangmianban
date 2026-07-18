@@ -601,12 +601,16 @@ func preDeployCheck(client *ssh.Client, listenPort, healthPort int) preCheckResu
 		diskForSwap, _ := sshRun(client, "df -BG / | tail -1")
 		if availGB := parseAvailGB(diskForSwap); availGB >= 2 {
 			lines = append(lines, "[自动修复] 内存不足, 正在创建 2GB swap 分区...")
-			swapOut, swapErr := sshRun(client,
-				"fallocate -l 2G /swapfile 2>&1 && "+
-					"chmod 600 /swapfile 2>&1 && "+
-					"mkswap /swapfile 2>&1 && "+
-					"swapon /swapfile 2>&1 && "+
-					"echo 'SWAP_CREATED'")
+			// 先尝试 fallocate (快), 失败回退到 dd (兼容性更好)
+			swapCmd := "(" +
+				"fallocate -l 2G /swapfile 2>/dev/null || " +
+				"dd if=/dev/zero of=/swapfile bs=1M count=2048 2>/dev/null" +
+				") && " +
+				"chmod 600 /swapfile && " +
+				"mkswap /swapfile && " +
+				"swapon /swapfile && " +
+				"echo 'SWAP_CREATED'"
+			swapOut, swapErr := sshRun(client, swapCmd)
 			lines = append(lines, swapOut)
 			if swapErr == nil && strings.Contains(swapOut, "SWAP_CREATED") {
 				lines = append(lines, "[修复] swap 分区创建成功, 重新检测内存...")
