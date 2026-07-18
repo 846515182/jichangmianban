@@ -333,16 +333,36 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 		},
 	}
 	addr := fmt.Sprintf("%s:%d", node.ServerAddress, port)
-	client, err := ssh.Dial("tcp", addr, sshConfig)
-	if err != nil {
-		errStr := err.Error()
+
+	// 兜底: SSH 连接重试 3 次 (网络抖动、ssh 服务重启中等)
+	var client *ssh.Client
+	var dialErr error
+	for retry := 1; retry <= 3; retry++ {
+		client, dialErr = ssh.Dial("tcp", addr, sshConfig)
+		if dialErr == nil {
+			break
+		}
+		if retry < 3 {
+			sse.event(PhaseConnectServer, "log", "", fmt.Sprintf("SSH 连接第 %d 次失败, %d 秒后重试... (%v)", retry, retry*2, dialErr))
+			time.Sleep(time.Duration(retry*2) * time.Second)
+		}
+	}
+	if dialErr != nil {
+		errStr := dialErr.Error()
 		code := classifySSHError(errStr)
 		sse.eventWithCode(PhaseConnectServer, "error",
-			"SSH 连接失败: "+errStr+diagnoseSSHError(err, port), "", code)
+			"SSH 连接失败(重试3次): "+errStr+diagnoseSSHError(dialErr, port), "", code)
 		return false, code, "SSH 连接失败: " + errStr
 	}
 	defer client.Close()
 	sse.event(PhaseConnectServer, "done", "SSH 连接成功", "")
+
+	// 兜底: 连接后检测 SSH 会话是否真正可用
+	if testOut, testErr := sshRun(client, "echo 'SSH_OK'"); testErr != nil || !strings.Contains(testOut, "SSH_OK") {
+		sse.eventWithCode(PhaseConnectServer, "error",
+			"SSH 已连接但无法执行命令: "+fmt.Sprintf("%v", testErr), testOut, DeployErrSSHConnect)
+		return false, DeployErrSSHConnect, "SSH 会话不可用"
+	}
 
 	// 清理同节点旧容器 + 旧部署目录 (容错: 可能本来就不存在)
 	// 修复 NODE-RETRY-01 (P0): 旧版只清同名容器, 不清部署目录。
@@ -350,16 +370,33 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	//   下次部署 mkdir -p 不会删旧文件, 可能与新版本冲突(xray-cache 版本不匹配等)。
 	//   现在重试前先 docker compose down + rm -rf 部署目录, 确保每次部署都是干净状态。
 	sse.event(PhaseConnectServer, "running", "正在清理旧部署残留(容器+目录)...", "")
-	cleanOut, cleanErr := sshRun(client, fmt.Sprintf(
-		"cd %s 2>/dev/null && docker compose -f docker-compose.node.yml down 2>/dev/null; "+
-			"docker stop %s 2>/dev/null; docker rm -f %s 2>/dev/null; "+
-			"rm -rf %s 2>/dev/null; echo CLEANED",
-		deployDir, containerName, containerName, deployDir))
-	if cleanErr != nil {
-		app.Get().Logger.Warn("清理旧残留失败 (通常无害, 可能首次部署无残留)",
-			zap.String("container", containerName), zap.Error(cleanErr))
+	// 兜底: 清理命令逐条执行, 每条独立容错, 避免一条失败导致后续不执行
+	cleanSteps := []struct {
+		desc string
+		cmd  string
+	}{
+		{"docker compose down", fmt.Sprintf("cd %s 2>/dev/null && docker compose -f docker-compose.node.yml down --timeout 10 2>/dev/null; true", deployDir)},
+		{"停止旧容器", fmt.Sprintf("docker stop %s 2>/dev/null; true", containerName)},
+		{"删除旧容器", fmt.Sprintf("docker rm -f %s 2>/dev/null; true", containerName)},
+		{"删除旧目录", fmt.Sprintf("rm -rf %s 2>/dev/null; true", deployDir)},
 	}
-	sse.event(PhaseConnectServer, "done", "旧残留清理完成", strings.TrimSpace(cleanOut))
+	var cleanLines []string
+	for _, step := range cleanSteps {
+		out, err := sshRun(client, step.cmd)
+		if err != nil {
+			app.Get().Logger.Warn("清理步骤失败(非致命)",
+				zap.String("step", step.desc), zap.String("container", containerName), zap.Error(err))
+			cleanLines = append(cleanLines, fmt.Sprintf("[跳过] %s: %v", step.desc, err))
+		} else {
+			cleanLines = append(cleanLines, fmt.Sprintf("[完成] %s: %s", step.desc, strings.TrimSpace(out)))
+		}
+	}
+	// 兜底: 强制清理可能卡住的容器 (docker rm -f 可能因为 containerd 卡住而超时)
+	sshRun(client, fmt.Sprintf("docker rm -f %s 2>/dev/null; true", containerName))
+	// 兜底: 清理可能残留的 Docker 网络 (旧 compose 项目可能留下网络冲突)
+	sshRun(client, fmt.Sprintf("docker network prune -f 2>/dev/null; true"))
+	cleanLines = append(cleanLines, "CLEANED")
+	sse.event(PhaseConnectServer, "done", "旧残留清理完成", strings.Join(cleanLines, "\n"))
 
 	// ============================================================
 	// Phase 2: 环境检测 (逐步推送 SSE 事件)
@@ -385,16 +422,41 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	// ============================================================
 	sse.event(PhasePrepare, "running", "正在准备部署环境...", "")
 
-	// 3.1 创建远程目录
-	if out, err := sshRun(client, "mkdir -p "+deployDir); err != nil {
-		sse.eventWithCode(PhasePrepare, "error", "创建目录失败: "+err.Error(), out, DeployErrUnknown)
-		return false, DeployErrUnknown, "创建目录失败: " + err.Error()
+	// 3.1 创建远程目录 (兜底: 失败重试 3 次, 间隔递增)
+	var mkdirErr error
+	var mkdirOut string
+	for retry := 1; retry <= 3; retry++ {
+		mkdirOut, mkdirErr = sshRun(client, "mkdir -p "+deployDir)
+		if mkdirErr == nil {
+			break
+		}
+		if retry < 3 {
+			sse.event(PhasePrepare, "log", "", fmt.Sprintf("创建目录失败(第%d次), %d秒后重试...", retry, retry))
+			time.Sleep(time.Duration(retry) * time.Second)
+		}
+	}
+	if mkdirErr != nil {
+		sse.eventWithCode(PhasePrepare, "error", "创建目录失败(重试3次): "+mkdirErr.Error(), mkdirOut, DeployErrUnknown)
+		return false, DeployErrUnknown, "创建目录失败: " + mkdirErr.Error()
 	}
 
-	// 3.2 推送 node_agent
-	if err := uploadNodeAgent(client, deployDir); err != nil {
-		sse.eventWithCode(PhasePrepare, "error", "推送文件失败: "+err.Error(), "", DeployErrTransfer)
-		return false, DeployErrTransfer, "推送文件失败: " + err.Error()
+	// 3.2 推送 node_agent (兜底: 失败重试 2 次)
+	var uploadErr error
+	for retry := 1; retry <= 2; retry++ {
+		uploadErr = uploadNodeAgent(client, deployDir)
+		if uploadErr == nil {
+			break
+		}
+		if retry < 2 {
+			sse.event(PhasePrepare, "log", "", fmt.Sprintf("推送文件失败(第%d次), 正在重试... (%v)", retry, uploadErr))
+			// 兜底: 清理可能残留的半截文件
+			sshRun(client, "rm -rf "+deployDir+"/* 2>/dev/null; true")
+			time.Sleep(2 * time.Second)
+		}
+	}
+	if uploadErr != nil {
+		sse.eventWithCode(PhasePrepare, "error", "推送文件失败(重试2次): "+uploadErr.Error(), "", DeployErrTransfer)
+		return false, DeployErrTransfer, "推送文件失败: " + uploadErr.Error()
 	}
 
 	// 3.3 安装 Docker (如果未安装)
@@ -406,7 +468,7 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 		return false, dockerCode, dockerMsg
 	}
 
-	// 3.4 创建 .env.node
+	// 3.4 创建 .env.node (兜底: 写入失败重试 2 次)
 	envContent := fmt.Sprintf("CONTAINER_NAME=%s\nPANEL_GRPC_ADDR=%s:%s\nNODE_TOKEN=%s\nLISTEN_PORT=%d\nHEALTH_PORT=%d\nXRAY_VERSION=v26.6.1",
 		containerName, panelIP, grpcPortStr, node.NodeToken, listenPort, healthPort)
 	// 修复 NODE-TLS-03 (P0): 面板启用 gRPC TLS 时, 主动给 agent 设置 GRPC_TLS_CA,
@@ -421,9 +483,21 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 				sse.eventWithCode(PhasePrepare, "error", "读取面板 gRPC CA 证书失败: "+err.Error(), "", DeployErrUnknown)
 				return false, DeployErrUnknown, "读取 CA 证书失败: " + err.Error()
 			}
-			if err := sshWriteFile(client, deployDir+"/grpc-ca.crt", string(caContent)); err != nil {
-				sse.eventWithCode(PhasePrepare, "error", "推送 gRPC CA 证书失败: "+err.Error(), "", DeployErrTransfer)
-				return false, DeployErrTransfer, "推送 CA 证书失败: " + err.Error()
+			// 兜底: CA 证书推送重试 2 次
+			var caPushErr error
+			for retry := 1; retry <= 2; retry++ {
+				caPushErr = sshWriteFile(client, deployDir+"/grpc-ca.crt", string(caContent))
+				if caPushErr == nil {
+					break
+				}
+				if retry < 2 {
+					sse.event(PhasePrepare, "log", "", fmt.Sprintf("CA 证书推送失败(第%d次), 重试中...", retry))
+					time.Sleep(time.Second)
+				}
+			}
+			if caPushErr != nil {
+				sse.eventWithCode(PhasePrepare, "error", "推送 gRPC CA 证书失败(重试2次): "+caPushErr.Error(), "", DeployErrTransfer)
+				return false, DeployErrTransfer, "推送 CA 证书失败: " + caPushErr.Error()
 			}
 			// 容器内路径(docker-compose 挂载 ./grpc-ca.crt -> /app/grpc-ca.crt)
 			envContent += "\nGRPC_TLS_CA=/app/grpc-ca.crt"
@@ -434,9 +508,31 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 			sse.event(PhasePrepare, "running", "面板 gRPC TLS 已启用(公信 CA), agent 将用系统 CA 池验证", "")
 		}
 	}
-	if err := sshWriteFile(client, deployDir+"/.env.node", envContent); err != nil {
-		sse.eventWithCode(PhasePrepare, "error", "写配置文件失败: "+err.Error(), "", DeployErrUnknown)
-		return false, DeployErrUnknown, "写配置失败: " + err.Error()
+
+	// 兜底: 写入 .env.node 重试 2 次
+	var envWriteErr error
+	for retry := 1; retry <= 2; retry++ {
+		envWriteErr = sshWriteFile(client, deployDir+"/.env.node", envContent)
+		if envWriteErr == nil {
+			break
+		}
+		if retry < 2 {
+			sse.event(PhasePrepare, "log", "", fmt.Sprintf("写配置文件失败(第%d次), 重试中...", retry))
+			// 兜底: 先删掉可能损坏的文件
+			sshRun(client, "rm -f "+deployDir+"/.env.node 2>/dev/null; true")
+			time.Sleep(time.Second)
+		}
+	}
+	if envWriteErr != nil {
+		sse.eventWithCode(PhasePrepare, "error", "写配置文件失败(重试2次): "+envWriteErr.Error(), "", DeployErrUnknown)
+		return false, DeployErrUnknown, "写配置失败: " + envWriteErr.Error()
+	}
+
+	// 兜底: 验证配置文件内容是否正确写入
+	verifyEnvOut, _ := sshRun(client, "cat "+deployDir+"/.env.node 2>/dev/null | wc -l || echo '0'")
+	if strings.TrimSpace(verifyEnvOut) == "0" {
+		sse.eventWithCode(PhasePrepare, "error", "配置文件写入后验证失败, 文件为空", "", DeployErrUnknown)
+		return false, DeployErrUnknown, "配置文件验证失败"
 	}
 
 	sse.event(PhasePrepare, "done", "部署环境就绪", "目录/文件/Docker/配置 全部就绪")
@@ -457,58 +553,129 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	if strings.Contains(binStatus, "EXISTS_AND_RECENT") {
 		sse.event(PhaseBuild, "done", "使用缓存的 node-agent 二进制(24小时内编译)", binStatus)
 	} else {
-		// 优化: 使用 alpine 镜像替代 bullseye, 下载速度提升 3-5 倍, 体积缩小 70%
-		hostNodeAgentPath := "/root/nexus-panel/node_agent"
-		compileCmd := fmt.Sprintf(
-			"docker run --rm "+
-				"-v %s:/build -w /build "+
-				"golang:1.21-alpine "+
-				"sh -c 'apk add --no-cache git >/dev/null 2>&1; go mod download && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags=\"-s -w\" -o /build/agent . 2>&1' && ls -lh %s/agent",
-			hostNodeAgentPath, hostNodeAgentPath)
-		buildOut, buildErr := sshRunLocal(compileCmd)
+		// 兜底: 编译增加重试 (网络波动导致 go mod download 失败)
+		var buildErr error
+		var buildOut string
+		for retry := 1; retry <= 2; retry++ {
+			if retry > 1 {
+				sse.event(PhaseBuild, "log", "", fmt.Sprintf("编译失败, 第 %d 次重试...", retry))
+				time.Sleep(3 * time.Second)
+			}
+			// 优化: 使用 alpine 镜像替代 bullseye, 下载速度提升 3-5 倍, 体积缩小 70%
+			hostNodeAgentPath := "/root/nexus-panel/node_agent"
+			compileCmd := fmt.Sprintf(
+				"docker run --rm "+
+					"-v %s:/build -w /build "+
+					"golang:1.21-alpine "+
+					"sh -c 'apk add --no-cache git >/dev/null 2>&1; go mod download && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags=\"-s -w\" -o /build/agent . 2>&1' && ls -lh %s/agent",
+				hostNodeAgentPath, hostNodeAgentPath)
+			buildOut, buildErr = sshRunLocal(compileCmd)
+			if buildErr == nil {
+				break
+			}
+			// 兜底: 编译失败可能是缓存问题, 清理 go mod cache 后重试
+			if retry == 1 && (strings.Contains(buildOut, "download") || strings.Contains(buildOut, "verify")) {
+				sse.event(PhaseBuild, "log", "", "检测到依赖下载问题, 清理模块缓存后重试...")
+				sshRunLocal("docker run --rm -v /root/nexus-panel/node_agent:/build -w /build golang:1.21-alpine sh -c 'go clean -modcache 2>/dev/null; true'")
+			}
+		}
 		if buildErr != nil {
-			sse.eventWithCode(PhaseBuild, "error", "二进制预编译失败: "+buildErr.Error(), buildOut, DeployErrBuild)
+			sse.eventWithCode(PhaseBuild, "error", "二进制预编译失败(重试2次): "+buildErr.Error(), buildOut, DeployErrBuild)
 			return false, DeployErrBuild, "编译失败: " + buildErr.Error()
 		}
 		sse.event(PhaseBuild, "done", "二进制预编译完成", buildOut)
 	}
 
-	// 推送二进制到节点
-	if transferOut, transferErr := scpViaSSH(client, "/app/node_agent/agent", deployDir+"/agent"); transferErr != nil {
-		sse.eventWithCode(PhaseBuild, "error", "传输失败: "+transferErr.Error(), transferOut, DeployErrTransfer)
+	// 推送二进制到节点 (兜底: 传输失败重试 2 次)
+	var transferOut string
+	var transferErr error
+	for retry := 1; retry <= 2; retry++ {
+		transferOut, transferErr = scpViaSSH(client, "/app/node_agent/agent", deployDir+"/agent")
+		if transferErr == nil {
+			break
+		}
+		if retry < 2 {
+			sse.event(PhaseBuild, "log", "", fmt.Sprintf("传输失败(第%d次), 重试中... (%v)", retry, transferErr))
+			// 兜底: 清理远程可能残留的半截文件
+			sshRun(client, "rm -f "+deployDir+"/agent 2>/dev/null; true")
+			time.Sleep(2 * time.Second)
+		}
+	}
+	if transferErr != nil {
+		sse.eventWithCode(PhaseBuild, "error", "传输失败(重试2次): "+transferErr.Error(), transferOut, DeployErrTransfer)
 		return false, DeployErrTransfer, "传输失败: " + transferErr.Error()
 	}
+
+	// 兜底: 传输完成后验证文件完整性
+	verifyBin, _ := sshRun(client, fmt.Sprintf("ls -la %s/agent 2>/dev/null && file %s/agent 2>/dev/null || echo 'VERIFY_FAIL'", deployDir, deployDir))
+	if strings.Contains(verifyBin, "VERIFY_FAIL") || strings.Contains(verifyBin, "No such file") {
+		sse.eventWithCode(PhaseBuild, "error", "传输后文件验证失败, agent 二进制不存在", verifyBin, DeployErrTransfer)
+		return false, DeployErrTransfer, "二进制文件验证失败"
+	}
+	// 兜底: 检查是否为有效的 ELF 文件
+	if !strings.Contains(verifyBin, "ELF") && !strings.Contains(verifyBin, "executable") {
+		sse.eventWithCode(PhaseBuild, "error", "传输后文件验证失败, 非有效可执行文件", verifyBin, DeployErrTransfer)
+		return false, DeployErrTransfer, "二进制文件类型异常"
+	}
+
 	if _, err := sshRun(client, "chmod +x "+deployDir+"/agent"); err != nil {
-		return false, DeployErrTransfer, "chmod agent 失败: " + err.Error()
+		// 兜底: chmod 失败重试一次
+		_, err = sshRun(client, "chmod +x "+deployDir+"/agent")
+		if err != nil {
+			sse.eventWithCode(PhaseBuild, "error", "chmod agent 失败: "+err.Error(), "", DeployErrTransfer)
+			return false, DeployErrTransfer, "chmod agent 失败: " + err.Error()
+		}
 	}
 
 	// ============================================================
 	// Phase 5: 启动服务
 	// ============================================================
 	sse.event(PhaseStart, "running", "构建镜像并启动 "+containerName+"...", "")
-	startOut, err := sshStream(client, fmt.Sprintf(
-		"cd %s && docker compose -f docker-compose.node.yml --env-file .env.node up -d --build 2>&1",
-		deployDir), func(line string) {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			return
+
+	// 兜底: docker compose 启动增加重试 (镜像拉取超时、网络波动)
+	var startOut string
+	var startErr error
+	for retry := 1; retry <= 2; retry++ {
+		if retry > 1 {
+			sse.event(PhaseStart, "log", "", fmt.Sprintf("启动失败, 第 %d 次重试 (先清理旧容器)...", retry))
+			// 兜底: 清理失败的容器和网络残留
+			sshRun(client, fmt.Sprintf("cd %s 2>/dev/null && docker compose -f docker-compose.node.yml --env-file .env.node down --timeout 5 2>/dev/null; docker rm -f %s 2>/dev/null; true", deployDir, containerName))
+			time.Sleep(3 * time.Second)
 		}
-		if strings.Contains(trimmed, "DONE") ||
-			strings.Contains(trimmed, "ERROR") ||
-			strings.Contains(trimmed, "error") ||
-			strings.Contains(trimmed, "Building") ||
-			strings.Contains(trimmed, "Built") ||
-			strings.Contains(trimmed, "Started") ||
-			strings.Contains(trimmed, "Starting") ||
-			strings.Contains(trimmed, "Creating") ||
-			strings.Contains(trimmed, "Created") ||
-			strings.Contains(trimmed, "Container") {
-			sse.event(PhaseStart, "log", "", line)
+		startOut, startErr = sshStream(client, fmt.Sprintf(
+			"cd %s && docker compose -f docker-compose.node.yml --env-file .env.node up -d --build 2>&1",
+			deployDir), func(line string) {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" {
+				return
+			}
+			if strings.Contains(trimmed, "DONE") ||
+				strings.Contains(trimmed, "ERROR") ||
+				strings.Contains(trimmed, "error") ||
+				strings.Contains(trimmed, "Building") ||
+				strings.Contains(trimmed, "Built") ||
+				strings.Contains(trimmed, "Started") ||
+				strings.Contains(trimmed, "Starting") ||
+				strings.Contains(trimmed, "Creating") ||
+				strings.Contains(trimmed, "Created") ||
+				strings.Contains(trimmed, "Container") ||
+				strings.Contains(trimmed, "Pulling") ||
+				strings.Contains(trimmed, "Pulled") ||
+				strings.Contains(trimmed, "Download") ||
+				strings.Contains(trimmed, "Extracting") {
+				sse.event(PhaseStart, "log", "", line)
+			}
+		})
+		if startErr == nil {
+			break
 		}
-	})
-	if err != nil {
-		sse.eventWithCode(PhaseStart, "error", "启动失败: "+err.Error(), startOut, DeployErrStart)
-		return false, DeployErrStart, "启动失败: " + err.Error()
+	}
+
+	if startErr != nil {
+		// 兜底: docker compose 失败后尝试诊断原因
+		diagOut, _ := sshRun(client, fmt.Sprintf("cd %s 2>/dev/null && docker compose -f docker-compose.node.yml --env-file .env.node config 2>&1 | tail -20; echo '---'; docker ps -a 2>&1 | head -10", deployDir))
+		sse.eventWithCode(PhaseStart, "error", "启动失败(重试2次): "+startErr.Error(), startOut+"\n\n诊断信息:\n"+diagOut, DeployErrStart)
+		return false, DeployErrStart, "启动失败: " + startErr.Error()
 	}
 	sse.event(PhaseStart, "done", "node-agent 容器已启动", startOut)
 
@@ -516,9 +683,15 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	// Phase 6: 验证完成
 	// ============================================================
 	sse.event(PhaseVerify, "running", "检测容器运行状态和日志...", "")
+
+	// 兜底: 容器可能还在启动中, 等待更长一点
+	time.Sleep(3 * time.Second)
+
 	diagResult := diagnoseContainerStartup(client, containerName, listenPort, healthPort)
 	if diagResult.fatal {
-		sse.eventWithCode(PhaseVerify, "error", diagResult.summary, diagResult.output, DeployErrStart)
+		// 兜底: 容器启动失败时尝试获取更详细的诊断
+		fullLogs, _ := sshRun(client, fmt.Sprintf("docker logs --tail 100 %s 2>&1; echo '---'; docker inspect %s 2>&1 | head -30", containerName, containerName))
+		sse.eventWithCode(PhaseVerify, "error", diagResult.summary, diagResult.output+"\n\n完整诊断:\n"+fullLogs, DeployErrStart)
 		return false, DeployErrStart, diagResult.summary
 	}
 	if diagResult.hasWarning {
@@ -535,19 +708,36 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	sse.event(PhaseVerify, "running", "等待节点注册到面板(最多 120 秒, 含 Xray 下载)...", "")
 	var verifyOut string
 	var success bool
+	// 兜底: 指数退避, 前 10 次间隔 2s, 后 30 次间隔 3s (总计 20s+90s=110s)
 	for i := 0; i < 40; i++ {
-		time.Sleep(3 * time.Second)
-		verifyOut, _ = sshRun(client, fmt.Sprintf("docker logs --tail 50 %s 2>&1", containerName))
+		if i < 10 {
+			time.Sleep(2 * time.Second)
+		} else {
+			time.Sleep(3 * time.Second)
+		}
+		// 兜底: docker logs 可能失败, 忽略错误
+		verifyOut, _ = sshRun(client, fmt.Sprintf("docker logs --tail 50 %s 2>&1 || echo 'LOGS_UNAVAILABLE'", containerName))
+		if strings.Contains(verifyOut, "LOGS_UNAVAILABLE") {
+			// 容器可能已崩溃, 检查状态
+			statusOut, _ := sshRun(client, fmt.Sprintf("docker ps -a --filter name=%s --format '{{.Status}}' 2>/dev/null || echo 'STATUS_UNAVAILABLE'", containerName))
+			if strings.Contains(statusOut, "Exited") || strings.Contains(statusOut, "STATUS_UNAVAILABLE") {
+				break
+			}
+			continue
+		}
 		if strings.Contains(verifyOut, "注册成功") || strings.Contains(verifyOut, "已注册到面板") || strings.Contains(verifyOut, "Xray 已启动") || strings.Contains(verifyOut, "Xray 进程已启动") {
 			success = true
 			break
 		}
-		if strings.Contains(verifyOut, "注册失败") || strings.Contains(verifyOut, "token 无效") {
+		if strings.Contains(verifyOut, "注册失败") || strings.Contains(verifyOut, "token 无效") || strings.Contains(verifyOut, "Unauthenticated") {
 			break
 		}
 	}
 	if success {
-		portCheck, _ := sshRun(client, fmt.Sprintf("ss -tlnp | grep -E ':%d|:%d' 2>/dev/null || netstat -tlnp 2>/dev/null | grep -E ':%d|:%d'", listenPort, healthPort, listenPort, healthPort))
+		// 兜底: 端口检测多种工具降级
+		portCheck, _ := sshRun(client, fmt.Sprintf(
+			"(ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null || lsof -i -P -n 2>/dev/null | grep LISTEN) | grep -E ':%d|:%d' || echo 'PORT_CHECK_UNAVAILABLE'",
+			listenPort, healthPort))
 		sse.event(PhaseVerify, "done", "节点已成功连接面板！代理端口 "+strconv.Itoa(listenPort)+" 正在监听", verifyOut+"\n\n端口监听状态:\n"+portCheck)
 		return true, "", ""
 	}
@@ -573,110 +763,176 @@ type preCheckResult struct {
 
 // preDeployCheck 在部署前检测关键环境 (逐步推送 SSE 事件)
 // 检测项: 磁盘空间(>=1G可用) / 内存(>=512M可用) / Docker / 端口冲突 / 网络(curl github.com)
+// 每项均有兜底: 命令失败/不存在/超时等异常情况均有降级方案
 func preDeployCheck(client *ssh.Client, listenPort, healthPort int, sse *sseWriter) preCheckResult {
 	var lines []string
 	result := preCheckResult{OK: true}
 
 	// 1. 磁盘空间检测
 	sse.event(PhaseEnvCheck, "running", "正在检查磁盘空间...", "")
-	diskOut, _ := sshRun(client, "df -BG / | tail -1")
+	diskOut, diskErr := sshRun(client, "df -BG / 2>/dev/null | tail -1 || echo 'DF_FAILED'")
+	// 兜底: df -BG 失败时尝试 df -h (某些精简系统不支持 -BG)
+	if strings.Contains(diskOut, "DF_FAILED") || (diskErr != nil && strings.TrimSpace(diskOut) == "") {
+		sse.event(PhaseEnvCheck, "log", "", "df -BG 不可用, 降级使用 df -h...")
+		diskOut, _ = sshRun(client, "df -h / 2>/dev/null | tail -1 || echo 'DF_UNAVAILABLE'")
+	}
 	lines = append(lines, "=== 磁盘空间 ===")
 	lines = append(lines, diskOut)
-	if availGB := parseAvailGB(diskOut); availGB >= 0 && availGB < 1 {
-		result.OK = false
-		result.Fatal = true
-		result.ErrCode = DeployErrDiskFull
-		result.Reason = fmt.Sprintf("磁盘可用空间仅 %dGB, 不足以构建 Docker 镜像 (需要 >=1GB)", availGB)
-		result.FixSuggestion = "1) 清理磁盘: docker system prune -a  2) 扩容磁盘  3) 清理大文件: du -sh /* | sort -h"
-		result.Output = strings.Join(lines, "\n")
-		return result
+	if strings.Contains(diskOut, "DF_UNAVAILABLE") {
+		// 兜底: 连 df 都不可用, 跳过磁盘检测但给出警告
+		lines = append(lines, "[警告] df 命令不可用, 跳过磁盘空间检测")
+		sse.event(PhaseEnvCheck, "warning", "无法检测磁盘空间(df 命令不可用), 跳过此检查", diskOut)
+	} else {
+		if availGB := parseAvailGB(diskOut); availGB >= 0 && availGB < 1 {
+			result.OK = false
+			result.Fatal = true
+			result.ErrCode = DeployErrDiskFull
+			result.Reason = fmt.Sprintf("磁盘可用空间仅 %dGB, 不足以构建 Docker 镜像 (需要 >=1GB)", availGB)
+			result.FixSuggestion = "1) 清理磁盘: docker system prune -a  2) 扩容磁盘  3) 清理大文件: du -sh /* | sort -h"
+			result.Output = strings.Join(lines, "\n")
+			return result
+		}
+		sse.event(PhaseEnvCheck, "log", fmt.Sprintf("磁盘空间充足 (可用 %dGB)", availGB), diskOut)
 	}
-	sse.event(PhaseEnvCheck, "log", fmt.Sprintf("磁盘空间充足 (可用 %dGB)", availGB), diskOut)
 
 	// 2. 内存检测 (自动创建 swap 兜底)
 	sse.event(PhaseEnvCheck, "running", "正在检查内存...", "")
-	memOut, _ := sshRun(client, "free -m | head -2")
+	memOut, memErr := sshRun(client, "free -m 2>/dev/null | head -2 || echo 'FREE_FAILED'")
+	// 兜底: free -m 不可用时尝试 /proc/meminfo
+	if strings.Contains(memOut, "FREE_FAILED") || (memErr != nil && strings.TrimSpace(memOut) == "") {
+		sse.event(PhaseEnvCheck, "log", "", "free -m 不可用, 降级读取 /proc/meminfo...")
+		memOut, _ = sshRun(client, "cat /proc/meminfo 2>/dev/null | head -3 || echo 'MEM_UNAVAILABLE'")
+	}
 	lines = append(lines, "=== 内存 ===")
 	lines = append(lines, memOut)
-	if availMB := parseAvailMB(memOut); availMB >= 0 && availMB < 512 {
-		sse.event(PhaseEnvCheck, "warning", fmt.Sprintf("可用内存仅 %dMB, 低于 512MB 要求, 尝试自动创建 swap...", availMB), memOut)
-		// 内存不足, 先尝试自动创建 swap 分区 (需要磁盘 >=2G 可用)
-		diskForSwap, _ := sshRun(client, "df -BG / | tail -1")
-		if availGB := parseAvailGB(diskForSwap); availGB >= 2 {
-			sse.event(PhaseEnvCheck, "running", fmt.Sprintf("磁盘可用 %dGB, 正在创建 2GB swap 分区 (fallocate→dd 自动回退)...", availGB), "")
-			// 先尝试 fallocate (快), 失败回退到 dd (兼容性更好)
-			swapCmd := "(" +
-				"fallocate -l 2G /swapfile 2>/dev/null || " +
-				"dd if=/dev/zero of=/swapfile bs=1M count=2048 2>/dev/null" +
-				") && " +
-				"chmod 600 /swapfile && " +
-				"mkswap /swapfile && " +
-				"swapon /swapfile && " +
-				"echo 'SWAP_CREATED'"
-			swapOut, swapErr := sshRun(client, swapCmd)
-			lines = append(lines, swapOut)
-			if swapErr == nil && strings.Contains(swapOut, "SWAP_CREATED") {
-				sse.event(PhaseEnvCheck, "done", "swap 分区创建成功, 重新检测内存...", swapOut)
-				// 重新检测内存
-				memOut2, _ := sshRun(client, "free -m | head -2")
-				lines = append(lines, memOut2)
-				if availMB2 := parseAvailMB(memOut2); availMB2 >= 512 {
-					// swap 生效, 内存达标
-					sse.event(PhaseEnvCheck, "done", fmt.Sprintf("内存达标, swap 生效后可用 %dMB >= 512MB", availMB2), memOut2)
-					lines = append(lines, fmt.Sprintf("[通过] swap 生效, 可用内存 %dMB >= 512MB", availMB2))
+	if strings.Contains(memOut, "MEM_UNAVAILABLE") {
+		lines = append(lines, "[警告] 无法检测内存, 跳过此检查")
+		sse.event(PhaseEnvCheck, "warning", "无法检测内存信息, 跳过此检查", memOut)
+	} else {
+		if availMB := parseAvailMB(memOut); availMB >= 0 && availMB < 512 {
+			sse.event(PhaseEnvCheck, "warning", fmt.Sprintf("可用内存仅 %dMB, 低于 512MB 要求, 尝试自动创建 swap...", availMB), memOut)
+			// 内存不足, 先尝试自动创建 swap 分区 (需要磁盘 >=2G 可用)
+			diskForSwap, _ := sshRun(client, "df -BG / 2>/dev/null | tail -1 || df -h / 2>/dev/null | tail -1 || echo '0G'")
+			if availGB := parseAvailGB(diskForSwap); availGB >= 2 {
+				sse.event(PhaseEnvCheck, "running", fmt.Sprintf("磁盘可用 %dGB, 正在创建 2GB swap 分区 (fallocate→dd 自动回退)...", availGB), "")
+				// 兜底: swap 创建增加重试 (有时磁盘繁忙)
+				var swapCreated bool
+				var swapOut string
+				for swapRetry := 1; swapRetry <= 2; swapRetry++ {
+					if swapRetry > 1 {
+						sse.event(PhaseEnvCheck, "log", "", fmt.Sprintf("swap 创建第 %d 次重试...", swapRetry))
+						time.Sleep(2 * time.Second)
+					}
+					// 兜底: 先清理可能存在的旧 swapfile
+					sshRun(client, "swapoff /swapfile 2>/dev/null; rm -f /swapfile 2>/dev/null; true")
+					swapCmd := "(" +
+						"fallocate -l 2G /swapfile 2>/dev/null || " +
+						"dd if=/dev/zero of=/swapfile bs=1M count=2048 2>/dev/null" +
+						") && " +
+						"chmod 600 /swapfile && " +
+						"mkswap /swapfile && " +
+						"swapon /swapfile && " +
+						"echo 'SWAP_CREATED'"
+					swapOut, _ = sshRun(client, swapCmd)
+					if strings.Contains(swapOut, "SWAP_CREATED") {
+						swapCreated = true
+						break
+					}
+				}
+				lines = append(lines, swapOut)
+				if swapCreated {
+					sse.event(PhaseEnvCheck, "done", "swap 分区创建成功, 重新检测内存...", swapOut)
+					// 重新检测内存
+					memOut2, _ := sshRun(client, "free -m 2>/dev/null | head -2 || cat /proc/meminfo 2>/dev/null | head -3")
+					lines = append(lines, memOut2)
+					if availMB2 := parseAvailMB(memOut2); availMB2 >= 512 {
+						sse.event(PhaseEnvCheck, "done", fmt.Sprintf("内存达标, swap 生效后可用 %dMB >= 512MB", availMB2), memOut2)
+						lines = append(lines, fmt.Sprintf("[通过] swap 生效, 可用内存 %dMB >= 512MB", availMB2))
+					} else {
+						result.OK = false
+						result.Fatal = true
+						result.ErrCode = DeployErrMemoryLow
+						result.Reason = fmt.Sprintf("swap 已创建但仍不足, 可用内存仅 %dMB (需要 >=512MB)", availMB2)
+						result.FixSuggestion = "1) 升级服务器内存 (推荐 >=1GB)  2) 关闭其他占用内存的进程"
+						result.Output = strings.Join(lines, "\n")
+						return result
+					}
 				} else {
+					lines = append(lines, "[失败] swap 创建失败(重试2次)")
 					result.OK = false
 					result.Fatal = true
 					result.ErrCode = DeployErrMemoryLow
-					result.Reason = fmt.Sprintf("swap 已创建但仍不足, 可用内存仅 %dMB (需要 >=512MB)", availMB2)
-					result.FixSuggestion = "1) 升级服务器内存 (推荐 >=1GB)  2) 关闭其他占用内存的进程"
+					result.Reason = fmt.Sprintf("可用内存仅 %dMB, swap 自动创建失败 (需要 >=512MB)", availMB)
+					result.FixSuggestion = "1) 升级服务器内存 (推荐 >=1GB)  2) 手动创建 swap 分区: fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile"
 					result.Output = strings.Join(lines, "\n")
 					return result
 				}
 			} else {
-				lines = append(lines, fmt.Sprintf("[失败] swap 创建失败: %v", swapErr))
+				// 磁盘也不够, 无法创建 swap
 				result.OK = false
 				result.Fatal = true
 				result.ErrCode = DeployErrMemoryLow
-				result.Reason = fmt.Sprintf("可用内存仅 %dMB, swap 自动创建失败 (需要 >=512MB)", availMB)
-				result.FixSuggestion = "1) 升级服务器内存 (推荐 >=1GB)  2) 手动创建 swap 分区: fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile"
+				result.Reason = fmt.Sprintf("可用内存仅 %dMB, 磁盘空间也不足无法创建 swap (需要 >=512MB)", availMB)
+				result.FixSuggestion = "1) 升级服务器内存 (推荐 >=1GB)  2) 清理磁盘空间后重试, 面板将自动创建 swap"
 				result.Output = strings.Join(lines, "\n")
 				return result
 			}
 		} else {
-			// 磁盘也不够, 无法创建 swap
-			result.OK = false
-			result.Fatal = true
-			result.ErrCode = DeployErrMemoryLow
-			result.Reason = fmt.Sprintf("可用内存仅 %dMB, 磁盘空间也不足无法创建 swap (需要 >=512MB)", availMB)
-			result.FixSuggestion = "1) 升级服务器内存 (推荐 >=1GB)  2) 清理磁盘空间后重试, 面板将自动创建 swap"
-			result.Output = strings.Join(lines, "\n")
-			return result
+			sse.event(PhaseEnvCheck, "log", fmt.Sprintf("内存充足 (可用 %dMB)", availMB), memOut)
 		}
-	} else {
-		sse.event(PhaseEnvCheck, "log", fmt.Sprintf("内存充足 (可用 %dMB)", availMB), memOut)
 	}
 
 	// 3. Docker 检测
 	sse.event(PhaseEnvCheck, "running", "正在检查 Docker...", "")
-	dockerStatus, _ := sshRun(client, "command -v docker >/dev/null 2>&1 && docker info 2>&1 | head -3 || echo 'NOT_INSTALLED'")
+	dockerStatus, _ := sshRun(client, "command -v docker >/dev/null 2>&1 && timeout 10 docker info 2>&1 | head -3 || echo 'NOT_INSTALLED'")
+	// 兜底: docker info 可能挂死, timeout 10 秒保护
+	if strings.Contains(dockerStatus, "NOT_INSTALLED") {
+		// 兜底: 再确认一下是否真的没安装 (command -v 可能误判)
+		dockerStatus2, _ := sshRun(client, "which docker 2>/dev/null || whereis docker 2>/dev/null || echo 'NOT_FOUND'")
+		if strings.Contains(dockerStatus2, "NOT_FOUND") {
+			dockerStatus = "NOT_INSTALLED"
+		} else {
+			// which 找到了说明安装过, 再试一次 docker info
+			dockerStatus, _ = sshRun(client, "timeout 15 docker info 2>&1 | head -5 || echo 'DOCKER_TIMEOUT'")
+		}
+	}
 	lines = append(lines, "=== Docker ===")
 	lines = append(lines, dockerStatus)
-	dockerInstalled := !strings.Contains(dockerStatus, "NOT_INSTALLED")
+	dockerInstalled := !strings.Contains(dockerStatus, "NOT_INSTALLED") && !strings.Contains(dockerStatus, "NOT_FOUND")
 	dockerRunning := strings.Contains(dockerStatus, "Server Version") || strings.Contains(dockerStatus, "Containers")
-	if !dockerInstalled {
+	dockerTimeout := strings.Contains(dockerStatus, "DOCKER_TIMEOUT")
+
+	if dockerTimeout {
+		// 兜底: Docker 守护进程可能卡住了
+		sse.event(PhaseEnvCheck, "warning", "Docker 响应超时, 尝试重启 dockerd...", dockerStatus)
+		lines = append(lines, "[警告] Docker 响应超时, 正在尝试重启...")
+		restartOut, _ := sshRun(client, "systemctl restart docker 2>&1 || service docker restart 2>&1; sleep 3; timeout 10 docker info 2>&1 | head -3 || echo 'STILL_TIMEOUT'")
+		lines = append(lines, restartOut)
+		if strings.Contains(restartOut, "STILL_TIMEOUT") {
+			result.OK = false
+			result.Fatal = true
+			result.ErrCode = DeployErrDockerNotInstalled
+			result.Reason = "Docker 守护进程无响应, 重启后仍超时"
+			result.FixSuggestion = "1) 检查 /var/log/dockerd.log  2) 手动重启: systemctl restart docker  3) 检查内核模块: lsmod | grep overlay"
+			result.Output = strings.Join(lines, "\n")
+			return result
+		}
+		dockerRunning = strings.Contains(restartOut, "Server Version") || strings.Contains(restartOut, "Containers")
+		sse.event(PhaseEnvCheck, "done", "Docker 已重启恢复", restartOut)
+	} else if !dockerInstalled {
 		sse.event(PhaseEnvCheck, "log", "Docker 未安装, 将在准备阶段自动安装", dockerStatus)
 		lines = append(lines, "[提示] Docker 未安装, 将在准备阶段自动安装")
 	} else if !dockerRunning {
 		sse.event(PhaseEnvCheck, "warning", "Docker 已安装但未运行, 正在尝试启动...", dockerStatus)
 		lines = append(lines, "[警告] Docker 已安装但未运行, 正在尝试启动...")
-		startOut, _ := sshRun(client, "systemctl start docker 2>&1; systemctl enable docker 2>&1; sleep 2; docker info 2>&1 | head -3")
+		// 兜底: 尝试 systemctl 和 service 两种启动方式
+		startOut, _ := sshRun(client, "systemctl start docker 2>&1 || service docker start 2>&1; sleep 2; systemctl enable docker 2>&1 || true; timeout 10 docker info 2>&1 | head -3 || echo 'START_FAILED'")
 		lines = append(lines, startOut)
 		if !strings.Contains(startOut, "Server Version") && !strings.Contains(startOut, "Containers") {
 			result.OK = false
 			result.Fatal = false
 			result.ErrCode = DeployErrDockerNotInstalled
-			result.Reason = "Docker 已安装但首次启动失败, 将在准备阶段重试"
+			result.Reason = "Docker 已安装但启动失败, 将在准备阶段重试"
 			result.FixSuggestion = "1) 检查 /var/log/dockerd.log  2) 确认内核支持: lsmod | grep overlay  3) 面板将自动重试启动"
 		} else {
 			sse.event(PhaseEnvCheck, "done", "Docker 已成功启动", startOut)
@@ -688,9 +944,10 @@ func preDeployCheck(client *ssh.Client, listenPort, healthPort int, sse *sseWrit
 
 	// 4. 端口冲突检测
 	sse.event(PhaseEnvCheck, "running", fmt.Sprintf("正在检查端口 %d/%d...", listenPort, healthPort), "")
+	// 兜底: ss → netstat → lsof → 跳过 (逐级降级)
 	portCheck, _ := sshRun(client, fmt.Sprintf(
-		"ss -tlnp 2>/dev/null | grep -E ':%d|:%d' || netstat -tlnp 2>/dev/null | grep -E ':%d|:%d' || echo 'PORTS_AVAILABLE'",
-		listenPort, healthPort, listenPort, healthPort))
+		"(ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null || lsof -i -P -n 2>/dev/null | grep LISTEN) | grep -E ':%d|:%d' || echo 'PORTS_AVAILABLE'",
+		listenPort, healthPort))
 	lines = append(lines, "=== 端口 ===")
 	lines = append(lines, portCheck)
 	if !strings.Contains(portCheck, "PORTS_AVAILABLE") && strings.TrimSpace(portCheck) != "" {
@@ -706,17 +963,43 @@ func preDeployCheck(client *ssh.Client, listenPort, healthPort int, sse *sseWrit
 
 	// 5. 网络检测 (是否能访问 Docker Hub / get.docker.com)
 	sse.event(PhaseEnvCheck, "running", "正在检测网络连通性 (Docker Hub)...", "")
+	// 兜底: curl → wget → ping 逐级降级检测网络
 	netOut, _ := sshRun(client, "curl -sI --max-time 5 https://get.docker.com 2>&1 | head -1; echo '---'; curl -sI --max-time 5 https://registry-1.docker.io 2>&1 | head -1")
-	lines = append(lines, "=== 网络 ===")
-	lines = append(lines, netOut)
 	if !strings.Contains(netOut, "HTTP/") {
-		lines = append(lines, "[警告] 无法访问 get.docker.com, Docker 自动安装可能失败")
-		result.Reason = "网络受限, Docker 自动安装可能失败"
-		result.FixSuggestion = "1) 检查防火墙  2) 配置代理  3) 手动安装 Docker 后重试"
-		result.ErrCode = DeployErrUnknown
-		result.OK = false
-		sse.event(PhaseEnvCheck, "warning", "无法访问 Docker 仓库, 自动安装可能失败", netOut)
+		// 兜底: curl 不可用或网络不通, 尝试 wget
+		sse.event(PhaseEnvCheck, "log", "", "curl 检测失败, 降级使用 wget...")
+		netOut2, _ := sshRun(client, "wget --spider --timeout=5 https://get.docker.com 2>&1 | head -3; echo '---'; wget --spider --timeout=5 https://registry-1.docker.io 2>&1 | head -3")
+		netOut = netOut + "\n" + netOut2
+		if !strings.Contains(netOut2, "200") && !strings.Contains(netOut2, "OK") && !strings.Contains(netOut2, "exists") {
+			// 兜底: wget 也失败, 尝试 ping 判断基础网络
+			netOut3, _ := sshRun(client, "ping -c 2 -W 3 8.8.8.8 2>&1 || echo 'PING_FAILED'")
+			netOut = netOut + "\n" + netOut3
+			lines = append(lines, "=== 网络 ===")
+			lines = append(lines, netOut)
+			if strings.Contains(netOut3, "PING_FAILED") || strings.Contains(netOut3, "100% packet loss") {
+				lines = append(lines, "[严重] 服务器完全无网络连接!")
+				result.OK = false
+				result.Fatal = true
+				result.ErrCode = DeployErrUnknown
+				result.Reason = "服务器网络完全不通, 无法继续部署"
+				result.FixSuggestion = "1) 检查服务器网络配置  2) 检查 DNS: cat /etc/resolv.conf  3) 检查网关: ip route"
+				result.Output = strings.Join(lines, "\n")
+				return result
+			}
+			lines = append(lines, "[警告] 基础网络正常但无法访问 Docker 仓库, 自动安装可能失败, 将使用国内镜像源回退")
+			result.Reason = "网络受限, Docker 自动安装可能失败, 将尝试国内镜像源"
+			result.FixSuggestion = "1) 检查防火墙  2) 配置代理  3) 手动安装 Docker 后重试"
+			result.ErrCode = DeployErrUnknown
+			result.OK = false
+			sse.event(PhaseEnvCheck, "warning", "无法访问 Docker 仓库, 将尝试国内镜像源回退", netOut)
+		} else {
+			lines = append(lines, "=== 网络 ===")
+			lines = append(lines, netOut)
+			sse.event(PhaseEnvCheck, "log", "网络连通正常 (wget)", netOut)
+		}
 	} else {
+		lines = append(lines, "=== 网络 ===")
+		lines = append(lines, netOut)
 		sse.event(PhaseEnvCheck, "log", "网络连通正常", netOut)
 	}
 
@@ -764,40 +1047,110 @@ func parseAvailMB(s string) int {
 }
 
 // ensureDocker 检查并安装 Docker; 已安装则跳过
+// 兜底: get.docker.com 不可用时自动回退到阿里云镜像源安装
 func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 	// 检测 Docker
 	checkOut, _ := sshRun(client, "command -v docker >/dev/null 2>&1 && echo 'INSTALLED' || echo 'NOT_INSTALLED'")
 	if strings.Contains(checkOut, "INSTALLED") {
 		// 已安装, 检测是否运行
-		runOut, _ := sshRun(client, "docker info 2>&1 | head -3")
+		// 兜底: timeout 防止 docker info 卡死
+		runOut, _ := sshRun(client, "timeout 10 docker info 2>&1 | head -3 || echo 'TIMEOUT'")
 		if strings.Contains(runOut, "Server Version") {
 			sse.event(PhasePrepare, "done", "Docker 已安装并运行", runOut)
 			return true, "", ""
 		}
+		// 兜底: docker info 超时, 尝试重启 dockerd
+		if strings.Contains(runOut, "TIMEOUT") {
+			sse.event(PhasePrepare, "log", "", "Docker 守护进程超时, 尝试重启...")
+			sshRun(client, "systemctl restart docker 2>&1 || service docker restart 2>&1; sleep 3; true")
+		}
 		// 启动 Docker
 		sse.event(PhasePrepare, "log", "", "Docker 已安装, 尝试启动...")
-		sshRun(client, "systemctl start docker 2>&1; systemctl enable docker 2>&1")
-		time.Sleep(2 * time.Second)
-		runOut, _ = sshRun(client, "docker info 2>&1 | head -3")
-		if !strings.Contains(runOut, "Server Version") {
-			return false, DeployErrDockerNotInstalled, "Docker 已安装但无法启动"
+		sshRun(client, "systemctl start docker 2>&1 || service docker start 2>&1; systemctl enable docker 2>&1 || true")
+		time.Sleep(3 * time.Second)
+		runOut, _ = sshRun(client, "timeout 10 docker info 2>&1 | head -3 || echo 'START_FAILED'")
+		if !strings.Contains(runOut, "Server Version") && !strings.Contains(runOut, "Containers") {
+			// 兜底: 再给一次机会, 等待更长时间
+			sse.event(PhasePrepare, "log", "", "Docker 启动较慢, 再等 5 秒...")
+			time.Sleep(5 * time.Second)
+			runOut, _ = sshRun(client, "timeout 10 docker info 2>&1 | head -3 || echo 'START_FAILED'")
+			if !strings.Contains(runOut, "Server Version") && !strings.Contains(runOut, "Containers") {
+				return false, DeployErrDockerNotInstalled, "Docker 已安装但无法启动(已等待 8 秒)"
+			}
 		}
+		sse.event(PhasePrepare, "done", "Docker 启动成功", runOut)
 		return true, "", ""
 	}
 
-	// 未安装, 自动安装
+	// 未安装, 自动安装 (兜底: 官方源 → 阿里云镜像 → 中科大镜像)
 	sse.event(PhasePrepare, "log", "", "Docker 未安装, 正在自动安装 (约需 1-3 分钟)...")
-	installCmd := "curl -fsSL https://get.docker.com | sh 2>&1 && systemctl enable docker && systemctl start docker && echo 'INSTALL_OK' || echo 'INSTALL_FAIL'"
-	out, _ := sshStream(client, installCmd, func(line string) {
+
+	// 兜底: 先尝试检测哪个源可用
+	_, mirrorErr := sshRun(client, "curl -sI --max-time 5 https://get.docker.com 2>&1 | head -1 | grep -q 'HTTP/' && echo 'OFFICIAL_OK' || echo 'OFFICIAL_FAIL'")
+
+	var installCmd string
+	if mirrorErr == nil {
+		// 官方源可达
+		sse.event(PhasePrepare, "log", "", "使用 Docker 官方源安装...")
+		installCmd = "curl -fsSL https://get.docker.com | sh 2>&1 && systemctl enable docker && systemctl start docker && echo 'INSTALL_OK' || echo 'INSTALL_FAIL'"
+	} else {
+		// 兜底: 官方源不可达, 用阿里云镜像
+		sse.event(PhasePrepare, "log", "", "Docker 官方源不可达, 回退使用阿里云镜像源...")
+		installCmd = "curl -fsSL https://mirrors.aliyun.com/docker-ce/linux/static/stable/x86_64/docker-24.0.7.tgz -o /tmp/docker.tgz 2>&1 && " +
+			"tar -xzf /tmp/docker.tgz -C /usr/local/bin/ --strip-components=1 2>&1 && " +
+			"rm -f /tmp/docker.tgz && " +
+			"curl -fsSL https://mirrors.aliyun.com/docker-ce/linux/static/stable/x86_64/docker-compose-linux-x86_64 -o /usr/local/bin/docker-compose 2>&1 && " +
+			"chmod +x /usr/local/bin/docker-compose && " +
+			"echo 'INSTALL_OK' || echo 'INSTALL_FAIL'"
+	}
+
+	out, installErr := sshStream(client, installCmd, func(line string) {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
 			return
 		}
 		sse.event(PhasePrepare, "log", "", trimmed)
 	})
+
 	if !strings.Contains(out, "INSTALL_OK") {
-		return false, DeployErrDockerNotInstalled, "Docker 自动安装失败"
+		// 兜底: 阿里云也失败, 尝试中科大镜像
+		if installErr != nil || strings.Contains(out, "INSTALL_FAIL") {
+			sse.event(PhasePrepare, "log", "", "阿里云镜像源也失败, 尝试中科大镜像源...")
+			fallbackCmd := "curl -fsSL https://mirrors.ustc.edu.cn/docker-ce/linux/static/stable/x86_64/docker-24.0.7.tgz -o /tmp/docker.tgz 2>&1 && " +
+				"tar -xzf /tmp/docker.tgz -C /usr/local/bin/ --strip-components=1 2>&1 && " +
+				"rm -f /tmp/docker.tgz && " +
+				"echo 'INSTALL_OK' || echo 'INSTALL_FAIL'"
+			out2, _ := sshStream(client, fallbackCmd, func(line string) {
+				if trimmed := strings.TrimSpace(line); trimmed != "" {
+					sse.event(PhasePrepare, "log", "", trimmed)
+				}
+			})
+			if strings.Contains(out2, "INSTALL_OK") {
+				// 手动启动 Docker daemon
+				sshRun(client, "nohup dockerd > /var/log/dockerd.log 2>&1 & sleep 3; true")
+				sse.event(PhasePrepare, "done", "Docker 安装完成 (中科大镜像源)", "")
+				return true, "", ""
+			}
+		}
+		return false, DeployErrDockerNotInstalled, "Docker 自动安装失败(已尝试官方/阿里云/中科大三个源)"
 	}
+
+	// 兜底: 检查安装后 Docker daemon 是否需要手动启动
+	time.Sleep(2 * time.Second)
+	verifyOut, _ := sshRun(client, "docker info 2>&1 | head -3 || echo 'DAEMON_NOT_RUNNING'")
+	if strings.Contains(verifyOut, "DAEMON_NOT_RUNNING") || strings.Contains(verifyOut, "Cannot connect") {
+		// 静态安装方式需要手动启动 daemon
+		sshRun(client, "nohup dockerd > /var/log/dockerd.log 2>&1 & sleep 3; true")
+		// 等待 dockerd 启动
+		for i := 0; i < 5; i++ {
+			time.Sleep(2 * time.Second)
+			vOut, _ := sshRun(client, "docker info 2>&1 | head -3")
+			if strings.Contains(vOut, "Server Version") {
+				break
+			}
+		}
+	}
+
 	sse.event(PhasePrepare, "done", "Docker 自动安装完成", "")
 	return true, "", ""
 }
@@ -866,14 +1219,29 @@ func diagnoseContainerStartup(client *ssh.Client, containerName string, listenPo
 
 	var lines []string
 
-	rawStatus, _ := sshRun(client, fmt.Sprintf("docker ps -a --filter name=%s --format '{{.ID}} {{.Status}}' 2>/dev/null; docker ps -a --format '{{.Names}} {{.Status}}' 2>/dev/null | head -20", containerName))
+	// 兜底: docker ps 可能超时或报错, 捕获异常
+	rawStatus, _ := sshRun(client, fmt.Sprintf("timeout 10 docker ps -a --filter name=%s --format '{{.ID}} {{.Status}}' 2>/dev/null; echo '---ALL---'; timeout 10 docker ps -a --format '{{.Names}} {{.Status}}' 2>/dev/null | head -20 || echo 'DOCKER_PS_FAILED'", containerName))
 	lines = append(lines, "=== 容器状态 ===")
 	lines = append(lines, rawStatus)
 
 	containerStatus := strings.TrimSpace(rawStatus)
 
-	if containerStatus == "" {
-		raw2, _ := sshRun(client, "docker ps -a 2>/dev/null")
+	// 兜底: docker ps 完全失败
+	if strings.Contains(containerStatus, "DOCKER_PS_FAILED") {
+		// 尝试 service 或 systemctl 检查 docker
+		dockerSvcOut, _ := sshRun(client, "systemctl status docker 2>&1 | head -5 || service docker status 2>&1 | head -5 || echo 'UNKNOWN'")
+		lines = append(lines, "=== Docker 服务状态 ===")
+		lines = append(lines, dockerSvcOut)
+		return diagResult{
+			summary:       "Docker 服务异常, 无法获取容器状态",
+			output:        strings.Join(lines, "\n"),
+			fatal:         true,
+			fixSuggestion: "1) 检查 Docker 服务: systemctl status docker  2) 重启 Docker: systemctl restart docker  3) 检查 /var/log/dockerd.log",
+		}
+	}
+
+	if containerStatus == "" || strings.TrimSpace(strings.Split(containerStatus, "---ALL---")[0]) == "" {
+		raw2, _ := sshRun(client, "timeout 10 docker ps -a 2>/dev/null || echo 'NO_CONTAINERS'")
 		lines = append(lines, "=== 所有容器 ===")
 		lines = append(lines, raw2)
 		if !strings.Contains(raw2, "nexus") {
@@ -888,40 +1256,49 @@ func diagnoseContainerStartup(client *ssh.Client, containerName string, listenPo
 	}
 
 	if strings.Contains(containerStatus, "Exited") || strings.Contains(containerStatus, "Restarting") {
-		crashLogs, _ := sshRun(client, fmt.Sprintf("docker logs --tail 80 %s 2>&1", containerName))
+		crashLogs, _ := sshRun(client, fmt.Sprintf("docker logs --tail 100 %s 2>&1 || echo 'LOGS_FAILED'", containerName))
 		lines = append(lines, "=== 崩溃日志 ===")
 		lines = append(lines, crashLogs)
 
+		// 兜底: 额外检查容器退出码
+		exitCode, _ := sshRun(client, fmt.Sprintf("docker inspect %s --format '{{.State.ExitCode}}' 2>/dev/null || echo 'UNKNOWN'", containerName))
+		lines = append(lines, "=== 退出码: "+strings.TrimSpace(exitCode)+" ===")
+
 		diag := analyzeLogs(crashLogs)
 		return diagResult{
-			summary:       "容器启动后立即退出: " + diag.summary,
+			summary:       "容器启动后立即退出 (退出码: " + strings.TrimSpace(exitCode) + "): " + diag.summary,
 			output:        strings.Join(lines, "\n"),
 			fatal:         true,
 			fixSuggestion: diag.fixSuggestion,
 		}
 	}
 
-	logs, _ := sshRun(client, fmt.Sprintf("docker logs --tail 50 %s 2>&1", containerName))
+	logs, _ := sshRun(client, fmt.Sprintf("docker logs --tail 60 %s 2>&1 || echo 'LOGS_FAILED'", containerName))
 	lines = append(lines, "=== 启动日志 ===")
 	lines = append(lines, logs)
 
 	hasWarning := false
 	warningMsg := ""
-	if strings.Contains(logs, "error") || strings.Contains(logs, "Error") || strings.Contains(logs, "ERROR") {
+	if strings.Contains(logs, "error") || strings.Contains(logs, "Error") || strings.Contains(logs, "ERROR") || strings.Contains(logs, "warn") || strings.Contains(logs, "WARN") {
 		if !strings.Contains(logs, "注册成功") && !strings.Contains(logs, "Xray 已启动") && !strings.Contains(logs, "Xray 进程已启动") {
 			hasWarning = true
-			warningMsg = "日志中发现错误但容器仍在运行，可能正在重试"
+			warningMsg = "日志中发现错误/警告但容器仍在运行，可能正在重试"
 		}
 	}
 
 	time.Sleep(3 * time.Second)
-	portCheck, _ := sshRun(client, fmt.Sprintf("ss -tlnp 2>/dev/null | grep ':%d' || netstat -tlnp 2>/dev/null | grep ':%d' || echo '端口 %d 尚未监听'", listenPort, listenPort, listenPort))
+	// 兜底: 端口检测使用多种工具降级
+	portCheck, _ := sshRun(client, fmt.Sprintf(
+		"(ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null || lsof -i -P -n 2>/dev/null | grep LISTEN) | grep ':%d' || echo '端口 %d 尚未监听'",
+		listenPort, listenPort, listenPort))
 	lines = append(lines, "=== 端口监听检测 ===")
 	lines = append(lines, portCheck)
 
 	if strings.Contains(portCheck, "尚未监听") {
-		if strings.Contains(logs, "下载 Xray") {
+		if strings.Contains(logs, "下载 Xray") || strings.Contains(logs, "Download") {
 			lines = append(lines, "Xray-core 正在下载中，请稍候...")
+			hasWarning = true
+			warningMsg = "Xray-core 正在下载中，预计还需 30-60 秒"
 		} else if !strings.Contains(logs, "Xray 已启动") && !strings.Contains(logs, "Xray 进程已启动") {
 			hasWarning = true
 			warningMsg = fmt.Sprintf("代理端口 %d 尚未监听，Xray 可能仍在启动中或需等待下载完成", listenPort)
@@ -954,35 +1331,43 @@ type logDiagnosis struct {
 func analyzeLogs(logs string) logDiagnosis {
 	logsLower := strings.ToLower(logs)
 
-	if strings.Contains(logs, "token 无效") || strings.Contains(logs, "Unauthenticated") {
+	// 兜底: 日志为空或获取失败
+	if strings.TrimSpace(logs) == "" || strings.Contains(logs, "LOGS_FAILED") || strings.Contains(logs, "LOGS_UNAVAILABLE") {
+		return logDiagnosis{
+			summary:       "无法获取容器日志, 容器可能已停止或 Docker 异常",
+			fixSuggestion: "1. 手动检查容器状态: docker ps -a | grep nexus\n2. 检查 Docker 服务: systemctl status docker\n3. 手动查看日志: docker logs <容器名>",
+		}
+	}
+
+	if strings.Contains(logs, "token 无效") || strings.Contains(logs, "Unauthenticated") || strings.Contains(logs, "unauthenticated") {
 		return logDiagnosis{
 			summary:       "节点 Token 认证失败",
 			fixSuggestion: "1. 检查 .env.node 中的 NODE_TOKEN 是否与面板一致\n2. 在面板节点列表点「轮换Token」获取新 token\n3. 更新 .env.node 后重启: docker restart nexus-node-agent",
 		}
 	}
 
-	if strings.Contains(logs, "connection refused") || strings.Contains(logs, "dial tcp") || strings.Contains(logs, "no such host") {
+	if strings.Contains(logs, "connection refused") || strings.Contains(logs, "dial tcp") || strings.Contains(logs, "no such host") || strings.Contains(logs, "connect:") {
 		return logDiagnosis{
 			summary:       "无法连接面板 gRPC 服务",
 			fixSuggestion: "1. 检查 .env.node 中 PANEL_GRPC_ADDR 的 IP 和端口是否正确\n2. 确认面板服务器的 50051 端口已放行\n3. 在节点服务器手动测试: telnet <面板IP> 50051\n4. 如果面板使用 Docker，确认 gRPC 端口已映射",
 		}
 	}
 
-	if strings.Contains(logsLower, "download") && (strings.Contains(logsLower, "xray") || strings.Contains(logsLower, "failed")) {
+	if strings.Contains(logsLower, "download") && (strings.Contains(logsLower, "xray") || strings.Contains(logsLower, "failed") || strings.Contains(logsLower, "timeout")) {
 		return logDiagnosis{
-			summary:       "Xray-core 下载失败",
+			summary:       "Xray-core 下载失败或超时",
 			fixSuggestion: "1. 节点服务器无法访问 GitHub，检查网络\n2. 手动下载: wget https://github.com/XTLS/Xray-core/releases/download/v26.6.1/Xray-linux-64.zip\n3. 放到 /app/xray/xray 并赋予执行权限\n4. 重启容器: docker restart nexus-node-agent",
 		}
 	}
 
-	if strings.Contains(logs, "config") && (strings.Contains(logs, "invalid") || strings.Contains(logs, "parse")) {
+	if strings.Contains(logs, "config") && (strings.Contains(logs, "invalid") || strings.Contains(logs, "parse") || strings.Contains(logs, "malformed")) {
 		return logDiagnosis{
 			summary:       "Xray 配置文件解析失败",
 			fixSuggestion: "1. 在面板检查节点协议配置是否正确\n2. 查看完整日志: docker logs nexus-node-agent\n3. 尝试重建节点并重新部署",
 		}
 	}
 
-	if strings.Contains(logs, "bind") && (strings.Contains(logs, "address already in use") || strings.Contains(logs, "permission denied")) {
+	if strings.Contains(logs, "bind") && (strings.Contains(logs, "address already in use") || strings.Contains(logs, "permission denied") || strings.Contains(logs, "cannot assign")) {
 		return logDiagnosis{
 			summary:       "端口绑定失败",
 			fixSuggestion: "1. 检查端口是否被占用: ss -tlnp | grep <端口>\n2. 杀掉占用进程: fuser -k <端口>/tcp\n3. 如果是非 root 用户，1024 以下端口需要 root 权限\n4. 重启容器: docker restart nexus-node-agent",
@@ -996,17 +1381,49 @@ func analyzeLogs(logs string) logDiagnosis {
 		}
 	}
 
-	if strings.Contains(logs, "timeout") || strings.Contains(logs, "i/o timeout") {
+	if strings.Contains(logs, "timeout") || strings.Contains(logs, "i/o timeout") || strings.Contains(logs, "deadline exceeded") {
 		return logDiagnosis{
 			summary:       "网络超时",
 			fixSuggestion: "1. 检查节点服务器网络是否正常\n2. 检查 DNS 是否可用: nslookup github.com\n3. 如果是 gRPC 超时，检查面板 IP 是否可达: ping <面板IP>",
 		}
 	}
 
-	if strings.Contains(logs, "panic") {
+	if strings.Contains(logs, "panic") || strings.Contains(logs, "SIGSEGV") || strings.Contains(logs, "segmentation fault") {
 		return logDiagnosis{
 			summary:       "程序异常崩溃(panic)",
 			fixSuggestion: "1. 查看完整日志: docker logs nexus-node-agent\n2. 尝试重新构建镜像: docker compose -f docker-compose.node.yml --env-file .env.node up -d --build\n3. 如持续崩溃请联系开发者并提供完整日志",
+		}
+	}
+
+	// 兜底: OOM (Out of Memory)
+	if strings.Contains(logsLower, "out of memory") || strings.Contains(logsLower, "oom") || strings.Contains(logsLower, "killed") {
+		return logDiagnosis{
+			summary:       "容器内存不足被系统杀死 (OOM)",
+			fixSuggestion: "1. 升级服务器内存\n2. 增加 swap 分区\n3. 检查是否有其他程序占用内存: top -o %MEM",
+		}
+	}
+
+	// 兜底: DNS 解析失败
+	if strings.Contains(logsLower, "no such host") || strings.Contains(logsLower, "name resolution") || strings.Contains(logsLower, "dns") {
+		return logDiagnosis{
+			summary:       "DNS 解析失败, 无法解析域名",
+			fixSuggestion: "1. 检查 DNS 配置: cat /etc/resolv.conf\n2. 尝试添加公共 DNS: echo 'nameserver 8.8.8.8' >> /etc/resolv.conf\n3. 检查面板域名是否可解析: nslookup <面板域名>",
+		}
+	}
+
+	// 兜底: TLS/证书问题
+	if strings.Contains(logsLower, "tls") || strings.Contains(logsLower, "certificate") || strings.Contains(logsLower, "x509") {
+		return logDiagnosis{
+			summary:       "TLS/证书验证失败",
+			fixSuggestion: "1. 检查 CA 证书是否正确: cat /app/grpc-ca.crt\n2. 面板 gRPC TLS 自签证书需要推送到节点\n3. 如果使用 Let's Encrypt 证书, 确认系统 CA 包路径: /etc/ssl/certs/ca-certificates.crt",
+		}
+	}
+
+	// 兜底: 磁盘空间不足 (在容器内)
+	if strings.Contains(logsLower, "no space left") || strings.Contains(logsLower, "disk full") || strings.Contains(logsLower, "disk quota") {
+		return logDiagnosis{
+			summary:       "磁盘空间不足",
+			fixSuggestion: "1. 清理磁盘: docker system prune -a\n2. 清理 Xray 日志缓存\n3. 扩容服务器磁盘",
 		}
 	}
 
