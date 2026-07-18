@@ -254,6 +254,22 @@ func (h *AdminNodeHandler) NodeCreate(c *gin.Context) {
 	response.OK(c, node)
 }
 
+// NodeDetail GET /api/v1/admin/nodes/:id
+// 获取单个节点详情(部署前校验/编辑回显等场景需要)
+func (h *AdminNodeHandler) NodeDetail(c *gin.Context) {
+	id := c.Param("id")
+	node, err := h.nodeRepo.GetByID(id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			response.Fail(c, response.CodeNotFound)
+			return
+		}
+		response.Fail(c, response.CodeDBError)
+		return
+	}
+	response.OK(c, node)
+}
+
 // NodeUpdate [12] PUT /api/v1/admin/nodes/:id
 func (h *AdminNodeHandler) NodeUpdate(c *gin.Context) {
 	id := c.Param("id")

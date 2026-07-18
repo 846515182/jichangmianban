@@ -214,6 +214,7 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 		admin.POST("/invite-codes", middleware.AuditAction("invite_code.create"), CreateInviteCode)
 		admin.POST("/invite-codes/:id/disable", middleware.AuditAction("invite_code.disable"), DisableInviteCode)
 		admin.GET("/nodes", adminNodeH.NodeList)
+		admin.GET("/nodes/:id", adminNodeH.NodeDetail)
 		admin.POST("/nodes", middleware.AuditAction("node.create"), adminNodeH.NodeCreate)
 		admin.PUT("/nodes/:id", middleware.AuditAction("node.update"), adminNodeH.NodeUpdate)
 		admin.DELETE("/nodes/:id", middleware.AuditAction("node.delete"), adminNodeH.NodeDelete)
