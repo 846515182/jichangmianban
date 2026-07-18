@@ -232,11 +232,7 @@ func sendMailWithTLS(addr string, auth smtp.Auth, from string, to []string, msg 
 
 	// 非隐式 TLS 时尝试 STARTTLS 升级
 	if !implicitTLS {
-		ok, extErr := client.Extension("STARTTLS")
-		if extErr != nil {
-			// STARTTLS 扩展检测失败，降级为明文发送（兼容不支持 STARTTLS 的服务器）
-			// 不返回错误，避免阻断邮件发送流程
-		}
+		ok, _ := client.Extension("STARTTLS")
 		if ok {
 			config := &tls.Config{
 				ServerName:         host,
