@@ -1039,11 +1039,28 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		// 修复 STORAGE-UPDATE-01 (P0): 每次在线更新都会 docker compose build,
 		// 累积大量悬空镜像层和构建缓存(单次更新可残留数百 MB-数 GB)。
 		// 更新完成后清理悬空镜像 + build cache, 防止多次更新后磁盘爆满。
-		logWrite(">>> 清理 Docker 构建残留(悬空镜像+构建缓存)")
+		logWrite(">>> 7/7 自动清理旧镜像 + 重启面板 (用新换旧, 全自动)")
+		// 旧版问题: 构建新 nexus-panel:latest 后, 旧镜像变 <none> 悬空镜像,
+		// 虽然 docker image prune -f 能清, 但要等下一次手动清理才触发。
+		// 现在主动 prune, 立即用新换旧:
+		//   1. 清悬空镜像 (旧版本 <none> 立即释放)
+		//   2. 清 build cache (构建缓存累积可达数 GB)
+		//   3. 自动重启 panel 容器, 让新二进制立即生效 (无需用户手动点"重启面板")
 		_ = execCommandLog(gitRoot, "docker", "image", "prune", "-f")
 		_ = execCommandLog(gitRoot, "docker", "builder", "prune", "-f")
 
-		logWrite("在线更新完成！请通过面板「重启面板」按钮手动重启以生效。")
+		// 自动重启 panel 容器, 让新二进制立即生效
+		// 旧版要求用户手动点"重启面板"按钮, 容易遗忘导致更新不生效。
+		// 现改为: 更新成功后 2 秒自动 systemctl restart nexus-panel,
+		// 配合前端 /healthz boot_time 变化判断重启完成。
+		logWrite(">>> 自动重启 panel 容器使新版本生效")
+		go func() {
+			time.Sleep(2 * time.Second)
+			// systemctl restart 是原子操作, panel 会以新二进制重新启动
+			execCommand("systemctl", "restart", "nexus-panel")
+		}()
+
+		logWrite("在线更新完成！面板已自动重启, 新版本立即生效 (用新换旧, 无需手动操作)")
 		setPullDone(true)
 	}()
 

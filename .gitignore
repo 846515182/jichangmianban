@@ -29,3 +29,8 @@ check_node.py
 check_panel_ssh.py
 update_panel.py
 rebuild.py
+db_cleanup.py
+db_inspect.py
+reset_node_traffic.py
+clear_redis_cache.py
+server_sync_reset.py

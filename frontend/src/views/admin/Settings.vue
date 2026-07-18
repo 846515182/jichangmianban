@@ -229,7 +229,7 @@
               </div>
               <div v-if="pullResult" class="cmd-output">
                 <div class="output-title" :class="pullDone ? (pullSuccess ? 'text-success' : 'text-danger') : 'text-pending'">
-                  {{ pullDone ? (pullSuccess ? '更新成功 — 请点击「重启面板」使更新生效' : '更新失败') : '更新中...' }}
+                  {{ pullDone ? (pullSuccess ? '更新成功 — 面板已自动重启, 请稍后刷新页面查看新版本' : '更新失败') : '更新中...' }}
                 </div>
                 <pre class="pull-log">{{ pullResult }}</pre>
               </div>
@@ -586,7 +586,7 @@ const gitPull = async () => {
             pullDone.value = true
             pullSuccess.value = logData.success !== false
             if (pullSuccess.value) {
-              ElMessage.success('代码更新完成，请点击「重启面板」使更新生效')
+              ElMessage.success('代码更新完成, 面板已自动重启, 请稍后刷新页面')
             } else {
               ElMessage.error('更新过程中出现错误，请查看日志')
             }
