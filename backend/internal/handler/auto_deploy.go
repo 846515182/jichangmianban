@@ -592,18 +592,59 @@ func preDeployCheck(client *ssh.Client, listenPort, healthPort int) preCheckResu
 		return result
 	}
 
-	// 2. 内存检测
+	// 2. 内存检测 (自动创建 swap 兜底)
 	memOut, _ := sshRun(client, "free -m | head -2")
 	lines = append(lines, "=== 内存 ===")
 	lines = append(lines, memOut)
 	if availMB := parseAvailMB(memOut); availMB >= 0 && availMB < 512 {
-		result.OK = false
-		result.Fatal = true
-		result.ErrCode = DeployErrMemoryLow
-		result.Reason = fmt.Sprintf("可用内存仅 %dMB, 不足以启动 node-agent (需要 >=512MB)", availMB)
-		result.FixSuggestion = "1) 升级服务器内存  2) 创建 swap 分区: fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile"
-		result.Output = strings.Join(lines, "\n")
-		return result
+		// 内存不足, 先尝试自动创建 swap 分区 (需要磁盘 >=2G 可用)
+		diskForSwap, _ := sshRun(client, "df -BG / | tail -1")
+		if availGB := parseAvailGB(diskForSwap); availGB >= 2 {
+			lines = append(lines, "[自动修复] 内存不足, 正在创建 2GB swap 分区...")
+			swapOut, swapErr := sshRun(client,
+				"fallocate -l 2G /swapfile 2>&1 && "+
+					"chmod 600 /swapfile 2>&1 && "+
+					"mkswap /swapfile 2>&1 && "+
+					"swapon /swapfile 2>&1 && "+
+					"echo 'SWAP_CREATED'")
+			lines = append(lines, swapOut)
+			if swapErr == nil && strings.Contains(swapOut, "SWAP_CREATED") {
+				lines = append(lines, "[修复] swap 分区创建成功, 重新检测内存...")
+				// 重新检测内存
+				memOut2, _ := sshRun(client, "free -m | head -2")
+				lines = append(lines, memOut2)
+				if availMB2 := parseAvailMB(memOut2); availMB2 >= 512 {
+					// swap 生效, 内存达标
+					lines = append(lines, fmt.Sprintf("[通过] swap 生效, 可用内存 %dMB >= 512MB", availMB2))
+				} else {
+					result.OK = false
+					result.Fatal = true
+					result.ErrCode = DeployErrMemoryLow
+					result.Reason = fmt.Sprintf("swap 已创建但仍不足, 可用内存仅 %dMB (需要 >=512MB)", availMB2)
+					result.FixSuggestion = "1) 升级服务器内存 (推荐 >=1GB)  2) 关闭其他占用内存的进程"
+					result.Output = strings.Join(lines, "\n")
+					return result
+				}
+			} else {
+				lines = append(lines, fmt.Sprintf("[失败] swap 创建失败: %v", swapErr))
+				result.OK = false
+				result.Fatal = true
+				result.ErrCode = DeployErrMemoryLow
+				result.Reason = fmt.Sprintf("可用内存仅 %dMB, swap 自动创建失败 (需要 >=512MB)", availMB)
+				result.FixSuggestion = "1) 升级服务器内存 (推荐 >=1GB)  2) 手动创建 swap 分区: fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile"
+				result.Output = strings.Join(lines, "\n")
+				return result
+			}
+		} else {
+			// 磁盘也不够, 无法创建 swap
+			result.OK = false
+			result.Fatal = true
+			result.ErrCode = DeployErrMemoryLow
+			result.Reason = fmt.Sprintf("可用内存仅 %dMB, 磁盘空间也不足无法创建 swap (需要 >=512MB)", availMB)
+			result.FixSuggestion = "1) 升级服务器内存 (推荐 >=1GB)  2) 清理磁盘空间后重试, 面板将自动创建 swap"
+			result.Output = strings.Join(lines, "\n")
+			return result
+		}
 	}
 
 	// 3. Docker 检测
