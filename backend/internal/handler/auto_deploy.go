@@ -362,10 +362,9 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	sse.event(PhaseConnectServer, "done", "旧残留清理完成", strings.TrimSpace(cleanOut))
 
 	// ============================================================
-	// Phase 2: 环境检测 (含 preDeployCheck)
+	// Phase 2: 环境检测 (逐步推送 SSE 事件)
 	// ============================================================
-	sse.event(PhaseEnvCheck, "running", "正在检测节点服务器环境...", "")
-	checkResult := preDeployCheck(client, listenPort, healthPort)
+	checkResult := preDeployCheck(client, listenPort, healthPort, sse)
 	if !checkResult.OK {
 		// 致命错误直接退出
 		if checkResult.Fatal {
@@ -572,13 +571,14 @@ type preCheckResult struct {
 	ErrCode       string
 }
 
-// preDeployCheck 在部署前检测关键环境
+// preDeployCheck 在部署前检测关键环境 (逐步推送 SSE 事件)
 // 检测项: 磁盘空间(>=1G可用) / 内存(>=512M可用) / Docker / 端口冲突 / 网络(curl github.com)
-func preDeployCheck(client *ssh.Client, listenPort, healthPort int) preCheckResult {
+func preDeployCheck(client *ssh.Client, listenPort, healthPort int, sse *sseWriter) preCheckResult {
 	var lines []string
 	result := preCheckResult{OK: true}
 
 	// 1. 磁盘空间检测
+	sse.event(PhaseEnvCheck, "running", "正在检查磁盘空间...", "")
 	diskOut, _ := sshRun(client, "df -BG / | tail -1")
 	lines = append(lines, "=== 磁盘空间 ===")
 	lines = append(lines, diskOut)
@@ -591,16 +591,19 @@ func preDeployCheck(client *ssh.Client, listenPort, healthPort int) preCheckResu
 		result.Output = strings.Join(lines, "\n")
 		return result
 	}
+	sse.event(PhaseEnvCheck, "log", fmt.Sprintf("磁盘空间充足 (可用 %dGB)", availGB), diskOut)
 
 	// 2. 内存检测 (自动创建 swap 兜底)
+	sse.event(PhaseEnvCheck, "running", "正在检查内存...", "")
 	memOut, _ := sshRun(client, "free -m | head -2")
 	lines = append(lines, "=== 内存 ===")
 	lines = append(lines, memOut)
 	if availMB := parseAvailMB(memOut); availMB >= 0 && availMB < 512 {
+		sse.event(PhaseEnvCheck, "warning", fmt.Sprintf("可用内存仅 %dMB, 低于 512MB 要求, 尝试自动创建 swap...", availMB), memOut)
 		// 内存不足, 先尝试自动创建 swap 分区 (需要磁盘 >=2G 可用)
 		diskForSwap, _ := sshRun(client, "df -BG / | tail -1")
 		if availGB := parseAvailGB(diskForSwap); availGB >= 2 {
-			lines = append(lines, "[自动修复] 内存不足, 正在创建 2GB swap 分区...")
+			sse.event(PhaseEnvCheck, "running", fmt.Sprintf("磁盘可用 %dGB, 正在创建 2GB swap 分区 (fallocate→dd 自动回退)...", availGB), "")
 			// 先尝试 fallocate (快), 失败回退到 dd (兼容性更好)
 			swapCmd := "(" +
 				"fallocate -l 2G /swapfile 2>/dev/null || " +
@@ -613,12 +616,13 @@ func preDeployCheck(client *ssh.Client, listenPort, healthPort int) preCheckResu
 			swapOut, swapErr := sshRun(client, swapCmd)
 			lines = append(lines, swapOut)
 			if swapErr == nil && strings.Contains(swapOut, "SWAP_CREATED") {
-				lines = append(lines, "[修复] swap 分区创建成功, 重新检测内存...")
+				sse.event(PhaseEnvCheck, "done", "swap 分区创建成功, 重新检测内存...", swapOut)
 				// 重新检测内存
 				memOut2, _ := sshRun(client, "free -m | head -2")
 				lines = append(lines, memOut2)
 				if availMB2 := parseAvailMB(memOut2); availMB2 >= 512 {
 					// swap 生效, 内存达标
+					sse.event(PhaseEnvCheck, "done", fmt.Sprintf("内存达标, swap 生效后可用 %dMB >= 512MB", availMB2), memOut2)
 					lines = append(lines, fmt.Sprintf("[通过] swap 生效, 可用内存 %dMB >= 512MB", availMB2))
 				} else {
 					result.OK = false
@@ -649,37 +653,41 @@ func preDeployCheck(client *ssh.Client, listenPort, healthPort int) preCheckResu
 			result.Output = strings.Join(lines, "\n")
 			return result
 		}
+	} else {
+		sse.event(PhaseEnvCheck, "log", fmt.Sprintf("内存充足 (可用 %dMB)", availMB), memOut)
 	}
 
 	// 3. Docker 检测
-	// 修复: 之前若 Docker 装了但没运行,会直接返回 FATAL,但实际修复逻辑 ensureDocker 在
-	// Phase 3 才执行,导致永远走不到修复阶段。改为: 先尝试 systemctl start docker
-	// (大多数情况一次成功),若仍失败则降级为非致命警告,交给 ensureDocker 重试 + 安装。
+	sse.event(PhaseEnvCheck, "running", "正在检查 Docker...", "")
 	dockerStatus, _ := sshRun(client, "command -v docker >/dev/null 2>&1 && docker info 2>&1 | head -3 || echo 'NOT_INSTALLED'")
 	lines = append(lines, "=== Docker ===")
 	lines = append(lines, dockerStatus)
 	dockerInstalled := !strings.Contains(dockerStatus, "NOT_INSTALLED")
 	dockerRunning := strings.Contains(dockerStatus, "Server Version") || strings.Contains(dockerStatus, "Containers")
 	if !dockerInstalled {
-		// 标记但不致命, ensureDocker 会自动安装
+		sse.event(PhaseEnvCheck, "log", "Docker 未安装, 将在准备阶段自动安装", dockerStatus)
 		lines = append(lines, "[提示] Docker 未安装, 将在准备阶段自动安装")
 	} else if !dockerRunning {
+		sse.event(PhaseEnvCheck, "warning", "Docker 已安装但未运行, 正在尝试启动...", dockerStatus)
 		lines = append(lines, "[警告] Docker 已安装但未运行, 正在尝试启动...")
 		startOut, _ := sshRun(client, "systemctl start docker 2>&1; systemctl enable docker 2>&1; sleep 2; docker info 2>&1 | head -3")
 		lines = append(lines, startOut)
 		if !strings.Contains(startOut, "Server Version") && !strings.Contains(startOut, "Containers") {
-			// 启动失败: 不再 FATAL, 让 Phase 3 的 ensureDocker 接管(它会做更细致的尝试)
 			result.OK = false
-			result.Fatal = false // 关键: 改为非致命, 让 ensureDocker 在 Phase 3 修复
+			result.Fatal = false
 			result.ErrCode = DeployErrDockerNotInstalled
 			result.Reason = "Docker 已安装但首次启动失败, 将在准备阶段重试"
 			result.FixSuggestion = "1) 检查 /var/log/dockerd.log  2) 确认内核支持: lsmod | grep overlay  3) 面板将自动重试启动"
 		} else {
+			sse.event(PhaseEnvCheck, "done", "Docker 已成功启动", startOut)
 			lines = append(lines, "[恢复] Docker 已成功启动, 继续部署")
 		}
+	} else {
+		sse.event(PhaseEnvCheck, "log", "Docker 运行正常", dockerStatus)
 	}
 
 	// 4. 端口冲突检测
+	sse.event(PhaseEnvCheck, "running", fmt.Sprintf("正在检查端口 %d/%d...", listenPort, healthPort), "")
 	portCheck, _ := sshRun(client, fmt.Sprintf(
 		"ss -tlnp 2>/dev/null | grep -E ':%d|:%d' || netstat -tlnp 2>/dev/null | grep -E ':%d|:%d' || echo 'PORTS_AVAILABLE'",
 		listenPort, healthPort, listenPort, healthPort))
@@ -694,19 +702,22 @@ func preDeployCheck(client *ssh.Client, listenPort, healthPort int) preCheckResu
 		result.Output = strings.Join(lines, "\n")
 		return result
 	}
+	sse.event(PhaseEnvCheck, "log", "端口未被占用", portCheck)
 
 	// 5. 网络检测 (是否能访问 Docker Hub / get.docker.com)
+	sse.event(PhaseEnvCheck, "running", "正在检测网络连通性 (Docker Hub)...", "")
 	netOut, _ := sshRun(client, "curl -sI --max-time 5 https://get.docker.com 2>&1 | head -1; echo '---'; curl -sI --max-time 5 https://registry-1.docker.io 2>&1 | head -1")
 	lines = append(lines, "=== 网络 ===")
 	lines = append(lines, netOut)
 	if !strings.Contains(netOut, "HTTP/") {
-		// 不致命, 但提示
 		lines = append(lines, "[警告] 无法访问 get.docker.com, Docker 自动安装可能失败")
 		result.Reason = "网络受限, Docker 自动安装可能失败"
 		result.FixSuggestion = "1) 检查防火墙  2) 配置代理  3) 手动安装 Docker 后重试"
 		result.ErrCode = DeployErrUnknown
 		result.OK = false
-		// 非致命, 让 ensureDocker 阶段再试
+		sse.event(PhaseEnvCheck, "warning", "无法访问 Docker 仓库, 自动安装可能失败", netOut)
+	} else {
+		sse.event(PhaseEnvCheck, "log", "网络连通正常", netOut)
 	}
 
 	result.Output = strings.Join(lines, "\n")
