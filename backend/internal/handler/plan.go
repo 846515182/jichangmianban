@@ -20,19 +20,6 @@ func NewPlanHandler(ps *service.PlanService) *PlanHandler {
 	return &PlanHandler{planSvc: ps}
 }
 
-// attachNodeCount 为套餐列表附加 node_count 字段(每个套餐绑定的节点数量)
-func (h *PlanHandler) attachNodeCount(plans []any) {
-	for i, p := range plans {
-		if m, ok := p.(map[string]any); ok {
-			if id, ok := m["id"].(string); ok {
-				count, _ := h.planSvc.CountNodesByPlanID(id)
-				m["node_count"] = count
-				plans[i] = m
-			}
-		}
-	}
-}
-
 // AdminPlanList [28] GET /api/v1/admin/plans
 // 管理端套餐列表(含禁用)
 func (h *PlanHandler) AdminPlanList(c *gin.Context) {

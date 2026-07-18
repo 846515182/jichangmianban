@@ -132,7 +132,7 @@ const planList = ref<PlanRow[]>([])
 const filteredList = computed(() => {
   if (!keyword.value) return list.value
   const k = keyword.value.toLowerCase()
-  return list.value.filter(u => u.username.toLowerCase().includes(k) || u.email.toLowerCase().includes(k))
+  return list.value.filter(u => u.username.toLowerCase().includes(k))
 })
 
 const planName = (id: string) => { const p = planList.value.find(x => x.id === id); return p ? p.name : "" }
