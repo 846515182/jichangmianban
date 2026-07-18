@@ -48,15 +48,15 @@
             :prefix-icon="Lock"
           />
         </el-form-item>
-        <el-form-item prop="captchaCode">
+        <el-form-item prop="captchaCode" :error="captchaError">
           <div class="captcha-row">
             <el-input
               v-model="form.captchaCode"
               size="large"
-              placeholder="请输入图形验证码"
+              placeholder="请输入右侧图片中的 4 位字符"
               :prefix-icon="Key"
               maxlength="4"
-              @input="form.captchaCode = form.captchaCode.toUpperCase().replace(/[^0-9A-Z]/g, '')"
+              @input="captchaError = ''; form.captchaCode = form.captchaCode.toUpperCase().replace(/[^0-9A-Z]/g, '')"
               @keyup.enter="handleRegister"
             />
             <img
@@ -116,6 +116,9 @@ const loading = ref(false)
 const captchaId = ref('')
 const captchaImg = ref('')
 const captchaLoading = ref(false)
+// [fix 2026-07-18] 后端校验失败时把具体错误显示在验证码输入框下方, 避免被全局拦截器
+// 弹到页面顶部的 ElMessage 误读为"邀请码错误"等其他字段错误
+const captchaError = ref('')
 
 const form = reactive({
   username: '',
@@ -157,6 +160,7 @@ const rules: FormRules = {
 // 拉取图形验证码
 const loadCaptcha = async () => {
   captchaLoading.value = true
+  captchaError.value = ''
   try {
     const res: any = await request.get('/api/v1/captcha')
     if (res && res.code === 0 && res.data) {
@@ -194,7 +198,13 @@ const handleRegister = async () => {
     } catch (e: any) {
       // 注册失败(含验证码错误)后刷新验证码, 避免旧 captcha_id 失效导致一直失败
       loadCaptcha()
-      if (!e || !e.message) {
+      const msg = e?.message || ''
+      // [fix 2026-07-18] 验证码错误: 在输入框下方也显示具体错误并清空输入,
+      // 避免用户只看到顶部 ElMessage 时把"图形验证码"误读为"邀请码"
+      if (/验证码/.test(msg)) {
+        captchaError.value = msg
+        form.captchaCode = ''
+      } else if (!msg) {
         ElMessage.error('注册失败，请稍后重试')
       }
     } finally {

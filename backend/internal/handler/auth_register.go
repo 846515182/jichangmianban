@@ -46,9 +46,10 @@ func (h *AuthRegisterHandler) Register(c *gin.Context) {
 		return
 	}
 
-	// [E-fix 2026-07-14] 图形���证码校验 (防脚本批量注册)
+	// [E-fix 2026-07-14] 图形验证码校验 (防脚本批量注册)
+	// [fix 2026-07-18] 提示文案补充"右侧图片中的 4 位字符", 避免用户把"图形验证码"误读为"邀请码"
 	if !VerifyCaptcha(c, req.CaptchaID, req.CaptchaCode) {
-		response.FailMsg(c, response.CodeParamError, "图形验证码错误或已过期")
+		response.FailMsg(c, response.CodeParamError, "图形验证码错误或已过期, 请输入右侧图片中的 4 位字符")
 		return
 	}
 

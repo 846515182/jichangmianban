@@ -118,34 +118,35 @@ func buildCaptchaSVG(code string, w, h int) string {
 	// 背景
 	add(fmt.Sprintf(`<rect width="%d" height="%d" fill="#f1f5f9"/>`, w, h))
 
-	// 干扰线 (4 条)
-	for i := 0; i < 4; i++ {
+	// 干扰线 (3 条, [fix 2026-07-18] 由 4 降到 3 减少识别难度)
+	for i := 0; i < 3; i++ {
 		x1 := mrand.Intn(w)
 		y1 := mrand.Intn(h)
 		x2 := mrand.Intn(w)
 		y2 := mrand.Intn(h)
 		col := palette[mrand.Intn(len(palette))]
 		add(fmt.Sprintf(
-			`<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="%s" stroke-width="1" opacity="0.5"/>`,
+			`<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="%s" stroke-width="1" opacity="0.4"/>`,
 			x1, y1, x2, y2, col,
 		))
 	}
 
-	// 噪点 (20 个)
-	for i := 0; i < 20; i++ {
+	// 噪点 (12 个, [fix 2026-07-18] 由 20 降到 12)
+	for i := 0; i < 12; i++ {
 		x := mrand.Intn(w)
 		y := mrand.Intn(h)
 		col := palette[mrand.Intn(len(palette))]
-		add(fmt.Sprintf(`<circle cx="%d" cy="%d" r="1" fill="%s" opacity="0.4"/>`, x, y, col))
+		add(fmt.Sprintf(`<circle cx="%d" cy="%d" r="1" fill="%s" opacity="0.3"/>`, x, y, col))
 	}
 
 	// 字符 (每个字符占 w/len(code) 区间, 居中带随机扰动)
+	// [fix 2026-07-18] 旋转角度由 ±30° 降到 ±20°, 字号加大到 24..29, 降低看错率
 	cellW := w / len(code)
 	for i, ch := range code {
-		x := i*cellW + cellW/2 + (mrand.Intn(8) - 4)
-		y := h/2 + (mrand.Intn(8) - 4)
-		rot := mrand.Intn(60) - 30 // -30..+30 度
-		size := 22 + mrand.Intn(6)  // 22..27
+		x := i*cellW + cellW/2 + (mrand.Intn(6) - 3)
+		y := h/2 + (mrand.Intn(6) - 3)
+		rot := mrand.Intn(40) - 20 // -20..+20 度
+		size := 24 + mrand.Intn(6)  // 24..29
 		col := palette[mrand.Intn(len(palette))]
 		add(fmt.Sprintf(
 			`<text x="%d" y="%d" font-family="Arial,Helvetica,sans-serif" font-size="%d" font-weight="bold" fill="%s" text-anchor="middle" dominant-baseline="middle" transform="rotate(%d %d %d)">%s</text>`,
