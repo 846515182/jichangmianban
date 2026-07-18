@@ -225,9 +225,12 @@ func (s *TrafficServiceServer) ReportRealtime(ctx context.Context, req *nexuspb.
 	// 平均速率而非节点真实速率。现改为: agent 每次上报流量时(60s 一次), 面板用
 	// (本次上报字节增量 / 距上次上报时间差) 算出 60s 平均瞬时速度, 写入 heartbeat
 	// hash 的 speed_bps 字段。admin API 直接读该字段, 不再自己算。
-	if nodeTotal > 0 {
-		s.recordNodeSpeed(req.GetNodeId(), nodeTotal)
-	}
+	//
+	// 修复 NODE-SPEED-02 (P0): 无论本次是否有流量, 都要刷新 speed_bps。
+	// 旧实现仅在 nodeTotal > 0 时写入, 节点空闲时(nodeTotal==0)不更新 Redis,
+	// 导致上一次有流量时写入的速度值永久残留, 前端显示"CPU 0% + 连接 0 + 速度 611 B/s"
+	// 的矛盾状态。节点空闲时算出 speedBps=0 并覆盖旧值, 保证速度字段与其他指标一致。
+	s.recordNodeSpeed(req.GetNodeId(), nodeTotal)
 
 	return &nexuspb.ReportRealtimeResponse{
 		Resp:     &nexuspb.Response{Code: 0, Message: "ok"},
