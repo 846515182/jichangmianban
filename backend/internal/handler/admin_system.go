@@ -808,10 +808,16 @@ var (
 // 重启后新进程的 gitPullLog/gitPullDone 被重置为空/false, 前端轮询拿到空日志
 // + done=false, 误以为新一轮更新开始却没日志, 显示"更新中"卡住。
 // 改为同时写文件, 新进程启动时 init 恢复上次状态, 前端能正确看到"已完成"。
-const gitPullLogFile = "/tmp/nexus-git-pull.log"
+//
+// [fix 2026-07-18] 路径从 /tmp 改到 /root/nexus-panel/.update-state/
+// 原因: docker compose up -d 重启容器时, /tmp 不持久化, 状态文件丢失,
+// 又触发同样的"更新中卡住"问题。改用挂载到宿主机的 /root/nexus-panel 目录,
+// 容器重启后状态文件仍存在, init 能正确恢复 done/success。
+const gitPullLogDir  = "/root/nexus-panel/.update-state"
+const gitPullLogFile = "/root/nexus-panel/.update-state/git-pull.log"
 
 // gitPullStateFile 持久化完成状态(done/success), 供新进程启动时恢复
-const gitPullStateFile = "/tmp/nexus-git-pull.state"
+const gitPullStateFile = "/root/nexus-panel/.update-state/git-pull.state"
 
 func init() {
 	// 启动时恢复上次更新状态(syscall.Exec 重启后生效)
@@ -833,6 +839,8 @@ func logWrite(format string, args ...interface{}) {
 	line += "\n"
 	gitPullLog.WriteString(line)
 	// 追加写文件, 重启后可读回完整日志
+	// [fix 2026-07-18] 首次写入前确保目录存在, 否则 OpenFile 会失败
+	_ = os.MkdirAll(gitPullLogDir, 0755)
 	f, err := os.OpenFile(gitPullLogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err == nil {
 		f.WriteString(line)
@@ -920,8 +928,12 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 	gitPullDone = false
 	gitPullOK = false
 	// 修复 UI-LOG-01 (P1): 同时清空持久化日志文件和状态文件, 避免新更新读到旧日志
+	// [fix 2026-07-18] 顺便清理 /tmp 旧路径残留(从老版本升级时旧文件可能还在)
+	_ = os.MkdirAll(gitPullLogDir, 0755)
 	os.Remove(gitPullLogFile)
 	os.Remove(gitPullStateFile)
+	os.Remove("/tmp/nexus-git-pull.log")
+	os.Remove("/tmp/nexus-git-pull.state")
 	gitPullWriteState(false, false)
 
 	go func() {
