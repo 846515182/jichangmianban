@@ -248,10 +248,14 @@ func (h *AutoDeployHandler) Deploy(c *gin.Context) {
 		lastErrCode = errCode
 		lastErrMsg = errMsg
 
-		// 致命错误不重试（用户密码错、权限不足等）
-		if errCode == DeployErrSSHAuth || errCode == DeployErrSSHConnect {
+		// 致命/无意义重试的错误不重试
+		if errCode == DeployErrSSHAuth || errCode == DeployErrSSHConnect || errCode == DeployErrDockerNotInstalled {
+			reason := "部署失败"
+			if errCode == DeployErrDockerNotInstalled {
+				reason = "Docker 安装失败 (重试不会改变结果，请手动排查)"
+			}
 			sse.eventWithCode(PhaseVerify, "error",
-				fmt.Sprintf("部署失败 (%s): %s\n\n修复建议: %s", errCode, errMsg, fixSuggestion(errCode)),
+				fmt.Sprintf("%s (%s): %s\n\n修复建议: %s", reason, errCode, errMsg, fixSuggestion(errCode)),
 				"", errCode)
 			return
 		}
@@ -920,11 +924,12 @@ func preDeployCheck(client *ssh.Client, listenPort, healthPort int, sse *sseWrit
 		restartOut, _ := sshRun(client, "systemctl restart docker 2>&1 || service docker restart 2>&1; sleep 3; timeout 10 docker info 2>&1 | head -3 || echo 'STILL_TIMEOUT'")
 		lines = append(lines, restartOut)
 		if strings.Contains(restartOut, "STILL_TIMEOUT") {
+			kernelVer, _ := sshRun(client, "uname -r 2>/dev/null | tr -d '\\n'")
 			result.OK = false
 			result.Fatal = true
 			result.ErrCode = DeployErrDockerNotInstalled
-			result.Reason = "Docker 守护进程无响应, 重启后仍超时"
-			result.FixSuggestion = "1) 检查 /var/log/dockerd.log  2) 手动重启: systemctl restart docker  3) 检查内核模块: lsmod | grep overlay"
+			result.Reason = fmt.Sprintf("Docker 守护进程无响应 (内核 %s), 重启后仍超时", strings.TrimSpace(kernelVer))
+			result.FixSuggestion = "1) 检查内核是否支持: lsmod | grep overlay && mount | grep cgroup\n2) 查看 dockerd 日志: tail -50 /var/log/dockerd.log\n3) 低配 VPS 可能内核裁剪过, 不支持 Docker, 请更换支持 Docker 的系统镜像"
 			result.Output = strings.Join(lines, "\n")
 			return result
 		}
@@ -1087,8 +1092,22 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 			time.Sleep(5 * time.Second)
 			runOut, _ = sshRun(client, "timeout 10 docker info 2>&1 | head -3 || echo 'START_FAILED'")
 			if !strings.Contains(runOut, "Server Version") && !strings.Contains(runOut, "Containers") {
-				// 兜底: 启动彻底失败, 可能是服务器重装后二进制残留但守护进程损坏
-				// 强制卸载后重新安装, 而非直接报错让用户手动处理
+				// 兜底: 启动彻底失败, 先做内核兼容性检查
+				kernelCheck, _ := sshRun(client, "uname -r 2>/dev/null | tr -d '\\n'; echo '|'; mount 2>/dev/null | grep -c cgroup")
+				kernelParts := strings.Split(strings.TrimSpace(kernelCheck), "|")
+				kernelLow := false
+				if len(kernelParts) >= 2 {
+					cgroupCount := strings.TrimSpace(kernelParts[1])
+					if cgroupCount == "0" {
+						kernelLow = true
+					}
+				}
+				if kernelLow {
+					// 内核完全不支持 cgroup, 重装也没用, 直接报错
+					sse.event(PhasePrepare, "log", "", fmt.Sprintf("内核检查: %s - 不支持 cgroup, Docker 无法在此系统运行", strings.TrimSpace(kernelParts[0])))
+					return false, DeployErrDockerNotInstalled, fmt.Sprintf("系统内核 (%s) 不支持 cgroup, Docker 无法运行", strings.TrimSpace(kernelParts[0]))
+				}
+				// 可能是服务器重装后二进制残留但守护进程损坏, 尝试强制卸载后重新安装
 				sse.event(PhasePrepare, "log", "", "Docker 启动失败(可能是系统重装后残留), 正在卸载旧版本并重新安装...")
 				sshRun(client, "systemctl stop docker 2>&1; systemctl disable docker 2>&1; rm -f /usr/bin/docker /usr/local/bin/docker /usr/bin/dockerd /usr/local/bin/dockerd /usr/bin/docker-compose /usr/local/bin/docker-compose /usr/bin/containerd /usr/local/bin/containerd 2>&1; rm -rf /var/lib/docker /var/lib/containerd 2>&1; true")
 				// 跳转到安装流程
@@ -1161,13 +1180,26 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 	if strings.Contains(verifyOut, "DAEMON_NOT_RUNNING") || strings.Contains(verifyOut, "Cannot connect") {
 		// 静态安装方式需要手动启动 daemon
 		sshRun(client, "nohup dockerd > /var/log/dockerd.log 2>&1 & sleep 3; true")
-		// 等待 dockerd 启动
-		for i := 0; i < 5; i++ {
+		// 等待 dockerd 启动 (最多等 20 秒)
+		dockerStarted := false
+		for i := 0; i < 10; i++ {
 			time.Sleep(2 * time.Second)
 			vOut, _ := sshRun(client, "docker info 2>&1 | head -3")
-			if strings.Contains(vOut, "Server Version") {
+			if strings.Contains(vOut, "Server Version") || strings.Contains(vOut, "Containers") {
+				dockerStarted = true
 				break
 			}
+		}
+		if !dockerStarted {
+			// dockerd 启动失败，可能是内核不支持 (缺少 cgroup/overlay 模块)
+			// 尝试查看 dockerd 日志获取原因
+			dockerLog, _ := sshRun(client, "tail -20 /var/log/dockerd.log 2>/dev/null || echo 'NO_LOG'")
+			// 收集诊断信息
+			kernelVer, _ := sshRun(client, "uname -r 2>/dev/null | tr -d '\\n'")
+			cgroupCheck, _ := sshRun(client, "mount 2>/dev/null | grep cgroup | head -3 || echo 'NO_CGROUP'")
+			sse.event(PhasePrepare, "log", "", fmt.Sprintf("内核: %s | cgroup: %s", strings.TrimSpace(kernelVer), strings.TrimSpace(strings.ReplaceAll(cgroupCheck, "\n", "; "))))
+			sse.event(PhasePrepare, "log", "", "Docker daemon 启动失败, 日志: "+strings.TrimSpace(dockerLog))
+			return false, DeployErrDockerNotInstalled, fmt.Sprintf("Docker 已安装但 daemon 无法启动 (内核: %s, 可能缺少 cgroup/overlay 支持)", strings.TrimSpace(kernelVer))
 		}
 	}
 
@@ -1196,7 +1228,7 @@ func classifySSHError(errStr string) string {
 func fixSuggestion(errCode string) string {
 	switch errCode {
 	case DeployErrDockerNotInstalled:
-		return "1) 手动安装 Docker: curl -fsSL https://get.docker.com | sh\n2) 检查防火墙是否屏蔽了 Docker 安装脚本\n3) 确认服务器能访问 get.docker.com"
+		return "1) 内核可能不支持: 执行 uname -r 查看内核版本\n2) 检查 cgroup: mount | grep cgroup\n3) 检查 overlay: lsmod | grep overlay\n4) 手动安装: curl -fsSL https://get.docker.com | sh\n5) 如果低配 VPS 内核不支持 Docker, 请考虑升级系统或使用支持 Docker 的镜像"
 	case DeployErrPortConflict:
 		return "1) 释放被占用端口: fuser -k <端口>/tcp\n2) 修改节点的代理端口\n3) 停止占用端口的进程后重试"
 	case DeployErrDiskFull:
