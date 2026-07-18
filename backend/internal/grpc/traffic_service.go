@@ -30,7 +30,7 @@ func isNodeAggregateUser(uid string) bool {
 // s7WarnLimiter 限制每个节点的 S7 警告频率, 避免每 5 分钟刷屏
 var s7WarnLimiter sync.Map // map[nodeID]time.Time
 
-// shouldLogS7Warn 同一节点 1 小时内最多打一次 S7 警告
+// shouldLogS7Warn 同一节点 1 小时内最多打一次 S7 警告(用于写库失败等真正的错误)
 func shouldLogS7Warn(nodeID string) bool {
 	now := time.Now()
 	if v, ok := s7WarnLimiter.Load(nodeID); ok {
@@ -39,6 +39,21 @@ func shouldLogS7Warn(nodeID string) bool {
 		}
 	}
 	s7WarnLimiter.Store(nodeID, now)
+	return true
+}
+
+// s7InfoLimiter 限制 S7 INFO 日志频率(无活跃用户等正常状态)
+var s7InfoLimiter sync.Map // map[nodeID]time.Time
+
+// shouldLogS7Info 同一节点 1 小时内最多打一次 S7 INFO 日志
+func shouldLogS7Info(nodeID string) bool {
+	now := time.Now()
+	if v, ok := s7InfoLimiter.Load(nodeID); ok {
+		if now.Sub(v.(time.Time)) < time.Hour {
+			return false
+		}
+	}
+	s7InfoLimiter.Store(nodeID, now)
 	return true
 }
 
@@ -354,13 +369,12 @@ func (s *TrafficServiceServer) distributeNodeTraffic(tx *gorm.DB, nodeID string,
 		users, err = s.userRepo.ListActive()
 	}
 	if err != nil || len(users) == 0 {
-		// 限速警告: 同节点 1h 内最多 1 次
-		if shouldLogS7Warn(nodeID) {
-			s.logger.Warn("S7: 节点聚合流量分发失败, 无活跃用户",
+		// 无活跃用户是正常状态(新部署节点还没绑定用户), 降为 INFO 避免误报
+		if shouldLogS7Info(nodeID) {
+			s.logger.Info("S7: 节点暂无活跃用户, 聚合流量暂不分发",
 				zap.String("node_id", nodeID),
 				zap.Int64("total_upload", totalUpload),
-				zap.Int64("total_download", totalDownload),
-				zap.Error(err))
+				zap.Int64("total_download", totalDownload))
 		}
 		return
 	}
@@ -417,7 +431,7 @@ func (s *TrafficServiceServer) distributeNodeTraffic(tx *gorm.DB, nodeID string,
 	}
 
 	// 限速 info 日志(同节点 1h 内最多 1 次)
-	if shouldLogS7Warn(nodeID) {
+	if shouldLogS7Info(nodeID) {
 		s.logger.Info("S7: 节点聚合流量已等分到活跃用户",
 			zap.String("node_id", nodeID),
 			zap.Int64("total_upload", totalUpload),
