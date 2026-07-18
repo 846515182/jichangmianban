@@ -19,6 +19,9 @@ type Container struct {
 // 全局实例
 var App *Container
 
+// Version 编译时注入的版本号(git HEAD short hash), 用于检测容器是否需要重建
+var Version string
+
 // Init 初始化全局容器
 func Init(cfg *config.Config, db *gorm.DB, rdb *redis.Client, logger *zap.Logger) {
 	App = &Container{

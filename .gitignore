@@ -18,3 +18,4 @@ deployments/
 docker-cli/
 _out/
 backend/_out/
+.last_build_version

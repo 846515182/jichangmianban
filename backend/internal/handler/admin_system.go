@@ -1011,6 +1011,12 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		}
 		logWrite("二进制已更新")
 
+		// 写入构建标记文件, 让 GitStatus 能检测下次是否有未部署的更新
+		newHead := strings.TrimSpace(execCommand("git", "rev-parse", "--short", "HEAD").Output)
+		if newHead != "" {
+			_ = os.WriteFile(filepath.Join(gitRoot, ".last_build_version"), []byte(newHead), 0644)
+		}
+
 		logWrite(">>> 6/6 重建前端容器 docker compose up -d --no-deps frontend")
 		if !execCommandLog(gitRoot, "docker", "compose", "up", "-d", "--no-deps", "frontend") {
 			logWrite("重启前端失败")
@@ -1136,6 +1142,12 @@ func (h *AdminSystemHandler) GitStatus(c *gin.Context) {
 	localHead = strings.TrimSpace(localHead)
 	remoteHead = strings.TrimSpace(remoteHead)
 
+	// 运行版本: 从标记文件读取上次构建部署时的 git HEAD
+	runningVersion := ""
+	if data, err := os.ReadFile(filepath.Join(gitRoot, ".last_build_version")); err == nil {
+		runningVersion = strings.TrimSpace(string(data))
+	}
+
 	behind := 0
 	ahead := 0
 	changelog := ""
@@ -1160,17 +1172,30 @@ func (h *AdminSystemHandler) GitStatus(c *gin.Context) {
 		}
 	}
 
+	// 检测容器是否需要重建: 上次构建版本 != 当前代码版本
+	// 场景: git pull 拉了新代码但还没 docker compose build, 或手动改了代码
+	needsRebuild := false
+	rebuildChangelog := ""
+	if runningVersion != "" && localHead != "" && runningVersion != localHead {
+		needsRebuild = true
+		// 获取从上次构建版本到当前 HEAD 的提交记录(即未部署的更新)
+		rebuildChangelog = execCommand("git", "log", "--oneline", runningVersion+".."+localHead).Output
+	}
+
 	response.OK(c, gin.H{
-		"status":        statusResult.Output,
-		"recent_5":      logResult.Output,
-		"branch":        branch,
-		"local_head":    localHead,
-		"remote_head":   remoteHead,
-		"behind":        behind,
-		"ahead":         ahead,
-		"up_to_date":    behind == 0 && ahead == 0,
-		"changelog":     strings.TrimSpace(changelog),
-		"changed_files": strings.TrimSpace(changedFiles),
+		"status":            statusResult.Output,
+		"recent_5":          logResult.Output,
+		"branch":            branch,
+		"local_head":        localHead,
+		"remote_head":       remoteHead,
+		"behind":            behind,
+		"ahead":             ahead,
+		"up_to_date":        behind == 0 && ahead == 0 && !needsRebuild,
+		"changelog":         strings.TrimSpace(changelog),
+		"changed_files":     strings.TrimSpace(changedFiles),
+		"running_version":   runningVersion,
+		"needs_rebuild":     needsRebuild,
+		"rebuild_changelog": strings.TrimSpace(rebuildChangelog),
 	})
 }
 

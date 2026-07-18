@@ -29,7 +29,13 @@ import (
 	"nexus-panel/internal/service"
 )
 
+// Version 编译时通过 ldflags 注入(git HEAD short hash), 用于检测容器是否需要重建
+var Version = "dev"
+
 func main() {
+	// 0. 注入编译版本号到全局
+	app.Version = Version
+
 	// 1. 加载配置
 	cfg, err := config.Load()
 	if err != nil {
@@ -68,6 +74,9 @@ func main() {
 
 	// 7. 确保存在默认超级管理员(首次启动)
 	ensureSuperAdmin(db, cfg, logger)
+
+	// 8. 确保存在试用套餐(注册自动发放, 5GB/30天)
+	ensureTrialPlan(db, logger)
 
 	// 8. 注册路由
 	gin.SetMode(gin.ReleaseMode)
@@ -387,6 +396,36 @@ func ensureSuperAdmin(db *gorm.DB, cfg *config.Config, logger *zap.Logger) {
 	} else {
 		logger.Info("已创建默认超级管理员", zap.String("username", "admin"))
 	}
+}
+
+// ensureTrialPlan 确保存在试用套餐(注册自动发放)
+// 5GB 流量 / 30 天 / 0 元 / 设备数 2
+func ensureTrialPlan(db *gorm.DB, logger *zap.Logger) {
+	var existing model.Plan
+	err := db.Where("is_deleted = false AND name LIKE ?", "%试用%").First(&existing).Error
+	if err == nil {
+		return // 已存在试用套餐
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		logger.Warn("查询试用套餐失败", zap.Error(err))
+		return
+	}
+	trial := &model.Plan{
+		Name:                "试用套餐",
+		Description:         "注册即享 5GB 试用流量，30 天有效",
+		TrafficLimit:        5 * 1024 * 1024 * 1024, // 5GB
+		DurationDays:        30,
+		PriceCents:          0,
+		OriginalPriceCents:  0,
+		DeviceLimit:         2,
+		IsEnabled:           true,
+		SortOrder:           0, // 排在最前
+	}
+	if err := db.Create(trial).Error; err != nil {
+		logger.Warn("创建试用套餐失败", zap.Error(err))
+		return
+	}
+	logger.Info("已自动创建试用套餐(5GB/30天)", zap.String("name", trial.Name))
 }
 
 // generateRandomPassword 使用 crypto/rand 生成随机密码

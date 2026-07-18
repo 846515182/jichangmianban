@@ -176,12 +176,20 @@
                 </div>
                 <div class="git-info">
                   <span class="git-label">版本状态:</span>
-                  <el-tag v-if="gitStatus.up_to_date" size="small" type="success" effect="dark">已是最新版本</el-tag>
+                  <el-tag v-if="gitStatus.needs_rebuild" size="small" type="danger" effect="dark">有更新待部署</el-tag>
+                  <el-tag v-else-if="gitStatus.up_to_date" size="small" type="success" effect="dark">已是最新版本</el-tag>
                   <el-tag v-else-if="gitStatus.behind > 0" size="small" type="warning" effect="dark">有 {{ gitStatus.behind }} 个更新可用</el-tag>
                   <el-tag v-else-if="gitStatus.ahead > 0" size="small" type="info" effect="dark">本地有 {{ gitStatus.ahead }} 个未推送提交</el-tag>
                   <el-tag v-else size="small" type="info">检测中...</el-tag>
                 </div>
-                <div class="git-info">
+                <div v-if="gitStatus.needs_rebuild" class="git-info">
+                  <span class="git-label">运行版本:</span>
+                  <code class="git-commit-hash">{{ gitStatus.running_version || '-' }}</code>
+                  <span class="git-arrow">→</span>
+                  <code class="git-commit-hash git-commit-new">{{ gitStatus.local_head || '-' }}</code>
+                  <el-tag size="small" type="warning" style="margin-left: 8px">代码已更新, 点击下方「一键在线更新」部署</el-tag>
+                </div>
+                <div v-else class="git-info">
                   <span class="git-label">当前版本:</span>
                   <code class="git-commit-hash">{{ gitStatus.local_head || '-' }}</code>
                   <span v-if="gitStatus.behind > 0" class="git-arrow">→</span>
@@ -191,7 +199,11 @@
                   <span class="git-label">最近提交:</span>
                   <pre class="git-log">{{ gitStatus.recent5 || '加载中...' }}</pre>
                 </div>
-                <div v-if="gitStatus.behind > 0 && gitStatus.changelog" class="git-info">
+                <div v-if="gitStatus.needs_rebuild && gitStatus.rebuild_changelog" class="git-info">
+                  <span class="git-label">更新说明:</span>
+                  <pre class="git-log git-changelog">{{ gitStatus.rebuild_changelog }}</pre>
+                </div>
+                <div v-else-if="gitStatus.behind > 0 && gitStatus.changelog" class="git-info">
                   <span class="git-label">更新说明:</span>
                   <pre class="git-log git-changelog">{{ gitStatus.changelog }}</pre>
                 </div>
@@ -511,6 +523,9 @@ const gitStatus = reactive({
   up_to_date: false,
   changelog: '',
   changed_files: '',
+  running_version: '',
+  needs_rebuild: false,
+  rebuild_changelog: '',
 })
 
 const loadGitStatus = async (silent = false) => {
@@ -528,6 +543,9 @@ const loadGitStatus = async (silent = false) => {
     gitStatus.up_to_date = !!d.up_to_date
     gitStatus.changelog = d.changelog || ''
     gitStatus.changed_files = d.changed_files || ''
+    gitStatus.running_version = d.running_version || ''
+    gitStatus.needs_rebuild = !!d.needs_rebuild
+    gitStatus.rebuild_changelog = d.rebuild_changelog || ''
   } catch { /* */ } finally {
     loadingGitStatus.value = false
   }
