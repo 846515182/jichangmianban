@@ -869,14 +869,14 @@ func preDeployCheck(client *ssh.Client, listenPort, healthPort int, sse *sseWrit
 	// 3. Docker 检测
 	sse.event(PhaseEnvCheck, "running", "正在检查 Docker...", "")
 	dockerStatus, _ := sshRun(client, "command -v docker >/dev/null 2>&1 && timeout 10 docker info 2>&1 | head -3 || echo 'NOT_INSTALLED'")
-	// 兜底: docker info 可能挂死, timeout 10 秒保护
+	// 兜底: docker info 可能挂死, timeout 10 秒保护; 也可能 Docker 二进制存在但 daemon 挂了
 	if strings.Contains(dockerStatus, "NOT_INSTALLED") {
-		// 兜底: 再确认一下是否真的没安装 (command -v 可能误判)
-		dockerStatus2, _ := sshRun(client, "which docker 2>/dev/null || whereis docker 2>/dev/null || echo 'NOT_FOUND'")
+		// 兜底: 用多种方式查找 Docker (静态安装/源码编译可能不在 PATH)
+		dockerStatus2, _ := sshRun(client, "which docker 2>/dev/null || type docker 2>/dev/null || ls /usr/bin/docker 2>/dev/null || ls /usr/local/bin/docker 2>/dev/null || echo 'NOT_FOUND'")
 		if strings.Contains(dockerStatus2, "NOT_FOUND") {
 			dockerStatus = "NOT_INSTALLED"
 		} else {
-			// which 找到了说明安装过, 再试一次 docker info
+			// 找到了 Docker 二进制, 再试一次 docker info (可能是 PATH 问题)
 			dockerStatus, _ = sshRun(client, "timeout 15 docker info 2>&1 | head -5 || echo 'DOCKER_TIMEOUT'")
 		}
 	}
@@ -1032,6 +1032,7 @@ func parseAvailMB(s string) int {
 
 // ensureDocker 检查并安装 Docker; 已安装则跳过
 // 兜底: get.docker.com 不可用时自动回退到阿里云镜像源安装
+// 修复: 已安装但启动失败时(如服务器重装系统后 Docker 二进制残留), 强制卸载重装而非直接报错
 func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 	// 检测 Docker
 	checkOut, _ := sshRun(client, "command -v docker >/dev/null 2>&1 && echo 'INSTALLED' || echo 'NOT_INSTALLED'")
@@ -1059,11 +1060,19 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 			time.Sleep(5 * time.Second)
 			runOut, _ = sshRun(client, "timeout 10 docker info 2>&1 | head -3 || echo 'START_FAILED'")
 			if !strings.Contains(runOut, "Server Version") && !strings.Contains(runOut, "Containers") {
-				return false, DeployErrDockerNotInstalled, "Docker 已安装但无法启动(已等待 8 秒)"
+				// 兜底: 启动彻底失败, 可能是服务器重装后二进制残留但守护进程损坏
+				// 强制卸载后重新安装, 而非直接报错让用户手动处理
+				sse.event(PhasePrepare, "log", "", "Docker 启动失败(可能是系统重装后残留), 正在卸载旧版本并重新安装...")
+				sshRun(client, "systemctl stop docker 2>&1; systemctl disable docker 2>&1; rm -f /usr/bin/docker /usr/local/bin/docker /usr/bin/dockerd /usr/local/bin/dockerd /usr/bin/docker-compose /usr/local/bin/docker-compose /usr/bin/containerd /usr/local/bin/containerd 2>&1; rm -rf /var/lib/docker /var/lib/containerd 2>&1; true")
+				// 跳转到安装流程
+			} else {
+				sse.event(PhasePrepare, "done", "Docker 启动成功(等待后)", runOut)
+				return true, "", ""
 			}
+		} else {
+			sse.event(PhasePrepare, "done", "Docker 启动成功", runOut)
+			return true, "", ""
 		}
-		sse.event(PhasePrepare, "done", "Docker 启动成功", runOut)
-		return true, "", ""
 	}
 
 	// 未安装, 自动安装 (兜底: 官方源 → 阿里云镜像 → 中科大镜像)
