@@ -1065,9 +1065,102 @@ func parseAvailMB(s string) int {
 	return -1
 }
 
+// dockerDiag 保存 Docker 启动失败诊断结果
+type dockerDiag struct {
+	fatal  bool   // true=内核不支持, 无需重试; false=可能是临时问题
+	reason string // 人类可读的诊断原因
+}
+
+// diagnoseDockerFailure 全面诊断 Docker 无法启动的原因
+// 检测: cgroup 支持 (v1/v2), overlay 模块, 内核版本, dockerd 日志
+func diagnoseDockerFailure(client *ssh.Client, sse *sseWriter) dockerDiag {
+	kernelVer, _ := sshRun(client, "uname -r 2>/dev/null | tr -d '\\n'")
+	sse.event(PhasePrepare, "log", "", fmt.Sprintf("=== Docker 启动失败诊断 (内核: %s) ===", strings.TrimSpace(kernelVer)))
+
+	// 1. 检测 cgroup 挂载 (v1 和 v2)
+	cgroupV1, _ := sshRun(client, "mount 2>/dev/null | grep 'cgroup ' | head -3 || echo 'NO_CGROUP_V1'")
+	cgroupV2, _ := sshRun(client, "mount 2>/dev/null | grep 'cgroup2 ' | head -1 || echo 'NO_CGROUP_V2'")
+	hasCgroupV1 := !strings.Contains(cgroupV1, "NO_CGROUP_V1") && strings.TrimSpace(cgroupV1) != ""
+	hasCgroupV2 := !strings.Contains(cgroupV2, "NO_CGROUP_V2") && strings.TrimSpace(cgroupV2) != ""
+
+	if hasCgroupV1 {
+		sse.event(PhasePrepare, "log", "", "  cgroup v1: 已挂载")
+	} else {
+		sse.event(PhasePrepare, "log", "", "  cgroup v1: 未挂载")
+	}
+	if hasCgroupV2 {
+		sse.event(PhasePrepare, "log", "", "  cgroup v2: 已挂载")
+	} else {
+		sse.event(PhasePrepare, "log", "", "  cgroup v2: 未挂载")
+	}
+
+	// 2. 检测 overlay 模块 (Docker 存储驱动必须)
+	overlayCheck, _ := sshRun(client, "lsmod 2>/dev/null | grep overlay || modprobe overlay 2>&1 || echo 'OVERLAY_MISSING'")
+	overlayOK := !strings.Contains(overlayCheck, "OVERLAY_MISSING") && !strings.Contains(overlayCheck, "not found")
+	if overlayOK {
+		sse.event(PhasePrepare, "log", "", "  overlay 模块: 可用")
+	} else {
+		sse.event(PhasePrepare, "log", "", "  overlay 模块: 缺失 (Docker 存储驱动依赖此模块)")
+	}
+
+	// 3. 检测内核配置中是否启用 cgroup (检查 /proc/filesystems 和 /proc/cgroups)
+	cgroupFilesystems, _ := sshRun(client, "cat /proc/filesystems 2>/dev/null | grep cgroup || echo 'NO_CGROUP_FS'")
+	cgroupProcs, _ := sshRun(client, "cat /proc/cgroups 2>/dev/null | head -5 || echo 'NO_PROCCGROUPS'")
+	sse.event(PhasePrepare, "log", "", fmt.Sprintf("  /proc/filesystems cgroup: %s", strings.TrimSpace(strings.ReplaceAll(cgroupFilesystems, "\n", ", "))))
+	sse.event(PhasePrepare, "log", "", fmt.Sprintf("  /proc/cgroups: %s", strings.TrimSpace(strings.ReplaceAll(cgroupProcs, "\n", "; "))))
+
+	// 4. 读取 dockerd 日志最后几行
+	dockerLog, _ := sshRun(client, "tail -30 /var/log/dockerd.log 2>/dev/null || journalctl -u docker -n 20 --no-pager 2>/dev/null || echo 'NO_LOG'")
+	sse.event(PhasePrepare, "log", "", fmt.Sprintf("  dockerd 日志: %s", strings.TrimSpace(dockerLog)))
+
+	// 5. 判断是否致命 (内核不支持, 重装/重试都没用)
+	if !hasCgroupV1 && !hasCgroupV2 {
+		// 完全不支持 cgroup → 致命
+		return dockerDiag{
+			fatal:  true,
+			reason: fmt.Sprintf("系统内核 (%s) 不支持 cgroup (v1 和 v2 均未挂载), Docker 无法在此系统运行。请更换支持 Docker 的系统镜像 (如 Ubuntu 20.04+, Debian 11+, CentOS 7+)", strings.TrimSpace(kernelVer)),
+		}
+	}
+	if !overlayOK {
+		// 缺少 overlay 模块 → 致命 (可以用 vfs 驱动但性能极差, 不推荐)
+		return dockerDiag{
+			fatal:  true,
+			reason: fmt.Sprintf("系统内核 (%s) 缺少 overlay 模块, Docker 存储驱动无法工作。请确保内核编译了 overlay 模块, 或更换支持 Docker 的系统镜像", strings.TrimSpace(kernelVer)),
+		}
+	}
+
+	// 6. 分析 dockerd 日志中的具体错误
+	if strings.Contains(dockerLog, "cgroup") && (strings.Contains(dockerLog, "not found") || strings.Contains(dockerLog, "no such file")) {
+		return dockerDiag{
+			fatal:  true,
+			reason: fmt.Sprintf("dockerd 报告 cgroup 子系统缺失 (内核 %s)。这是低配 VPS 常见问题: 内核裁剪掉了 cgroup 支持。请更换系统镜像", strings.TrimSpace(kernelVer)),
+		}
+	}
+	if strings.Contains(dockerLog, "overlay") && (strings.Contains(dockerLog, "not supported") || strings.Contains(dockerLog, "permission denied")) {
+		return dockerDiag{
+			fatal:  true,
+			reason: fmt.Sprintf("dockerd 报告 overlay 存储驱动不支持 (内核 %s)。可能缺少 overlay 内核模块", strings.TrimSpace(kernelVer)),
+		}
+	}
+	if strings.Contains(dockerLog, "iptables") || strings.Contains(dockerLog, "nat") {
+		return dockerDiag{
+			fatal:  true,
+			reason: fmt.Sprintf("dockerd 报告 iptables/nat 不可用 (内核 %s)。可能内核缺少 netfilter 模块", strings.TrimSpace(kernelVer)),
+		}
+	}
+
+	// 非致命: cgroup 和 overlay 都有, 但 dockerd 还是启动失败 (可能是端口冲突/配置损坏等)
+	return dockerDiag{
+		fatal:  false,
+		reason: fmt.Sprintf("内核兼容性检查通过 (cgroup+overlay 均可用), 但 dockerd 仍无法启动。请查看完整日志排查"),
+	}
+}
+
 // ensureDocker 检查并安装 Docker; 已安装则跳过
 // 兜底: get.docker.com 不可用时自动回退到阿里云镜像源安装
-// 修复: 已安装但启动失败时(如服务器重装系统后 Docker 二进制残留), 强制卸载重装而非直接报错
+// 修复: 已安装但启动失败时, 先做全面内核诊断, 如果内核不支持则直接报错不重试;
+//
+//	如果是系统重装后二进制残留, 卸载后重新安装
 func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 	// 检测 Docker
 	checkOut, _ := sshRun(client, "command -v docker >/dev/null 2>&1 && echo 'INSTALLED' || echo 'NOT_INSTALLED'")
@@ -1095,20 +1188,11 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 			time.Sleep(5 * time.Second)
 			runOut, _ = sshRun(client, "timeout 10 docker info 2>&1 | head -3 || echo 'START_FAILED'")
 			if !strings.Contains(runOut, "Server Version") && !strings.Contains(runOut, "Containers") {
-				// 兜底: 启动彻底失败, 先做内核兼容性检查
-				kernelCheck, _ := sshRun(client, "uname -r 2>/dev/null | tr -d '\\n'; echo '|'; mount 2>/dev/null | grep -c cgroup")
-				kernelParts := strings.Split(strings.TrimSpace(kernelCheck), "|")
-				kernelLow := false
-				if len(kernelParts) >= 2 {
-					cgroupCount := strings.TrimSpace(kernelParts[1])
-					if cgroupCount == "0" {
-						kernelLow = true
-					}
-				}
-				if kernelLow {
-					// 内核完全不支持 cgroup, 重装也没用, 直接报错
-					sse.event(PhasePrepare, "log", "", fmt.Sprintf("内核检查: %s - 不支持 cgroup, Docker 无法在此系统运行", strings.TrimSpace(kernelParts[0])))
-					return false, DeployErrDockerNotInstalled, fmt.Sprintf("系统内核 (%s) 不支持 cgroup, Docker 无法运行", strings.TrimSpace(kernelParts[0]))
+				// 启动彻底失败, 做全面内核兼容性诊断
+				diag := diagnoseDockerFailure(client, sse)
+				if diag.fatal {
+					// 内核不支持 Docker, 重装/重试都没用
+					return false, DeployErrDockerNotInstalled, diag.reason
 				}
 				// 可能是服务器重装后二进制残留但守护进程损坏, 尝试强制卸载后重新安装
 				sse.event(PhasePrepare, "log", "", "Docker 启动失败(可能是系统重装后残留), 正在卸载旧版本并重新安装...")
@@ -1194,15 +1278,9 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 			}
 		}
 		if !dockerStarted {
-			// dockerd 启动失败，可能是内核不支持 (缺少 cgroup/overlay 模块)
-			// 尝试查看 dockerd 日志获取原因
-			dockerLog, _ := sshRun(client, "tail -20 /var/log/dockerd.log 2>/dev/null || echo 'NO_LOG'")
-			// 收集诊断信息
-			kernelVer, _ := sshRun(client, "uname -r 2>/dev/null | tr -d '\\n'")
-			cgroupCheck, _ := sshRun(client, "mount 2>/dev/null | grep cgroup | head -3 || echo 'NO_CGROUP'")
-			sse.event(PhasePrepare, "log", "", fmt.Sprintf("内核: %s | cgroup: %s", strings.TrimSpace(kernelVer), strings.TrimSpace(strings.ReplaceAll(cgroupCheck, "\n", "; "))))
-			sse.event(PhasePrepare, "log", "", "Docker daemon 启动失败, 日志: "+strings.TrimSpace(dockerLog))
-			return false, DeployErrDockerNotInstalled, fmt.Sprintf("Docker 已安装但 daemon 无法启动 (内核: %s, 可能缺少 cgroup/overlay 支持)", strings.TrimSpace(kernelVer))
+			// dockerd 启动失败, 做全面内核兼容性诊断
+			diag := diagnoseDockerFailure(client, sse)
+			return false, DeployErrDockerNotInstalled, fmt.Sprintf("Docker 已安装但 daemon 无法启动 - %s", diag.reason)
 		}
 	}
 
