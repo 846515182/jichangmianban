@@ -19,3 +19,13 @@ docker-cli/
 _out/
 backend/_out/
 .last_build_version
+
+# Trae agent 本地辅助脚本 (沙箱内调试用, 不入库)
+deploy_and_verify.py
+http_tunnel_exec.py
+rebuild_panel.py
+check_ssh.py
+check_node.py
+check_panel_ssh.py
+update_panel.py
+rebuild.py
