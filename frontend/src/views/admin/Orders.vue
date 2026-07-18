@@ -162,36 +162,7 @@ const filter = reactive({
   dateRange: [] as string[],
 })
 
-// 演示订单数据
-const mockOrders: Order[] = [
-  {
-    id: 'od1', orderNo: 'NP20260708001', userId: 'u2', username: 'alice', planId: 'p2', planName: '标准版',
-    amount: 28.0, discount: 0, finalAmount: 28.0, status: 'paid', paymentMethod: 'epay_alipay',
-    createdAt: '2026-07-05 14:30:00', paidAt: '2026-07-05 14:31:20', expiredAt: '2026-07-05 14:45:00',
-  },
-  {
-    id: 'od2', orderNo: 'NP20260708002', userId: 'u3', username: 'bob', planId: 'p3', planName: '专业版',
-    amount: 88.0, discount: 8.8, finalAmount: 79.2, status: 'pending', paymentMethod: 'epay_wechat',
-    couponCode: 'SAVE10', createdAt: new Date(Date.now() - 3 * 60 * 1000).toISOString().replace('T', ' ').slice(0, 19),
-    expiredAt: new Date(Date.now() + 12 * 60 * 1000).toISOString().replace('T', ' ').slice(0, 19),
-  },
-  {
-    id: 'od3', orderNo: 'NP20260708003', userId: 'u5', username: 'david', planId: 'p1', planName: '入门版',
-    amount: 9.9, discount: 0, finalAmount: 9.9, status: 'pending', paymentMethod: 'epay_alipay',
-    createdAt: new Date(Date.now() - 8 * 60 * 1000).toISOString().replace('T', ' ').slice(0, 19),
-    expiredAt: new Date(Date.now() + 7 * 60 * 1000).toISOString().replace('T', ' ').slice(0, 19),
-  },
-  {
-    id: 'od4', orderNo: 'NP20260707004', userId: 'u2', username: 'alice', planId: 'p1', planName: '入门版',
-    amount: 9.9, discount: 0, finalAmount: 9.9, status: 'expired', paymentMethod: '',
-    createdAt: '2026-06-20 10:00:00', expiredAt: '2026-06-20 10:15:00',
-  },
-  {
-    id: 'od5', orderNo: 'NP20260707005', userId: 'u3', username: 'bob', planId: 'p4', planName: '旗舰版',
-    amount: 388.0, discount: 0, finalAmount: 388.0, status: 'cancelled', paymentMethod: '',
-    createdAt: '2026-06-25 16:00:00', expiredAt: '2026-06-25 16:15:00',
-  },
-]
+
 
 // 状态映射
 type TagType = 'primary' | 'success' | 'info' | 'warning' | 'danger'
@@ -313,10 +284,12 @@ const loadData = async () => {
     if (Array.isArray(arr)) {
       list.value = arr
     } else {
-      list.value = [...mockOrders]
+      list.value = []
+      ElMessage.error('订单数据格式异常')
     }
   } catch {
-    list.value = [...mockOrders]
+    list.value = []
+    ElMessage.error('加载订单列表失败，请稍后重试')
   } finally {
     loading.value = false
   }

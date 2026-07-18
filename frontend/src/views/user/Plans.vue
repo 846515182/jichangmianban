@@ -322,14 +322,7 @@ const verifyCoupon = async () => {
       ElMessage.error(data?.message || '优惠码无效')
     }
   } catch {
-    // 后端不可用时本地演示
-    if (payForm.couponCode.toUpperCase() === 'SAVE10') {
-      couponResult.value = { valid: true, discount: 10, type: 'percent' }
-      couponApplied.value = true
-      ElMessage.success('优惠码已应用（演示）：9折')
-    } else {
-      ElMessage.error('优惠码无效或已过期')
-    }
+    ElMessage.error('优惠码校验失败，请检查网络或稍后重试')
   } finally {
     verifyingCoupon.value = false
   }
@@ -364,19 +357,14 @@ const createOrder = async () => {
     purchaseVisible.value = false
     await requestPay(orderId, orderNo)
   } catch {
-    // 演示模式：本地生成订单
-    const orderId = 'od' + Date.now()
-    const orderNo = 'NP' + Date.now()
-    ElMessage.success('订单已创建（演示模式）')
-    purchaseVisible.value = false
-    await requestPay(orderId, orderNo, true)
+    ElMessage.error('订单创建失败，请稍后重试')
   } finally {
     creating.value = false
   }
 }
 
 // 请求支付链接
-const requestPay = async (orderId: string, orderNo: string, isDemo = false) => {
+const requestPay = async (orderId: string, orderNo: string) => {
   try {
     const res: any = await request.post(`/api/v1/user/orders/${orderId}/pay`)
     const data = res?.data || res
@@ -390,19 +378,8 @@ const requestPay = async (orderId: string, orderNo: string, isDemo = false) => {
     payVisible.value = true
     startStatusPolling()
   } catch {
-    if (isDemo) {
-      // 演示模式：使用订单号生成二维码
-      lastOrderId.value = orderId
-      lastOrderNo.value = orderNo
-      lastOrderAmount.value = finalAmount.value
-      lastPayUrl.value = ''
-      await generateQR(orderNo)
-      payVisible.value = true
-      startStatusPolling()
-    } else {
-      ElMessage.error('获取支付链接失败，请前往订单列表重试')
-      router.push('/user/orders')
-    }
+    ElMessage.error('获取支付链接失败，请前往订单列表重试')
+    router.push('/user/orders')
   }
 }
 

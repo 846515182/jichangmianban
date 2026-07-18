@@ -115,3 +115,29 @@ func (r *OrderRepo) ListPendingSince(since time.Time) ([]model.Order, error) {
 	}
 	return list, nil
 }
+
+// CountActiveByUser 统计用户的未完结(pending/paid)订单数
+// 用于删除用户前校验: 存在未完结订单时拒绝删除, 避免产生孤儿订单(P1)
+func (r *OrderRepo) CountActiveByUser(userID string) (int64, error) {
+	var n int64
+	if err := r.db.Model(&model.Order{}).
+		Where("user_id = ? AND is_deleted = false AND status IN ?",
+			userID, []string{model.OrderStatusPending, model.OrderStatusPaid}).
+		Count(&n).Error; err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// CountPaidByUserExcluding 统计用户除指定订单外的已支付(未退款/未取消)订单数
+// 用于退款时判断是否还有其它有效订阅, 避免退款一笔误杀用户全部访问权(P0 蝴蝶效应)
+func (r *OrderRepo) CountPaidByUserExcluding(userID, excludeOrderID string) (int64, error) {
+	var n int64
+	if err := r.db.Model(&model.Order{}).
+		Where("user_id = ? AND id != ? AND is_deleted = false AND status = ?",
+			userID, excludeOrderID, model.OrderStatusPaid).
+		Count(&n).Error; err != nil {
+		return 0, err
+	}
+	return n, nil
+}

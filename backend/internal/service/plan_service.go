@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"gorm.io/gorm"
@@ -139,12 +140,16 @@ func (s *PlanService) UpdatePlan(id string, in *UpdatePlanInput) (*model.Plan, e
 }
 
 // DeletePlan 软删除套餐
+// 安全修复(P1): 仍有用户引用该套餐时拒绝删除, 避免后续订单开通时查不到套餐
 func (s *PlanService) DeletePlan(id string) error {
 	if _, err := s.repo.GetByID(id); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
 		return err
+	}
+	if count, err := s.repo.CountActiveUsersByPlanID(id); err == nil && count > 0 {
+		return fmt.Errorf("该套餐仍有 %d 个用户在用，请先迁移用户或禁用套餐而非删除", count)
 	}
 	return s.repo.SoftDelete(id)
 }

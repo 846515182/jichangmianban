@@ -34,3 +34,7 @@ db_inspect.py
 reset_node_traffic.py
 clear_redis_cache.py
 server_sync_reset.py
+
+# Python 缓存
+__pycache__/
+*.pyc

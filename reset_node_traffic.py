@@ -1,14 +1,14 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """重置节点流量计数 + 清理 Redis 速度快照缓存
 保留 nodes.traffic_limit (节点配置) 和其他字段, 只清 traffic_used
 同时清掉 node:speed_snap:* / node:heartbeat:* 让面板速度显示归零"""
 import paramiko, sys, io, socket, socks
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
-HOST = '192.129.242.242'
+from ops_config import NODE_HOST as HOST
 PORT = 22
 USER = 'root'
-PWD  = 'eH62M3CcaSep59J8lZ'
+from ops_config import NODE_SSH_PWD as PWD
 PROXY_HOST = '127.0.0.1'
 PROXY_PORT = 18080
 

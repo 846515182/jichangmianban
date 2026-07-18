@@ -70,6 +70,18 @@ func (r *PlanRepo) CountNodesByPlanID(planID string) (int64, error) {
 	return count, nil
 }
 
+// CountActiveUsersByPlanID 统计当前仍引用该套餐(未删除)的用户数
+// 用于删除套餐前校验: 仍有用户在用时拒绝删除, 避免后续订单开通时查不到套餐(P1)
+func (r *PlanRepo) CountActiveUsersByPlanID(planID string) (int64, error) {
+	var count int64
+	if err := r.db.Model(&model.User{}).
+		Where("plan_id = ? AND is_deleted = false", planID).
+		Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 // Create 创建套餐
 func (r *PlanRepo) Create(p *model.Plan) error {
 	return r.db.Create(p).Error

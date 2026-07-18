@@ -1,15 +1,15 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """全面诊断节点问题: DB + Redis + 面板日志 + agent 连接状态"""
 import paramiko, sys, io, socket, socks
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
-HOST = '192.129.242.242'
+from ops_config import NODE_HOST as HOST
 PORT = 22
 USER = 'root'
-PWD  = 'eH62M3CcaSep59J8lZ'
+from ops_config import NODE_SSH_PWD as PWD
 PROXY_HOST = '127.0.0.1'
 PROXY_PORT = 18080
-REDIS_PWD = 'n3xus_r3dis_2026'
+from ops_config import REDIS_PWD
 
 def make_sock():
     s = socks.socksocket(socket.AF_INET, socket.SOCK_STREAM)

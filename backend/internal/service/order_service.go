@@ -120,6 +120,15 @@ func (s *OrderService) GetByOrderNo(orderNo string) (*model.Order, error) {
 	return s.orderRepo.GetByOrderNo(orderNo)
 }
 
+// HasActiveOrders 用户是否存在未完结(pending/paid)订单(删除用户前校验, P1)
+func (s *OrderService) HasActiveOrders(userID string) (bool, error) {
+	n, err := s.orderRepo.CountActiveByUser(userID)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // ListPendingSince 列出 created_at >= since 且仍为 pending 的订单(掉单对账用)
 // 修复 PAY-RECON-01 (P0): 供 CronService.ReconcilePendingOrders 调用。
 func (s *OrderService) ListPendingSince(since time.Time) ([]model.Order, error) {
@@ -360,21 +369,34 @@ func (s *OrderService) AdminRefund(orderID, reason string) error {
 				}
 			}
 		}
-		// 重置用户套餐：清除 plan_id、重置流量配额、将状态置为 expired
+		// 重置用户套餐：仅当本订单套餐 == 用户当前套餐，且无其它已支付订单时才重置，
+		// 避免退款一笔误杀用户其它有效订阅(蝴蝶效应 P0)
 		u, err := s.userRepo.GetByID(locked.UserID)
 		if err != nil {
 			return fmt.Errorf("退款关联用户不存在: %w", err)
 		}
-		u.PlanID = nil
-		u.TrafficLimit = 0
-		u.TrafficUsed = 0
-		u.UploadBytes = 0
-		u.DownloadBytes = 0
-		u.ExpiredAt = nil
-		u.Status = "expired"
-		if err := tx.Save(u).Error; err != nil {
-			return fmt.Errorf("重置退款用户套餐失败: %w", err)
+		if u.PlanID != nil && *u.PlanID == locked.PlanID {
+			otherPaid, cntErr := s.orderRepo.CountPaidByUserExcluding(locked.UserID, locked.ID)
+			if cntErr != nil {
+				if logger := app.Get().Logger; logger != nil {
+					logger.Warn("退款检查其它已支付订单失败, 保守保留套餐", zap.Error(cntErr))
+				}
+			} else if otherPaid == 0 {
+				// 用户无其它有效订阅, 安全重置套餐
+				u.PlanID = nil
+				u.TrafficLimit = 0
+				u.TrafficUsed = 0
+				u.UploadBytes = 0
+				u.DownloadBytes = 0
+				u.ExpiredAt = nil
+				u.Status = "expired"
+				if err := tx.Save(u).Error; err != nil {
+					return fmt.Errorf("重置退款用户套餐失败: %w", err)
+				}
+			}
+			// otherPaid > 0: 用户仍有其它有效订阅, 保留套餐不重置(仅退款本笔金额)
 		}
+		// u.PlanID != locked.PlanID: 当前套餐非本订单所开, 不重置
 		return nil
 	})
 }
@@ -392,6 +414,10 @@ func (s *OrderService) AdminCancelOrder(orderID, reason string) error {
 	}
 	if o.Status == model.OrderStatusCancelled {
 		return errors.New("订单已是已取消状态")
+	}
+	// 安全修复(P1): 已支付订单不可取消, 避免出现"订单已取消但套餐仍生效"的不一致; 请使用退款
+	if o.Status == model.OrderStatusPaid {
+		return errors.New("已支付订单不可取消，请使用退款")
 	}
 	wasPending := o.Status == model.OrderStatusPending
 	db := app.Get().DB
@@ -509,8 +535,8 @@ func calcCouponDiscount(c *model.Coupon, amount int64) (int64, error) {
 	}
 	switch c.Type {
 	case model.CouponTypePercent:
-		if c.Value < 1 || c.Value > 90 {
-			return 0, errors.New("优惠券折扣比例无效")
+		if c.Value < 1 || c.Value > 100 {
+			return 0, errors.New("优惠券折扣比例需在 1-100 之间")
 		}
 		d := amount * c.Value / 100
 		return d, nil

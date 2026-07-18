@@ -238,10 +238,10 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 		admin.DELETE("/system/backups/:name", middleware.RBAC(middleware.PermBackup), middleware.AuditAction("system.backup_delete"), systemH.DeleteBackup)
 		admin.GET("/system/backups/:name/download", middleware.RBAC(middleware.PermBackup), systemH.DownloadBackup)
 		admin.GET("/system/sub-config", systemH.GetSubConfig)
-		admin.PUT("/system/sub-config", middleware.AuditAction("system.sub_config"), systemH.SubConfig)
+		admin.PUT("/system/sub-config", middleware.RBAC(middleware.PermGlobalSec), middleware.AuditAction("system.sub_config"), systemH.SubConfig)
 		admin.GET("/system/pay-config", systemH.GetPayConfig)
-		admin.PUT("/system/pay-config", middleware.AuditAction("system.pay_config"), systemH.UpdatePayConfig)
-		admin.POST("/system/pay-config/test", systemH.TestPayConfig)
+		admin.PUT("/system/pay-config", middleware.RBAC(middleware.PermGlobalSec), middleware.AuditAction("system.pay_config"), systemH.UpdatePayConfig)
+		admin.POST("/system/pay-config/test", middleware.RBAC(middleware.PermGlobalSec), middleware.AuditAction("system.pay_config_test"), systemH.TestPayConfig)
 
 		// 系统更新 & GitHub 同步
 		admin.GET("/system/git-status", middleware.RBAC(middleware.PermBackup), systemH.GitStatus)

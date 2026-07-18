@@ -1,12 +1,12 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """让服务器 git 也同步 reset 到干净的 4b61333, 删除所有调试脚本提交"""
 import paramiko, sys, io, socket, socks
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
-HOST = '192.129.242.242'
+from ops_config import NODE_HOST as HOST
 PORT = 22
 USER = 'root'
-PWD  = 'eH62M3CcaSep59J8lZ'
+from ops_config import NODE_SSH_PWD as PWD
 PROXY_HOST = '127.0.0.1'
 PROXY_PORT = 18080
 

@@ -164,29 +164,7 @@ const saving = ref(false)
 const keyword = ref('')
 const list = ref<Coupon[]>([])
 
-// 演示数据
-const mockCoupons: Coupon[] = [
-  {
-    id: 'c1', code: 'SAVE10', type: 'percent', value: 10, minSpend: 0,
-    usedCount: 23, totalCount: 100, expireAt: '2026-12-31 23:59:59',
-    status: 'active', createdAt: '2026-06-01 10:00:00',
-  },
-  {
-    id: 'c2', code: 'NEWUSER20', type: 'fixed', value: 5, minSpend: 20,
-    usedCount: 88, totalCount: 200, expireAt: '2026-09-30 23:59:59',
-    status: 'active', createdAt: '2026-05-15 14:00:00',
-  },
-  {
-    id: 'c3', code: 'SUMMER50', type: 'percent', value: 50, minSpend: 100,
-    usedCount: 50, totalCount: 50, expireAt: '2026-08-31 23:59:59',
-    status: 'active', createdAt: '2026-06-01 10:00:00',
-  },
-  {
-    id: 'c4', code: 'EXPIRED30', type: 'percent', value: 30, minSpend: 0,
-    usedCount: 5, totalCount: 100, expireAt: '2026-05-31 23:59:59',
-    status: 'disabled', createdAt: '2026-04-01 10:00:00',
-  },
-]
+
 
 const filteredList = computed(() => {
   if (!keyword.value) return list.value
@@ -284,16 +262,8 @@ const handleSave = async () => {
           createdCount = 1
         }
       } catch {
-        // 演示模式本地生成
-        if (form.batch) {
-          for (let i = 0; i < form.batchCount; i++) {
-            list.value.unshift(buildLocalCoupon())
-          }
-          createdCount = form.batchCount
-        } else {
-          list.value.unshift(buildLocalCoupon(form.code || undefined))
-          createdCount = 1
-        }
+        ElMessage.error('创建优惠券失败，请稍后重试')
+        return
       }
       ElMessage.success(`成功创建 ${createdCount} 张优惠券`)
       dialogVisible.value = false
@@ -301,28 +271,6 @@ const handleSave = async () => {
       saving.value = false
     }
   })
-}
-
-// 本地构建优惠券（演示模式）
-const buildLocalCoupon = (code?: string): Coupon => {
-  const finalCode = code || (() => {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
-    let c = ''
-    for (let i = 0; i < 8; i++) c += chars.charAt(Math.floor(Math.random() * chars.length))
-    return c
-  })()
-  return {
-    id: 'c' + Date.now() + Math.random().toString(36).slice(2, 6),
-    code: finalCode,
-    type: form.type,
-    value: form.value,
-    minSpend: form.minSpend,
-    usedCount: 0,
-    totalCount: form.totalCount,
-    expireAt: form.expireAt,
-    status: 'active',
-    createdAt: new Date().toISOString().replace('T', ' ').slice(0, 19),
-  }
 }
 
 // 启用/禁用
@@ -363,10 +311,12 @@ onMounted(async () => {
     if (Array.isArray(arr)) {
       list.value = arr
     } else {
-      list.value = [...mockCoupons]
+      list.value = []
+      ElMessage.error('优惠券数据格式异常')
     }
   } catch {
-    list.value = [...mockCoupons]
+    list.value = []
+    ElMessage.error('加载优惠券列表失败，请稍后重试')
   } finally {
     loading.value = false
   }

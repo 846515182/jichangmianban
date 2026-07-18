@@ -41,10 +41,10 @@ func (s *UserService) CreateUser(in *CreateUserInput) (*model.User, error) {
         if existing, err := s.repo.GetByUsername(in.Username); err == nil && existing != nil {
                 return nil, ErrDuplicate
         }
-        hash, err := bcrypt.GenerateFromPassword([]byte(in.Password), bcrypt.DefaultCost)
-        if err != nil {
-                return nil, err
-        }
+	hash, err := bcrypt.GenerateFromPassword([]byte(in.Password), bcryptCost)
+	if err != nil {
+		return nil, err
+	}
         u := &model.User{
                 Username:     in.Username,
                 PasswordHash: string(hash),
@@ -134,13 +134,13 @@ func (s *UserService) UpdateUser(id string, in *UpdateUserInput) (*model.User, e
         if in.Remark != nil {
                 u.Remark = *in.Remark
         }
-        if in.Password != nil && *in.Password != "" {
-                hash, err := bcrypt.GenerateFromPassword([]byte(*in.Password), bcrypt.DefaultCost)
-                if err != nil {
-                        return nil, err
-                }
-                u.PasswordHash = string(hash)
-        }
+	if in.Password != nil && *in.Password != "" {
+		hash, err := bcrypt.GenerateFromPassword([]byte(*in.Password), bcryptCost)
+		if err != nil {
+			return nil, err
+		}
+		u.PasswordHash = string(hash)
+	}
         if in.ExpireDays != nil {
                 if *in.ExpireDays <= 0 {
                         u.ExpiredAt = nil

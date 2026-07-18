@@ -7,7 +7,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -405,6 +407,41 @@ func (h *AdminSystemHandler) UpdatePayConfig(c *gin.Context) {
 	response.OKMsg(c, "支付配置已更新")
 }
 
+// validatePayAPIURL 校验支付 APIURL 防止 SSRF 探测内网/环回/元数据端点(P1)
+func validatePayAPIURL(raw string) error {
+	if raw == "" {
+		return fmt.Errorf("APIURL 不能为空")
+	}
+	u, err := neturl.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("APIURL 格式无效")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("APIURL 仅支持 http/https")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("APIURL 主机为空")
+	}
+	// 拒绝内网/环回/链路本地/未指定 IP
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+			return fmt.Errorf("APIURL 不允许指向内网/环回地址")
+		}
+	}
+	// 拒绝常见云元数据主机名与本地后缀
+	lower := strings.ToLower(host)
+	switch {
+	case lower == "metadata.google.internal",
+		lower == "169.254.169.254",
+		strings.HasSuffix(lower, ".internal"),
+		strings.HasSuffix(lower, ".localhost"),
+		strings.HasSuffix(lower, ".local"):
+		return fmt.Errorf("APIURL 不允许指向内网/元数据地址")
+	}
+	return nil
+}
+
 // TestPayConfig POST /api/v1/admin/system/pay-config/test
 // 测试 EPay 支付配置是否正确(调用易支付"查询商户信息"API)
 func (h *AdminSystemHandler) TestPayConfig(c *gin.Context) {
@@ -423,6 +460,11 @@ func (h *AdminSystemHandler) TestPayConfig(c *gin.Context) {
 		if err == nil && existing != nil {
 			in.Key = existing.Key
 		}
+	}
+	// SSRF 防护: 校验 APIURL 不指向内网/元数据端点
+	if err := validatePayAPIURL(in.APIURL); err != nil {
+		response.FailMsg(c, response.CodeParamError, err.Error())
+		return
 	}
 	result, err := h.paymentSvc.TestConnection(in.PID, in.Key, in.APIURL)
 	if err != nil {

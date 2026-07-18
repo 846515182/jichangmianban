@@ -107,6 +107,13 @@ func (h *AdminUserHandler) UserUpdate(c *gin.Context) {
 // UserDelete 删除用户
 func (h *AdminUserHandler) UserDelete(c *gin.Context) {
 	id := c.Param("id")
+	// 安全修复(P1): 存在未完结订单时拒绝删除, 避免产生孤儿订单
+	if h.orderSvc != nil {
+		if has, err := h.orderSvc.HasActiveOrders(id); err == nil && has {
+			response.FailMsg(c, response.CodeServerError, "该用户存在未完结订单，请先处理订单后再删除")
+			return
+		}
+	}
 	if err := h.userService.DeleteUser(id); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			response.Fail(c, response.CodeNotFound)
