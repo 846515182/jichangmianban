@@ -1700,12 +1700,17 @@ func sshRun(client *ssh.Client, cmd string) (string, error) {
 		return "", err
 	}
 	defer session.Close()
-	var buf bytes.Buffer
-	session.Stdout = &buf
-	session.Stderr = &buf
+	// 重要: stdout/stderr 必须用独立 buffer, bytes.Buffer 不是并发安全的!
+	// Go SSH 库内部可能并发写 stdout/stderr, 共用同一 buffer 会导致 data race 使输出丢失或损坏
+	var outBuf, errBuf bytes.Buffer
+	session.Stdout = &outBuf
+	session.Stderr = &errBuf
 	// 兜底: 部分服务器 SSH 会话 PATH 为空, 导致 docker/curl/tar 等命令找不到
 	err = session.Run("export " + defaultPath + "; " + cmd)
-	return buf.String(), err
+	if err != nil && errBuf.Len() > 0 {
+		return outBuf.String(), fmt.Errorf("%w (stderr: %s)", err, errBuf.String())
+	}
+	return outBuf.String() + errBuf.String(), err
 }
 
 // sshWriteFile 通过 SSH 安全写入文件内容，避免命令注入风险
