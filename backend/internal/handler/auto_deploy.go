@@ -810,30 +810,26 @@ func preDeployCheck(client *ssh.Client, listenPort, healthPort int, sse *sseWrit
 		lines = append(lines, "[警告] 无法检测内存, 跳过此检查")
 		sse.event(PhaseEnvCheck, "warning", "无法检测内存信息, 跳过此检查", memOut)
 	} else {
-		if availMB := parseAvailMB(memOut); availMB >= 0 && availMB < 512 {
-			sse.event(PhaseEnvCheck, "warning", fmt.Sprintf("可用内存仅 %dMB, 低于 512MB 要求, 尝试自动创建 swap...", availMB), memOut)
-			// 内存不足, 先尝试自动创建 swap 分区 (需要磁盘 >=2G 可用)
+		if availMB := parseAvailMB(memOut); availMB >= 0 && availMB < 128 {
+			sse.event(PhaseEnvCheck, "warning", fmt.Sprintf("可用内存仅 %dMB, 低于 128MB 要求, 尝试自动创建 swap...", availMB), memOut)
+			// 内存严重不足, 尝试自动创建 swap 分区 (需要磁盘 >=1G 可用)
+			// 使用带时间戳的独立文件名, 避免多节点共享服务器冲突
 			diskForSwap, _ := sshRun(client, "df -BG / 2>/dev/null | tail -1 || df -h / 2>/dev/null | tail -1 || echo '0G'")
-			if availGB := parseAvailGB(diskForSwap); availGB >= 2 {
-				sse.event(PhaseEnvCheck, "running", fmt.Sprintf("磁盘可用 %dGB, 正在创建 2GB swap 分区 (fallocate→dd 自动回退)...", availGB), "")
-				// 兜底: swap 创建增加重试 (有时磁盘繁忙)
+			if availGB := parseAvailGB(diskForSwap); availGB >= 1 {
+				swapFile := fmt.Sprintf("/swapfile_np_%d", time.Now().UnixNano()%100000)
+				sse.event(PhaseEnvCheck, "running", fmt.Sprintf("磁盘可用 %dGB, 正在创建 1GB swap 分区 (%s)...", availGB, swapFile), "")
 				var swapCreated bool
 				var swapOut string
 				for swapRetry := 1; swapRetry <= 2; swapRetry++ {
 					if swapRetry > 1 {
 						sse.event(PhaseEnvCheck, "log", "", fmt.Sprintf("swap 创建第 %d 次重试...", swapRetry))
 						time.Sleep(2 * time.Second)
+						swapFile = fmt.Sprintf("/swapfile_np_%d", time.Now().UnixNano()%100000)
 					}
-					// 兜底: 先清理可能存在的旧 swapfile
-					sshRun(client, "swapoff /swapfile 2>/dev/null; rm -f /swapfile 2>/dev/null; true")
-					swapCmd := "(" +
-						"fallocate -l 2G /swapfile 2>/dev/null || " +
-						"dd if=/dev/zero of=/swapfile bs=1M count=2048 2>/dev/null" +
-						") && " +
-						"chmod 600 /swapfile && " +
-						"mkswap /swapfile && " +
-						"swapon /swapfile && " +
-						"echo 'SWAP_CREATED'"
+					swapCmd := fmt.Sprintf(
+						"(fallocate -l 1G %s 2>/dev/null || dd if=/dev/zero of=%s bs=1M count=1024 2>/dev/null) && chmod 600 %s && mkswap %s && swapon %s && echo 'SWAP_CREATED'",
+						swapFile, swapFile, swapFile, swapFile, swapFile,
+					)
 					swapOut, _ = sshRun(client, swapCmd)
 					if strings.Contains(swapOut, "SWAP_CREATED") {
 						swapCreated = true
@@ -842,42 +838,29 @@ func preDeployCheck(client *ssh.Client, listenPort, healthPort int, sse *sseWrit
 				}
 				lines = append(lines, swapOut)
 				if swapCreated {
-					sse.event(PhaseEnvCheck, "done", "swap 分区创建成功, 重新检测内存...", swapOut)
-					// 重新检测内存
+					sse.event(PhaseEnvCheck, "done", fmt.Sprintf("swap 创建成功 (%s), 重新检测内存...", swapFile), swapOut)
 					memOut2, _ := sshRun(client, "free -m 2>/dev/null | head -2 || cat /proc/meminfo 2>/dev/null | head -3")
 					lines = append(lines, memOut2)
-					if availMB2 := parseAvailMB(memOut2); availMB2 >= 512 {
-						sse.event(PhaseEnvCheck, "done", fmt.Sprintf("内存达标, swap 生效后可用 %dMB >= 512MB", availMB2), memOut2)
-						lines = append(lines, fmt.Sprintf("[通过] swap 生效, 可用内存 %dMB >= 512MB", availMB2))
+					availMB2 := parseAvailMB(memOut2)
+					if availMB2 >= 128 {
+						sse.event(PhaseEnvCheck, "done", fmt.Sprintf("内存达标, swap 生效后可用 %dMB >= 128MB", availMB2), memOut2)
+						lines = append(lines, fmt.Sprintf("[通过] swap 生效, 可用内存 %dMB >= 128MB", availMB2))
 					} else {
-						result.OK = false
-						result.Fatal = true
-						result.ErrCode = DeployErrMemoryLow
-						result.Reason = fmt.Sprintf("swap 已创建但仍不足, 可用内存仅 %dMB (需要 >=512MB)", availMB2)
-						result.FixSuggestion = "1) 升级服务器内存 (推荐 >=1GB)  2) 关闭其他占用内存的进程"
-						result.Output = strings.Join(lines, "\n")
-						return result
+						lines = append(lines, fmt.Sprintf("[警告] swap 生效后仍仅 %dMB, 但继续尝试部署", availMB2))
+						sse.event(PhaseEnvCheck, "warning", fmt.Sprintf("内存仍偏低(%dMB), 但继续部署", availMB2), memOut2)
 					}
 				} else {
-					lines = append(lines, "[失败] swap 创建失败(重试2次)")
-					result.OK = false
-					result.Fatal = true
-					result.ErrCode = DeployErrMemoryLow
-					result.Reason = fmt.Sprintf("可用内存仅 %dMB, swap 自动创建失败 (需要 >=512MB)", availMB)
-					result.FixSuggestion = "1) 升级服务器内存 (推荐 >=1GB)  2) 手动创建 swap 分区: fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile"
-					result.Output = strings.Join(lines, "\n")
-					return result
+					lines = append(lines, "[警告] swap 创建失败, 但继续尝试部署")
+					sse.event(PhaseEnvCheck, "warning", fmt.Sprintf("swap 创建失败, 当前可用内存 %dMB, 继续部署", availMB), swapOut)
 				}
 			} else {
-				// 磁盘也不够, 无法创建 swap
-				result.OK = false
-				result.Fatal = true
-				result.ErrCode = DeployErrMemoryLow
-				result.Reason = fmt.Sprintf("可用内存仅 %dMB, 磁盘空间也不足无法创建 swap (需要 >=512MB)", availMB)
-				result.FixSuggestion = "1) 升级服务器内存 (推荐 >=1GB)  2) 清理磁盘空间后重试, 面板将自动创建 swap"
-				result.Output = strings.Join(lines, "\n")
-				return result
+				lines = append(lines, fmt.Sprintf("[警告] 磁盘空间不足(%dGB), 无法创建 swap, 继续尝试部署", availGB))
+				sse.event(PhaseEnvCheck, "warning", fmt.Sprintf("内存仅 %dMB 且磁盘不足无法创建 swap, 继续部署", availMB), diskForSwap)
 			}
+		} else if availMB := parseAvailMB(memOut); availMB >= 128 && availMB < 256 {
+			// 128-256MB: 偏低但不阻断, 仅警告
+			sse.event(PhaseEnvCheck, "warning", fmt.Sprintf("可用内存偏低(%dMB), 但不影响部署", availMB), memOut)
+			lines = append(lines, fmt.Sprintf("[警告] 可用内存 %dMB 偏低, 但仍满足最低要求", availMB))
 		} else {
 			sse.event(PhaseEnvCheck, "log", fmt.Sprintf("内存充足 (可用 %dMB)", availMB), memOut)
 		}
