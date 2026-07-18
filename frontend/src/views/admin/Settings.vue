@@ -363,7 +363,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, computed } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, computed, nextTick } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import request from '@/utils/request'
 import { formatTime } from '@/utils/format'
@@ -812,6 +812,11 @@ const gitPull = async () => {
           const logRes: any = await request.get('/api/v1/admin/system/git-pull-log', { silent: true })
           const logData = logRes?.data || logRes
           if (logData.log) pullResult.value = logData.log
+          // 自动滚动到更新进度底部，不用手动拖滚动条
+          nextTick(() => {
+            const el = document.querySelector('.update-progress')
+            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'end' })
+          })
           if (logData.done) {
             pulling.value = false
             pullDone.value = true
@@ -992,7 +997,7 @@ onUnmounted(() => {
 .step-item.running .step-title { color: #409eff; font-weight: 500; }
 .step-item.error .step-title { color: #f56c6c; }
 .step-detail { margin: 4px 0 4px 16px; }
-.step-detail pre { margin: 0; font-size: 12px; color: var(--np-text-muted); white-space: pre-wrap; word-break: break-all; max-height: 120px; overflow-y: auto; background: var(--np-card); padding: 6px 8px; border-radius: 4px; }
+.step-detail pre { margin: 0; font-size: 12px; color: var(--np-text-muted); white-space: pre-wrap; word-break: break-all; background: var(--np-card); padding: 6px 8px; border-radius: 4px; }
 .raw-log { margin-top: 12px; }
 .raw-log summary { cursor: pointer; font-size: 12px; color: var(--np-text-muted); }
 .raw-log pre { margin: 8px 0 0; font-size: 12px; color: var(--np-text-muted); white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }
