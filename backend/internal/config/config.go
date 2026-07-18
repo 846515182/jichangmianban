@@ -1,10 +1,20 @@
 package config
 
 import (
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -139,6 +149,11 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("AES_MASTER_KEY 必须为 32 字节(使用 openssl rand -base64 32 生成)")
 	}
 
+	// 兜底: CA 私钥存在但 CA 证书缺失时, 自动从私钥生成自签名 CA 证书。
+	// 场景: 一键部署面板 gRPC TLS 需要将 CA 证书推送到节点 agent,
+	// 但 deployments/tls/ 只有 ca.key 没有 ca.crt 会导致部署崩溃。
+	ensureCACert(cfg)
+
 	return cfg, nil
 }
 
@@ -216,4 +231,104 @@ func getEnvDuration(key string, fallback time.Duration) time.Duration {
 		}
 	}
 	return fallback
+}
+
+// ensureCACert 若 GRPC_TLS_CA 指向的文件不存在但同目录下 ca.key 存在,
+// 则用 Go 标准库从 ca.key 自动生成自签名 CA 证书(不依赖 openssl)。
+// 解决面板部署节点时 os.ReadFile(ca.crt) 失败的崩溃问题。
+func ensureCACert(cfg *Config) {
+	if cfg.GRPCTLSCA == "" {
+		return
+	}
+	if _, err := os.Stat(cfg.GRPCTLSCA); err == nil {
+		return // ca.crt 已存在
+	}
+
+	// 推导 CA 私钥路径: ca.crt → ca.key (同目录)
+	ext := filepath.Ext(cfg.GRPCTLSCA)
+	caKey := cfg.GRPCTLSCA[:len(cfg.GRPCTLSCA)-len(ext)] + ".key"
+	keyData, err := os.ReadFile(caKey)
+	if err != nil {
+		return // 无 CA 私钥可生成, 不阻断启动(可能使用公信 CA)
+	}
+
+	privKey, err := parsePrivateKey(keyData)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[config] 解析 CA 私钥失败(%s): %v\n", caKey, err)
+		return
+	}
+
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[config] 生成 CA 序列号失败: %v\n", err)
+		return
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			CommonName: "Nexus-Panel-Root-CA",
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(3650 * 24 * time.Hour), // 10 年
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		MaxPathLen:            0,
+		MaxPathLenZero:        true,
+	}
+	if _, ok := privKey.(*ecdsa.PrivateKey); ok {
+		// ECDSA CA: 签名用证书私钥即可, 无需额外限制
+	}
+
+	certDER, err := x509.CreateCertificate(
+		rand.Reader, template, template,
+		publicKeyFor(privKey), privKey,
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[config] 生成 CA 证书失败: %v\n", err)
+		return
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	if err := os.WriteFile(cfg.GRPCTLSCA, certPEM, 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "[config] 写入 CA 证书失败(%s): %v\n", cfg.GRPCTLSCA, err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[config] 已自动生成 CA 证书: %s (RSA CA from %s)\n", cfg.GRPCTLSCA, caKey)
+}
+
+// parsePrivateKey 解析 PEM 编码的私钥, 支持 PKCS#1/PKCS#8/EC 格式
+func parsePrivateKey(der []byte) (crypto.PrivateKey, error) {
+	block, _ := pem.Decode(der)
+	if block == nil {
+		return nil, fmt.Errorf("不是有效的 PEM 数据")
+	}
+	// 尝试各种格式
+	if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+		return key, nil
+	}
+	if key, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+		return key, nil
+	}
+	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		return key, nil
+	}
+	return nil, fmt.Errorf("不支持的私钥格式")
+}
+
+// publicKeyFor 从私钥提取对应的公钥
+func publicKeyFor(priv crypto.PrivateKey) crypto.PublicKey {
+	switch k := priv.(type) {
+	case *rsa.PrivateKey:
+		return &k.PublicKey
+	case *ecdsa.PrivateKey:
+		return &k.PublicKey
+	case ed25519.PrivateKey:
+		return k.Public()
+	case *ed25519.PrivateKey:
+		return k.Public()
+	default:
+		return nil
+	}
 }
