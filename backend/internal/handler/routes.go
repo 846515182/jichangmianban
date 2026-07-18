@@ -130,7 +130,7 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 	auth := api.Group("/auth")
 	{
 		auth.POST("/login", middleware.LoginLockGuard(), middleware.RateLimit(middleware.RateScopeAdmin), authH.Login)
-		auth.POST("/register", middleware.RateLimit(middleware.RateScopeAdmin), authRegisterH.Register)
+		auth.POST("/register", middleware.RateLimit(middleware.RateScopeUser), authRegisterH.Register)
 		auth.POST("/refresh", middleware.RateLimit(middleware.RateScopeAdmin), authH.Refresh)
 		auth.POST("/logout", middleware.AnyAuth(), middleware.RateLimit(middleware.RateScopeUser), authH.Logout)
 		auth.POST("/change-password", middleware.AnyAuth(), middleware.RateLimit(middleware.RateScopeUser), authH.ChangePassword)
@@ -201,9 +201,6 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 	admin := api.Group("/admin")
 	admin.Use(middleware.RateLimit(middleware.RateScopeAdmin), middleware.AdminAuth())
 	{
-		admin.GET("/invite-codes", ListInviteCodes)
-		admin.POST("/invite-codes", middleware.AuditAction("invite_code.create"), CreateInviteCode)
-		admin.POST("/invite-codes/:id/disable", middleware.AuditAction("invite_code.disable"), DisableInviteCode)
 		admin.GET("/nodes", adminNodeH.NodeList)
 		admin.GET("/nodes/:id", adminNodeH.NodeDetail)
 		admin.POST("/nodes", middleware.AuditAction("node.create"), adminNodeH.NodeCreate)

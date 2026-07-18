@@ -76,12 +76,6 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '工单管理' },
       },
       {
-        path: 'invite-codes',
-        name: 'AdminInviteCodes',
-        component: () => import('@/views/admin/InviteCodes.vue'),
-        meta: { title: '邀请码' },
-      },
-      {
         path: 'announcements',
         name: 'AdminAnnouncements',
         component: () => import('@/views/admin/Announcements.vue'),

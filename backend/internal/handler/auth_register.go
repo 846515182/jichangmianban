@@ -16,7 +16,7 @@ import (
 	"nexus-panel/internal/service"
 )
 
-// AuthRegisterHandler 用户注册处理器(独立于 AuthHandler, 便于后续扩展邀请码等)
+// AuthRegisterHandler 用户注册处理器(独立于 AuthHandler, 便于后续扩展)
 type AuthRegisterHandler struct {
 	registerSvc *service.UserRegisterService
 }
@@ -28,10 +28,9 @@ func NewAuthRegisterHandler(r *service.UserRegisterService) *AuthRegisterHandler
 
 // registerRequest 注册请求
 type registerRequest struct {
-	Username   string `json:"username" binding:"required"`
-	Password   string `json:"password" binding:"required"`
-	Email      string `json:"email"`
-	InviteCode string `json:"invite_code"`
+	Username    string `json:"username" binding:"required"`
+	Password    string `json:"password" binding:"required"`
+	Email       string `json:"email"`
 	// [E-fix 2026-07-14] 图形验证码 (从 GetCaptcha 拉取, 后端校验)
 	CaptchaID  string `json:"captcha_id"`
 	CaptchaCode string `json:"captcha_code"`
@@ -40,7 +39,6 @@ type registerRequest struct {
 // Register [45] POST /api/v1/auth/register
 // 用户注册, 默认状态 active, traffic_limit=0(需购买套餐)
 // 限制: 同一 IP 每小时最多注册 3 个账号
-// 邀请码: 走数据库 invite_codes 表 (ConsumeInviteCode 事务内消费)
 func (h *AuthRegisterHandler) Register(c *gin.Context) {
 	var req registerRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -48,7 +46,7 @@ func (h *AuthRegisterHandler) Register(c *gin.Context) {
 		return
 	}
 
-	// [E-fix 2026-07-14] 图形验证码校验 (防脚本批量注册)
+	// [E-fix 2026-07-14] 图形���证码校验 (防脚本批量注册)
 	if !VerifyCaptcha(c, req.CaptchaID, req.CaptchaCode) {
 		response.FailMsg(c, response.CodeParamError, "图形验证码错误或已过期")
 		return
@@ -58,12 +56,6 @@ func (h *AuthRegisterHandler) Register(c *gin.Context) {
 	// 避免 uq_users_email_lower 唯一索引冲突; 用户后续可在修改邮箱流程中绑定真实邮箱
 	if strings.TrimSpace(req.Email) == "" {
 		req.Email = uuid.New().String() + "@placeholder.local"
-	}
-
-	inviteRequired := app.Get().Cfg.InviteCodeRequired // 从配置中心读取
-	if inviteRequired && req.InviteCode == "" {
-		response.FailMsg(c, response.CodeParamError, "注册需要有效的邀请码")
-		return
 	}
 
 	// IP 注册频率限制
@@ -83,7 +75,7 @@ func (h *AuthRegisterHandler) Register(c *gin.Context) {
 		}
 	}
 
-	// [S9 fix 2026-07-14] 事务内: 创建用户 + 消费邀请码 (任一失败回滚)
+	// 事务内创建用户
 	db := h.registerSvc.GetUserRepo().GetDB()
 	u, err := h.registerWithTx(c, db, &req, ip)
 	if err != nil {
@@ -91,25 +83,17 @@ func (h *AuthRegisterHandler) Register(c *gin.Context) {
 			response.Fail(c, response.CodeDuplicate)
 			return
 		}
-		if errors.Is(err, service.ErrInviteCodeInvalid) ||
-			errors.Is(err, service.ErrInviteCodeExhausted) ||
-			errors.Is(err, service.ErrInviteCodeExpired) {
-			response.FailMsg(c, response.CodeParamError, err.Error())
-			return
-		}
 		response.FailMsg(c, response.CodeServerError, err.Error())
 		return
 	}
 
+	// 精简响应: 只返回用户名, 不泄漏内部 id/占位邮箱/状态
 	response.OK(c, gin.H{
-		"id":       u.ID,
 		"username": u.Username,
-		"email":    u.Email,
-		"status":   u.Status,
 	})
 }
 
-// registerWithTx 在事务内完成用户创建 + 邀请码消费
+// registerWithTx 在事务内完成用户创建
 func (h *AuthRegisterHandler) registerWithTx(c *gin.Context, db *gorm.DB, req *registerRequest, ip string) (*service.RegisteredUser, error) {
 	tx := db.Begin()
 	if tx.Error != nil {
@@ -130,13 +114,6 @@ func (h *AuthRegisterHandler) registerWithTx(c *gin.Context, db *gorm.DB, req *r
 	})
 	if err != nil {
 		return nil, err
-	}
-
-	if req.InviteCode != "" {
-		ua := c.Request.UserAgent()
-		if _, err := ConsumeInviteCode(tx, req.InviteCode, u.ID, ip, ua); err != nil {
-			return nil, err
-		}
 	}
 
 	if err := tx.Commit().Error; err != nil {

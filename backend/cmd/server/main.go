@@ -474,6 +474,7 @@ func runSQLMigrations(db *gorm.DB, logger *zap.Logger) error {
 		{"2026_07_16_fix_missing_updated_at", "migrations/2026_07_16_fix_missing_updated_at.sql"},
 		{"2026_07_16_drop_node_level_add_coupon", "migrations/2026_07_16_drop_node_level_add_coupon.sql"},
 		{"2026_07_17_perf_indexes", "migrations/2026_07_17_perf_indexes.sql"},
+		{"2026_07_19_drop_invite_codes", "migrations/2026_07_19_drop_invite_codes.sql"},
 	}
 
 	for _, m := range migrations {

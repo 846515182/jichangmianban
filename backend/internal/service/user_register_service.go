@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"regexp"
 	"strings"
 	"time"
 
@@ -12,17 +13,16 @@ import (
 	"nexus-panel/internal/repo"
 )
 
+// bcrypt 计算成本 (与安全加固标准一致, cost=12)
+const bcryptCost = 12
+
+// username 合法字符: 字母/数字/下划线, 长度 3-20 (与前端校验一致, 后端不可信前端)
+var usernameRegex = regexp.MustCompile(`^[a-zA-Z0-9_]{3,20}$`)
+
 type UserRegisterService struct {
 	userRepo *repo.UserRepo
 	planRepo *repo.PlanRepo
 }
-
-// [S9 fix 2026-07-14] 邀请码相关错误哨兵
-var (
-	ErrInviteCodeInvalid  = errors.New("邀请码无效")
-	ErrInviteCodeExpired  = errors.New("邀请码已过期")
-	ErrInviteCodeExhausted = errors.New("邀请码已被使用完")
-)
 
 func NewUserRegisterService(u *repo.UserRepo, p *repo.PlanRepo) *UserRegisterService {
 	return &UserRegisterService{userRepo: u, planRepo: p}
@@ -33,12 +33,16 @@ type RegisterInput struct {
 	Password string `json:"password"`
 	Email    string `json:"email"`
 	// [S9 fix 2026-07-14] 可选事务 DB. 提供时在事务内创建用户, 否则走默认 DB.
-	DB       *gorm.DB `json:"-"`
+	DB *gorm.DB `json:"-"`
 }
 
 func (s *UserRegisterService) Register(in *RegisterInput) (*model.User, error) {
 	if in.Username == "" || in.Password == "" {
 		return nil, errors.New("用户名和密码不能为空")
+	}
+	// 后端必须重复校验用户名规则 (前端校验不可信)
+	if !usernameRegex.MatchString(in.Username) {
+		return nil, errors.New("用户名长度 3-20 个字符, 仅支持字母、数字和下划线")
 	}
 	if len(in.Password) < 8 {
 		return nil, errors.New("密码长度至少 8 位")
@@ -58,7 +62,7 @@ func (s *UserRegisterService) Register(in *RegisterInput) (*model.User, error) {
 	if existing, err := s.userRepo.GetByUsername(in.Username); err == nil && existing != nil {
 		return nil, ErrDuplicate
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(in.Password), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(in.Password), bcryptCost)
 	if err != nil {
 		return nil, err
 	}

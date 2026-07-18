@@ -133,7 +133,7 @@ const rules: FormRules = {
   ],
   password: [
     { required: true, message: '请输入密码', trigger: 'blur' },
-    { min: 6, max: 32, message: '密码长度 6-32 个字符', trigger: 'blur' },
+    { min: 8, max: 32, message: '密码长度 8-32 个字符', trigger: 'blur' },
   ],
   confirmPassword: [
     { required: true, message: '请再次输入密码', trigger: 'blur' },

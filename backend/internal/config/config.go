@@ -73,9 +73,6 @@ type Config struct {
 
 	TelegramBotToken string
 	TelegramChatID   string
-
-	// [S9 fix 2026-07-14] 注册是否强制要求邀请码 (默认 false, 由 INVITE_CODE_REQUIRED 控制)
-	InviteCodeRequired bool
 }
 
 func Load() (*Config, error) {
@@ -117,7 +114,6 @@ func Load() (*Config, error) {
 		SMTPFromName:    getEnv("SMTP_FROM_NAME", "Nexus-Panel"),
 		TelegramBotToken: getEnv("TELEGRAM_BOT_TOKEN", ""),
 		TelegramChatID:   getEnv("TELEGRAM_CHAT_ID", ""),
-		InviteCodeRequired: getEnvBool("INVITE_CODE_REQUIRED", false),
 	}
 
 	cfg.JWTAccessTTL = getEnvDuration("JWT_ACCESS_TTL", 24*time.Hour)
