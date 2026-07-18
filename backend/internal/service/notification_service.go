@@ -58,7 +58,6 @@ func (s *NotificationService) SendEmail(payload EmailPayload) error {
 		return nil
 	}
 	addr := fmt.Sprintf("%s:%d", s.cfg.SMTPHost, s.cfg.SMTPPort)
-	from := s.cfg.SMTPFrom
 	fromName := s.cfg.SMTPFromName
 	if fromName == "" {
 		fromName = "Nexus-Panel"
