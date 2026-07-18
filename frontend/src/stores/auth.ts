@@ -145,7 +145,8 @@ export const useAuthStore = defineStore('auth', {
 
     async refresh() {
       if (!this.refreshToken) throw new Error('no refresh token')
-      const res = await request.post('/api/v1/auth/refresh', { refresh_token: this.refreshToken })
+      // silent: true 避免重复错误提示 — 调用方（如 axios 401 拦截器、DeployProgress）自行处理失败逻辑
+      const res = await request.post('/api/v1/auth/refresh', { refresh_token: this.refreshToken }, { silent: true })
       this.token = res.data.access_token
       if (res.data.refresh_token) {
         this.refreshToken = res.data.refresh_token

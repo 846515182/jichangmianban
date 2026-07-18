@@ -36,8 +36,10 @@ service.interceptors.response.use(
     const res = response.data
     if (res && typeof res === 'object' && res.code !== undefined && res.code !== 0) {
       // 登录请求不弹全局错误，由调用方(loginAuto)处理，避免先弹"账号或密码错误"误导用户
+      // silent 标记的请求也不弹错误，由调用方自行处理
       const url = response.config?.url || ''
-      if (!url.includes('/auth/login')) {
+      const isSilent = (response.config as any)?.silent === true
+      if (!url.includes('/auth/login') && !isSilent) {
         ElMessage.error(res.msg || '请求失败')
       }
       return Promise.reject(new Error(res.msg || '请求失败'))

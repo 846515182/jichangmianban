@@ -209,20 +209,35 @@ const start = async () => {
   events.value = []
   activePhase.value = 'connect_server'
 
-  // 部署前先通过 request 工具校验 token 有效性，触发自动刷新
+  const auth = useAuthStore()
+
+  // 部署前主动刷新 token，确保凭证在有效期内（避免被动依赖 axios 401 拦截器）
+  let bearerToken = auth.token
   try {
-    await request.get('/api/v1/admin/nodes/' + props.nodeId)
+    if (auth.refreshToken) {
+      bearerToken = await auth.refresh()
+    }
   } catch {
-    // token 校验失败时不清除已选密码，让用户重新触发
+    // refresh 失败说明凭证已完全失效，需要用户重新登录
     running.value = false
     finished.value = true
-    events.value.push({ step: 'connect_server', status: 'error', msg: '登录状态已过期，请刷新页面重新登录', output: '' })
+    events.value.push({
+      step: 'connect_server',
+      status: 'error',
+      msg: '登录状态已过期，请关闭窗口后刷新页面重新登录',
+      output: ''
+    })
     return
   }
 
+  // 二次确认：用新 token 校验节点是否存在
+  try {
+    await request.get('/api/v1/admin/nodes/' + props.nodeId)
+  } catch {
+    // 非预期错误（如节点不存在、服务器错误），继续尝试部署，让 SSE 返回具体错误
+  }
+
   const url = `/api/v1/admin/nodes/${props.nodeId}/auto-deploy`
-  // 部署期间锁定 token，避免刷新后凭证变化
-  const bearerToken = useAuthStore().token
 
   try {
     const resp = await fetch(url, {
@@ -233,7 +248,13 @@ const start = async () => {
 
     if (!resp.ok && resp.status !== 200) {
       const txt = await resp.text()
-      events.value.push({ step: 'connect_server', status: 'error', msg: '请求失败: ' + resp.status + ' ' + txt, output: '' })
+      if (resp.status === 401) {
+        events.value.push({ step: 'connect_server', status: 'error', msg: '登录状态已过期，请关闭窗口后刷新页面重新登录', output: '' })
+      } else if (resp.status === 403) {
+        events.value.push({ step: 'connect_server', status: 'error', msg: '无权限执行部署操作（需要超级管理员权限）', output: '' })
+      } else {
+        events.value.push({ step: 'connect_server', status: 'error', msg: '请求失败: ' + resp.status + ' ' + txt, output: '' })
+      }
       running.value = false
       finished.value = true
       return
