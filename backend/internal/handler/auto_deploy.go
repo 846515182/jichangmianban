@@ -1183,7 +1183,19 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 		time.Sleep(3 * time.Second)
 		runOut, _ = sshRun(client, "timeout 10 docker info 2>&1 | head -3 || echo 'START_FAILED'")
 		if !strings.Contains(runOut, "Server Version") && !strings.Contains(runOut, "Containers") {
-			// 兜底: 再给一次机会, 等待更长时间
+			// 兜底: systemctl/service 对静态安装(阿里云/中科大镜像)无效,
+			// 尝试手动启动 dockerd
+			sse.event(PhasePrepare, "log", "", "systemctl 启动失败, 尝试手动启动 dockerd (静态安装)...")
+			sshRun(client, "nohup dockerd > /var/log/dockerd.log 2>&1 < /dev/null & sleep 3; true")
+			for i := 0; i < 10; i++ {
+				time.Sleep(2 * time.Second)
+				vOut, _ := sshRun(client, "timeout 5 docker info 2>&1 | head -3")
+				if strings.Contains(vOut, "Server Version") || strings.Contains(vOut, "Containers") {
+					sse.event(PhasePrepare, "done", "Docker 手动启动成功", vOut)
+					return true, "", ""
+				}
+			}
+			// 兜底: 手动启动也失败, 再给一次机会等待更长时间
 			sse.event(PhasePrepare, "log", "", "Docker 启动较慢, 再等 5 秒...")
 			time.Sleep(5 * time.Second)
 			runOut, _ = sshRun(client, "timeout 10 docker info 2>&1 | head -3 || echo 'START_FAILED'")
@@ -1253,7 +1265,7 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 			})
 			if strings.Contains(out2, "INSTALL_OK") {
 				// 手动启动 Docker daemon
-				sshRun(client, "nohup dockerd > /var/log/dockerd.log 2>&1 & sleep 3; true")
+				sshRun(client, "nohup dockerd > /var/log/dockerd.log 2>&1 < /dev/null & sleep 3; true")
 				sse.event(PhasePrepare, "done", "Docker 安装完成 (中科大镜像源)", "")
 				return true, "", ""
 			}
@@ -1266,7 +1278,7 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 	verifyOut, _ := sshRun(client, "docker info 2>&1 | head -3 || echo 'DAEMON_NOT_RUNNING'")
 	if strings.Contains(verifyOut, "DAEMON_NOT_RUNNING") || strings.Contains(verifyOut, "Cannot connect") {
 		// 静态安装方式需要手动启动 daemon
-		sshRun(client, "nohup dockerd > /var/log/dockerd.log 2>&1 & sleep 3; true")
+		sshRun(client, "nohup dockerd > /var/log/dockerd.log 2>&1 < /dev/null & sleep 3; true")
 		// 等待 dockerd 启动 (最多等 20 秒)
 		dockerStarted := false
 		for i := 0; i < 10; i++ {
