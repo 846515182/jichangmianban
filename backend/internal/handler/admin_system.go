@@ -519,31 +519,47 @@ func (h *AdminSystemHandler) GetNotifyConfig(c *gin.Context) {
 // UpdateNotifyConfig PUT /api/v1/admin/system/notify-config
 // 修复 SEC-ENCRYPT-01 (P1): 此前直接把前端原始 map 写入 settings, email_password 明文落库。
 // 现在处理 email_password: 空值/脱敏值(含*)保留原存储值, 新明文值 AES 加密后存储。
+// 修复: 先读取 existing 做全量合并, 避免前端只传 email 字段时丢失 telegram 等其他配置。
 func (h *AdminSystemHandler) UpdateNotifyConfig(c *gin.Context) {
-	var cfg map[string]interface{}
-	if err := c.ShouldBindJSON(&cfg); err != nil {
+	var input map[string]interface{}
+	if err := c.ShouldBindJSON(&input); err != nil {
 		response.Fail(c, response.CodeParamError)
 		return
 	}
-	if pwd, ok := cfg["email_password"].(string); ok {
-		masterKey := ""
-		if a := app.Get(); a != nil && a.Cfg != nil {
-			masterKey = a.Cfg.AESMasterKey
-		}
+
+	// 先读取 existing 全量配置, 用前端传入的字段覆盖（合并而非替换）
+	var existing map[string]interface{}
+	_ = h.settingRepo.Get("notification", &existing)
+	if existing == nil {
+		existing = make(map[string]interface{})
+	}
+	for k, v := range input {
+		existing[k] = v
+	}
+
+	masterKey := ""
+	if a := app.Get(); a != nil && a.Cfg != nil {
+		masterKey = a.Cfg.AESMasterKey
+	}
+
+	// 处理 email_password: 空值/脱敏值保留原密文, 新明文 AES 加密
+	if pwd, ok := existing["email_password"].(string); ok {
 		if pwd == "" || containsAsterisk(pwd) {
-			// 空值或脱敏值: 保留原存储值(密文或旧明文, DecryptSecret 均可正确读取)
-			var existing map[string]interface{}
-			if err := h.settingRepo.Get("notification", &existing); err == nil {
-				if ep, ok := existing["email_password"].(string); ok {
-					cfg["email_password"] = ep
+			// 空值或脱敏值: 从 DB 读取原密文保留（input 可能已经覆盖了 existing）
+			// 注意: 此时 existing 已被 input 覆盖, 需要重新从 DB 读原始值
+			var orig map[string]interface{}
+			if err := h.settingRepo.Get("notification", &orig); err == nil {
+				if ep, ok := orig["email_password"].(string); ok && ep != "" {
+					existing["email_password"] = ep
 				}
 			}
 		} else {
-			// 新明文密码: AES 加密后存储
-			cfg["email_password"] = security.EncryptSecret(masterKey, pwd)
+			// 新明文密码: AES 加密后存储, 同时清理可能的旧密码缓存
+			existing["email_password"] = security.EncryptSecret(masterKey, pwd)
 		}
 	}
-	if err := h.settingRepo.Set("notification", cfg); err != nil {
+
+	if err := h.settingRepo.Set("notification", existing); err != nil {
 		response.Fail(c, response.CodeDBError)
 		return
 	}

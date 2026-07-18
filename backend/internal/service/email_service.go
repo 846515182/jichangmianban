@@ -80,6 +80,7 @@ func (s *EmailService) effectiveConfig() (*EmailConfig, error) {
 }
 
 // mergeConfig 纯函数: 数据库配置优先, 缺失/未启用时回退环境变量配置 (便于单测)。
+// 修复: 加日志区分密码来源, 方便排查"发送失败是否因旧密码"问题。
 func mergeConfig(dbCfg *EmailConfig, cfg *config.Config) *EmailConfig {
 	if dbCfg != nil && dbCfg.Enabled && dbCfg.Host != "" && dbCfg.User != "" && dbCfg.Password != "" {
 		// 防御性兜底: 若 DB 中 EmailPort 为 0 (老数据或 UI 未填), 默认 587
@@ -87,6 +88,7 @@ func mergeConfig(dbCfg *EmailConfig, cfg *config.Config) *EmailConfig {
 		if dbCfg.Port == 0 {
 			dbCfg.Port = 587
 		}
+		log.Printf("[email] 使用数据库邮件配置 host=%s user=%s", dbCfg.Host, dbCfg.User)
 		return dbCfg
 	}
 	if cfg != nil && cfg.SMTPEnabled() {
@@ -94,6 +96,7 @@ func mergeConfig(dbCfg *EmailConfig, cfg *config.Config) *EmailConfig {
 		if port == 0 {
 			port = 587
 		}
+		log.Printf("[email] 数据库邮件配置不完整, 回退到环境变量 SMTP_* host=%s user=%s", cfg.SMTPHost, cfg.SMTPUser)
 		return &EmailConfig{
 			Enabled:  true,
 			Host:     cfg.SMTPHost,
@@ -103,11 +106,13 @@ func mergeConfig(dbCfg *EmailConfig, cfg *config.Config) *EmailConfig {
 			From:     cfg.SMTPFrom,
 		}
 	}
+	log.Printf("[email] 数据库和环境变量均无完整邮件配置")
 	return dbCfg
 }
 
 // SaveConfig 保存邮件配置
 // 修复 SEC-ENCRYPT-01 (P1): email_password 入库前 AES 加密, 防止数据库拖库后 SMTP 凭据泄露。
+// 修复: 空密码不覆盖已有密码（避免管理员在 UI 中未填写密码时意外清空）。
 func (s *EmailService) SaveConfig(cfg *EmailConfig) error {
 	var existing notifyConfig
 	_ = s.settingRepo.Get("notification", &existing)
@@ -119,7 +124,10 @@ func (s *EmailService) SaveConfig(cfg *EmailConfig) error {
 	if s.cfg != nil {
 		masterKey = s.cfg.AESMasterKey
 	}
-	existing.EmailPassword = security.EncryptSecret(masterKey, cfg.Password)
+	// 只有传入非空密码时才加密覆盖; 空密码保留已有密文
+	if cfg.Password != "" {
+		existing.EmailPassword = security.EncryptSecret(masterKey, cfg.Password)
+	}
 	existing.EmailFrom = cfg.From
 	return s.settingRepo.Set("notification", existing)
 }
