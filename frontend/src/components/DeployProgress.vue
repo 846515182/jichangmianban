@@ -23,7 +23,7 @@
 
         <!-- 密码模式 -->
         <div v-if="authMode === 'password'" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-          <el-input v-model="password" type="password" show-password placeholder="节点服务器密码" style="width:260px" @keyup.enter="start" />
+          <el-input v-model="password" type="password" show-password placeholder="节点服务器密码" style="width:260px" @keyup.enter="start" autocomplete="new-password" name="deploy-pwd" />
           <span style="font-size:12px;color:#909399">输入 root 或其他 sudo 用户的密码</span>
         </div>
 

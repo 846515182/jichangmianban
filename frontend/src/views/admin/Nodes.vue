@@ -248,7 +248,7 @@
         </el-form-item>
         <el-divider content-position="left">一键自动部署（可选）</el-divider>
         <el-form-item label="SSH 密码">
-          <el-input v-model="form.sshPassword" type="password" show-password placeholder="留空则不自动部署，后续可点「部署」按钮" />
+          <el-input v-model="form.sshPassword" type="password" show-password placeholder="留空则不自动部署，后续可点「部署」按钮" autocomplete="new-password" name="ssh-deploy-pwd" />
           <div style="font-size:12px;color:#909399">填写后，创建节点将自动 SSH 推送文件并启动 node-agent</div>
         </el-form-item>
         <el-form-item label="SSH 端口">

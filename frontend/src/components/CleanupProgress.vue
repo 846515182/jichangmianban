@@ -9,7 +9,7 @@
           </template>
         </el-alert>
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-          <el-input v-model="password" type="password" show-password placeholder="节点服务器 root 密码" style="width:200px" @keyup.enter="start" />
+          <el-input v-model="password" type="password" show-password placeholder="节点服务器 root 密码" style="width:200px" @keyup.enter="start" autocomplete="new-password" name="cleanup-pwd" />
           <el-input v-model="username" placeholder="用户" style="width:90px" />
           <el-input-number v-model="port" :min="1" :max="65535" controls-position="right" style="width:110px" />
           <el-checkbox v-model="removeImg">同时删镜像</el-checkbox>
