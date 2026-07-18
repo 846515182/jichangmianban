@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -305,4 +306,54 @@ func (h *AdminNodeHandler) RotateToken(c *gin.Context) {
 		return
 	}
 	response.OK(c, gin.H{"node_token": tok})
+}
+
+// PingNode POST /api/v1/admin/nodes/:id/ping
+// 主动 TCP 探测节点 gRPC 端口，验证节点是否真实在线。
+// 解决节点服务器重装后 node_agent 不再运行，但面板依赖 8 分钟心跳超时
+// 才标记离线的问题——管理员可手动点击"检测连接"立即确认。
+func (h *AdminNodeHandler) PingNode(c *gin.Context) {
+	id := c.Param("id")
+	node, err := h.nodeRepo.GetByID(id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			response.Fail(c, response.CodeNotFound)
+			return
+		}
+		response.Fail(c, response.CodeDBError)
+		return
+	}
+
+	addr := fmt.Sprintf("%s:%d", node.ServerAddress, node.GrpcPort)
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		// TCP 连接失败 → 节点确实不在线，立即标记离线
+		now := time.Now()
+		_ = h.nodeRepo.MarkOffline(node.ID)
+		response.OK(c, gin.H{
+			"reachable": false,
+			"error":     err.Error(),
+			"action":    "marked_offline",
+			"checked_at": now,
+		})
+		return
+	}
+	conn.Close()
+
+	// TCP 连接成功 → 节点 gRPC 端口可达，刷新 last_seen_at + online=true
+	now := time.Now()
+	_ = h.nodeRepo.UpdateOnline(node.ID, true, node.Version, now)
+
+	// 同步清除 Redis configver/usershash 缓存，让节点下次心跳时重新拉取配置
+	if rdb := app.Get().RDB; rdb != nil {
+		ctx := context.Background()
+		rdb.Del(ctx, fmt.Sprintf("node:configver:%s", node.ID))
+		rdb.Del(ctx, fmt.Sprintf("node:usershash:%s", node.ID))
+	}
+
+	response.OK(c, gin.H{
+		"reachable":  true,
+		"action":     "refreshed_online",
+		"checked_at": now,
+	})
 }

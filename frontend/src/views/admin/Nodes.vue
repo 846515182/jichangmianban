@@ -121,13 +121,16 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="280" fixed="right">
+        <el-table-column label="操作" width="340" fixed="right">
           <template #default="scope">
             <el-button size="small" link type="warning" @click="startAutoDeploy(scope.row as NodeRow)">一键部署</el-button>
             <el-button size="small" link type="success" @click="showDeployInfo(scope.row as NodeRow)">部署信息</el-button>
             <el-button size="small" link @click="rotateToken(scope.row as NodeRow)">轮换Token</el-button>
             <el-button size="small" link type="primary" @click="openDialog(scope.row as NodeRow)">编辑</el-button>
             <el-button size="small" link type="danger" @click="handleDelete(scope.row as NodeRow)">删除</el-button>
+            <el-button size="small" link :loading="pingLoading.get(scope.row.id)||false" @click="pingNode(scope.row as NodeRow)" :title="scope.row.online?'重新确认连接':'检测是否恢复'">
+              <el-icon style="margin-right:2px"><Connection /></el-icon>检测
+            </el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -193,6 +196,7 @@
             <el-button size="small" plain @click="rotateToken(row)">轮换Token</el-button>
             <el-button size="small" type="primary" plain @click="openDialog(row)">编辑</el-button>
             <el-button size="small" type="danger" plain @click="handleDelete(row)">删除</el-button>
+            <el-button size="small" plain :loading="pingLoading.get(row.id)||false" @click="pingNode(row)" :title="row.online?'重新确认连接':'检测是否恢复'">检测</el-button>
           </div>
         </div>
         <el-empty v-if="!loading && !filteredList.length" description="暂无节点" />
@@ -394,7 +398,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted, h, defineComponent } from 'vue'
 import { ElMessage, ElMessageBox, ElIcon, type FormInstance, type FormRules } from 'element-plus'
-import { Search, Plus, CopyDocument } from '@element-plus/icons-vue'
+import { Search, Plus, CopyDocument, Connection } from '@element-plus/icons-vue'
 import WebTerminal from '@/components/WebTerminal.vue'
 import DeployProgress from '@/components/DeployProgress.vue'
 import CleanupProgress from '@/components/CleanupProgress.vue'
@@ -943,6 +947,28 @@ const fetchList = async () => {
     // 错误由拦截器处理
   } finally {
     loading.value = false
+  }
+}
+
+// 主动检测节点连接: TCP 探测节点 gRPC 端口，立即确认在线状态
+const pingLoading = ref<Map<string, boolean>>(new Map())
+const pingNode = async (row: NodeRow) => {
+  pingLoading.value.set(row.id, true)
+  try {
+    const res = await request.post<ApiResponse<{ reachable: boolean; error?: string; action: string; checked_at: string }>>(`/api/v1/admin/nodes/${row.id}/ping`)
+    if (res && res.code === 0 && res.data) {
+      if (res.data.reachable) {
+        ElMessage.success(`${row.name} 连接正常，在线状态已刷新`)
+      } else {
+        ElMessage.warning(`${row.name} 无法连接 (${res.data.error || '未知错误'})，已标记为离线`)
+      }
+      // 刷新列表以更新 online 状态
+      await fetchList()
+    }
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.msg || '检测失败')
+  } finally {
+    pingLoading.value.set(row.id, false)
   }
 }
 

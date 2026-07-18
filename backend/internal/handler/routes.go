@@ -218,6 +218,8 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 		admin.PUT("/nodes/:id", middleware.AuditAction("node.update"), adminNodeH.NodeUpdate)
 		admin.DELETE("/nodes/:id", middleware.AuditAction("node.delete"), adminNodeH.NodeDelete)
 		admin.POST("/nodes/:id/rotate-token", middleware.RBAC(middleware.PermKeyManage), middleware.AuditAction("node.rotate_token"), adminNodeH.RotateToken)
+		// 主动 TCP 探测节点 gRPC 端口，立即确认在线状态(解决服务器重装后等 8 分钟才变离线的问题)
+		admin.POST("/nodes/:id/ping", adminNodeH.PingNode)
 		// 一键部署涉及远程 root 权限, 仅 super_admin 可用
 		admin.POST("/nodes/:id/auto-deploy", middleware.RBAC(middleware.PermNodeManage), middleware.AuditAction("node.auto_deploy"), NewAutoDeployHandler(deps.NodeRepo, deps.JWTMgr).Deploy)
 		// 节点清理并删除: SSE 流式, SSH 到节点服务器清理容器/目录/镜像 + DB 删除
