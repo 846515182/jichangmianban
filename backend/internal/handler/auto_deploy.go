@@ -783,7 +783,8 @@ func preDeployCheck(client *ssh.Client, listenPort, healthPort int, sse *sseWrit
 		lines = append(lines, "[警告] df 命令不可用, 跳过磁盘空间检测")
 		sse.event(PhaseEnvCheck, "warning", "无法检测磁盘空间(df 命令不可用), 跳过此检查", diskOut)
 	} else {
-		if availGB := parseAvailGB(diskOut); availGB >= 0 && availGB < 1 {
+		availGB := parseAvailGB(diskOut)
+		if availGB >= 0 && availGB < 1 {
 			result.OK = false
 			result.Fatal = true
 			result.ErrCode = DeployErrDiskFull
