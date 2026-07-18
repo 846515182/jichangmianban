@@ -63,7 +63,8 @@ func readNetDevTotal() (rx, tx int64) {
 	return rx, tx
 }
 
-// Delta 返回自上次调用以来的上传(tx 增量)和下载(rx 增量)字节数
+// Delta 返回自上次调用以来的上传(rx 增量)和下载(tx 增量)字节数
+// 从服务器视角: rx=网卡接收=用户上传, tx=网卡发送=用户下载
 // 首次调用返回 0,0 并记录基线
 func (t *TrafficCounter) Delta() (upload, download int64) {
 	rx, tx := readNetDevTotal()
@@ -75,8 +76,8 @@ func (t *TrafficCounter) Delta() (upload, download int64) {
 		t.hasPrev = true
 		return 0, 0
 	}
-	upload = tx - t.prevTx
-	download = rx - t.prevRx
+	upload = rx - t.prevRx   // rx = 服务器接收 = 用户上传
+	download = tx - t.prevTx // tx = 服务器发送 = 用户下载
 	if upload < 0 {
 		upload = 0
 	}
@@ -85,8 +86,8 @@ func (t *TrafficCounter) Delta() (upload, download int64) {
 	}
 	t.prevRx = rx
 	t.prevTx = tx
-	t.totalRx += download
-	t.totalTx += upload
+	t.totalRx += upload
+	t.totalTx += download
 	return upload, download
 }
 
