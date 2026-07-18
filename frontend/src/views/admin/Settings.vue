@@ -290,27 +290,11 @@
                   <el-icon><Refresh /></el-icon><span>刷新状态</span>
                 </el-button>
               </div>
-              <div v-if="pullResult" class="update-progress">
-                <div class="progress-header" :class="pullDone ? (pullSuccess ? 'is-success' : 'is-error') : 'is-pending'">
-                  <span class="status-dot" :class="{ spinning: !pullDone }"></span>
-                  <span class="header-text">{{ pullDone ? (pullSuccess ? '更新成功' : '更新失败') : '更新中...' }}</span>
-                  <span v-if="restartingPanel" class="restart-hint">正在重启，稍后自动恢复...</span>
+              <div v-if="pullResult" class="cmd-output">
+                <div class="output-title" :class="pullDone ? (pullSuccess ? 'text-success' : 'text-danger') : 'text-pending'">
+                  {{ pullDone ? (pullSuccess ? '更新成功 — 请点击「重启面板」使更新生效' : '更新失败') : '更新中...' }}
                 </div>
-                <div class="step-list">
-                  <div v-for="(step, idx) in pullSteps" :key="idx" class="step-item" :class="step.status">
-                    <div class="step-head">
-                      <span class="step-dot" :class="step.status"></span>
-                      <span class="step-title">{{ step.title }}</span>
-                    </div>
-                    <div v-if="step.detail && (step.status === 'running' || step.status === 'error')" class="step-detail">
-                      <pre>{{ step.detail }}</pre>
-                    </div>
-                  </div>
-                </div>
-                <details v-if="pullResult" class="raw-log">
-                  <summary>查看完整日志</summary>
-                  <pre>{{ pullResult }}</pre>
-                </details>
+                <pre class="pull-log">{{ pullResult }}</pre>
               </div>
             </div>
           </el-col>
@@ -363,7 +347,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, computed, nextTick } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, nextTick } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import request from '@/utils/request'
 import { formatTime } from '@/utils/format'
@@ -668,92 +652,9 @@ const restarting = ref(false)
 const pullResult = ref('')
 const pullSuccess = ref(false)
 const pullDone = ref(false)
-const restartingPanel = ref(false)
 let pollTimer: any = null
 
-// 解析更新日志的 >>> N/M 步骤标记, 按步骤一条条展示
-const pullSteps = computed(() => {
-  if (!pullResult.value) return []
-  const lines = pullResult.value.split('\n')
-  const steps: Array<{ title: string; detail: string; status: string }> = []
-  let current: { title: string; detail: string; status: string } | null = null
-  for (const line of lines) {
-    const m1 = line.match(/^>>>\s*\d+\/\d+\s+(.+)/)
-    const m2 = line.match(/^>>>\s+(.+)/)
-    if (m1 || m2) {
-      const title = m1 ? m1[1] : (m2 as RegExpMatchArray)[1]
-      if (current) steps.push(current)
-      current = { title, detail: '', status: 'pending' }
-    } else if (current) {
-      if (line.trim()) current.detail += line + '\n'
-    }
-  }
-  if (current) steps.push(current)
-  // 最后一步之前的都已完成, 最后一步根据 pullDone 判断
-  for (let i = 0; i < steps.length; i++) {
-    if (i < steps.length - 1) {
-      steps[i].status = 'done'
-    } else if (pullDone.value) {
-      steps[i].status = pullSuccess.value ? 'done' : 'error'
-    } else {
-      steps[i].status = 'running'
-    }
-  }
-  return steps
-})
 
-// 轮询面板健康, 恢复后自动刷新页面(用于更新/重启后面板短暂不可用的场景)
-// 修复 UI-RELOAD-01 (P1): 旧版用"先等断开再等恢复"两阶段, 但后端 syscall.Exec
-// 原地重启的 HTTP 断开窗口可能 <2s, 前端 2s 轮询容易错过断开瞬间, 导致永远
-// 卡在"等待断开"阶段不刷新(用户看到"更新中"一直转)。
-// 新方案: 记录调用前的 boot_time, 轮询 /healthz 对比 boot_time 是否变化,
-// 变化 = 新进程已起来 = 重启完成, 直接刷新。同时保留"请求失败"作为断开信号。
-const waitForPanelAndReload = () => {
-  const oldBootTime = currentBootTime.value // 调用前缓存的面板启动时间
-  let attempts = 0
-  let sawDisconnect = false // 是否观察到过面板断开(用于区分"还没重启"和"已快速重启完")
-  const check = setInterval(async () => {
-    attempts++
-    try {
-      // silent: 面板重启期间 /healthz 必然失败, 这是预期行为(用来判断面板
-      // 是否断开过), 不应弹错误弹窗。
-      const res: any = await request.get('/healthz', { timeout: 3000, silent: true })
-      const newBootTime = res?.data?.boot_time || res?.boot_time
-      // boot_time 变化 = 新进程已起来, 重启完成
-      if (newBootTime && oldBootTime && newBootTime !== oldBootTime) {
-        clearInterval(check)
-        ElMessage.success('面板已恢复，刷新中...')
-        setTimeout(() => location.reload(), 500)
-        return
-      }
-      // boot_time 没变但曾断开过 → 面板已恢复(只是 boot_time 没更新, 兼容旧版)
-      if (sawDisconnect) {
-        clearInterval(check)
-        ElMessage.success('面板已恢复，刷新中...')
-        setTimeout(() => location.reload(), 500)
-        return
-      }
-      // boot_time 没变也没断开过 → 面板可能还没开始重启, 继续等
-      // 但如果 oldBootTime 为空(页面加载时获取失败), 直接靠 sawDisconnect 判断
-      if (!oldBootTime && attempts > 3) {
-        // 没有基线 boot_time, 等 3 次后若面板一直活着, 视为已恢复
-        clearInterval(check)
-        ElMessage.success('面板已恢复，刷新中...')
-        setTimeout(() => location.reload(), 500)
-      }
-    } catch {
-      // 请求失败 = 面板正在重启(断开中), 标记已观察到断开
-      sawDisconnect = true
-    }
-    // 超时: 90 秒(45 次 × 2s), 覆盖 docker 重建等慢场景
-    if (attempts > 45) {
-      clearInterval(check)
-      ElMessage.warning('面板恢复超时，请手动刷新')
-      restartingPanel.value = false
-      restarting.value = false
-    }
-  }, 2000)
-}
 const gitStatus = reactive({
   branch: '',
   recent5: '',
@@ -822,14 +723,10 @@ const gitPull = async () => {
             pullDone.value = true
             pullSuccess.value = logData.success !== false
             if (pullSuccess.value) {
-              ElMessage.success('更新完成，面板重启中...')
-              restartingPanel.value = true
-              waitForPanelAndReload()
+              ElMessage.success('代码更新完成，请点击「重启面板」使更新生效')
             } else {
               ElMessage.error('更新过程中出现错误，请查看日志')
             }
-            // silent: 更新完成后面板会重启, 此时调 git-status 大概率失败,
-            // 不弹错误弹窗(页面马上会因 waitForPanelAndReload 而刷新)
             loadGitStatusSilent()
             if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
           }
@@ -852,20 +749,17 @@ const systemRestart = async () => {
     type: 'warning', confirmButtonText: '确认重启', cancelButtonText: '取消',
   }).then(async () => {
     restarting.value = true
-    restartingPanel.value = true
     try {
-      // silent: restart 接口可能因面板立即重启(symlink.Exec)而断开连接,
-      // 这是预期行为不是错误, 不弹错误弹窗。
       await request.post('/api/v1/admin/system/restart', {}, { silent: true })
       ElMessage.success('重启指令已下发，面板重启中...')
     } catch {
-      // 请求失败大概率是面板已经开始重启(连接被切断), 不是真正的错误。
-      // 不清状态, 继续走 waitForPanelAndReload 轮询面板恢复。
+      // 请求失败大概率是面板已经开始重启(连接被切断)
     }
-    // 无论 restart 请求成功还是失败(连接被切断), 都开始轮询面板恢复。
-    // 注意: 不在 finally 里清 restarting, 保持按钮 loading 直到面板恢复
-    // (面板恢复后 waitForPanelAndReload 会刷新页面, loading 自然消失)
-    waitForPanelAndReload()
+    // 面板重启后需要手动刷新
+    setTimeout(() => {
+      restarting.value = false
+      ElMessage.info('面板可能已恢复，请手动刷新页面')
+    }, 5000)
   }).catch(() => {})
 }
 
@@ -912,15 +806,6 @@ const diskCleanup = async () => {
   }).catch(() => {})
 }
 
-// 修复 UI-RELOAD-01 (P1): 缓存当前面板启动时间, 用于一键更新/重启后判断面板是否已重启
-const currentBootTime = ref<number | string>('')
-const loadBootTime = async () => {
-  try {
-    // silent: 面板不可用时静默, 避免页面加载就弹错误弹窗
-    const res: any = await request.get('/healthz', { timeout: 3000, silent: true })
-    currentBootTime.value = res?.data?.boot_time || res?.boot_time || ''
-  } catch { /* 面板不可用时忽略 */ }
-}
 
 onMounted(() => {
   loadPaymentConfig()
@@ -928,7 +813,6 @@ onMounted(() => {
   loadBackups()
   loadGitStatus()
   loadDiskUsage()
-  loadBootTime()
 })
 
 // 修复 UI-POLL-02 (P1): 离开页面时清理 git-pull 日志轮询定时器,
@@ -971,34 +855,12 @@ onUnmounted(() => {
 .cmd-output .output-title.text-pending { color: var(--np-text-muted); }
 .cmd-output pre { margin: 0; font-size: 12px; color: var(--np-text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }
 
-/* 更新进度步骤列表 */
-.update-progress { margin-top: 12px; background: var(--np-bg-soft); border-radius: 8px; padding: 12px; }
-.progress-header { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; margin-bottom: 12px; flex-wrap: wrap; }
-.progress-header.is-success { color: #67c23a; }
-.progress-header.is-error { color: #f56c6c; }
-.progress-header.is-pending { color: var(--np-text-muted); }
-.status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
-.is-pending .status-dot { background: var(--np-text-muted); opacity: 0.4; }
-.is-success .status-dot { background: #67c23a; }
-.is-error .status-dot { background: #f56c6c; }
-.status-dot.spinning { background: #409eff; animation: np-spin 1s linear infinite; }
-@keyframes np-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-.restart-hint { font-size: 12px; color: var(--np-text-muted); font-weight: normal; word-break: break-all; }
-.step-list { display: flex; flex-direction: column; gap: 6px; }
-.step-item { padding: 2px 0; }
-.step-head { display: flex; align-items: center; gap: 8px; font-size: 13px; }
-.step-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
-.step-dot.pending { background: var(--np-text-muted); opacity: 0.4; }
-.step-dot.done { background: #67c23a; }
-.step-dot.error { background: #f56c6c; }
-.step-dot.running { background: #409eff; animation: np-spin 1s linear infinite; }
-.step-title { color: var(--np-text); }
-.step-item.done .step-title { color: var(--np-text-secondary); }
-.step-item.running .step-title { color: #409eff; font-weight: 500; }
-.step-item.error .step-title { color: #f56c6c; }
-.step-detail { margin: 4px 0 4px 16px; }
-.step-detail pre { margin: 0; font-size: 12px; color: var(--np-text-muted); white-space: pre-wrap; word-break: break-all; background: var(--np-card); padding: 6px 8px; border-radius: 4px; }
-.raw-log { margin-top: 12px; }
-.raw-log summary { cursor: pointer; font-size: 12px; color: var(--np-text-muted); }
-.raw-log pre { margin: 8px 0 0; font-size: 12px; color: var(--np-text-muted); white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }
+
+/* 在线更新日志 — 终端风格固定高度日志框, 对齐磁盘管理 */
+.pull-log {
+  margin: 0; font-size: 12px; color: var(--np-text-secondary); white-space: pre-wrap;
+  word-break: break-all; max-height: 300px; overflow-y: auto;
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+}
+
 </style>

@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -1026,14 +1025,10 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		_ = execCommandLog(gitRoot, "docker", "image", "prune", "-f")
 		_ = execCommandLog(gitRoot, "docker", "builder", "prune", "-f")
 
-		logWrite("在线更新完成！面板将在3秒后自动重启生效（页面会短暂不可用）")
+		logWrite("在线更新完成！请通过面板「重启面板」按钮手动重启以生效。")
 		setPullDone(true)
-
-		// 延迟重启面板自身（sleep 后 exec 替换当前进程）
-		time.Sleep(3 * time.Second)
-		logWrite("正在重启面板...")
-		syscall.Exec("/app/nexus-panel", os.Args, os.Environ())
 	}()
+
 
 	response.OK(c, gin.H{"success": true, "msg": "更新已开始，请在日志面板查看实时进度"})
 }
