@@ -3,6 +3,7 @@ package service
 import (
 	"crypto/tls"
 	"fmt"
+	"log"
 	"net"
 	"net/smtp"
 	"strings"
@@ -161,12 +162,33 @@ func (s *EmailService) SendMail(to []string, subject, body string) error {
 		return err
 	}
 
-	msg := []byte(fmt.Sprintf("From: Nexus-Panel <%s>\r\nTo: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s",
-		from, strings.Join(to, ","), subject, body))
+	// RFC 2047: 中文主题必须 base64 编码, 否则部分邮箱服务器拒收/进垃圾箱
+	msg := buildMessage(from, to, subject, body)
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	auth := smtp.PlainAuth("", cfg.User, cfg.Password, cfg.Host)
-	return sendMailWithTLS(addr, auth, from, to, msg)
+	if err := sendMailWithTLS(addr, auth, from, to, msg); err != nil {
+		return err
+	}
+	log.Printf("[email] 发送成功 to=%v subject=%s", to, subject)
+	return nil
+}
+
+// buildMessage 构建符合 RFC 2047/MIME 标准的邮件内容
+// 注: b64enc 复用了同包 notification_service.go 中的 base64 编码函数
+func buildMessage(from string, to []string, subject, body string) []byte {
+	encodedSubject := b64enc(subject)
+	return []byte(fmt.Sprintf(
+		"From: Nexus-Panel <%s>\r\n"+
+			"To: %s\r\n"+
+			"Subject: =?UTF-8?B?%s?=\r\n"+
+			"MIME-Version: 1.0\r\n"+
+			"Content-Type: text/plain; charset=UTF-8\r\n"+
+			"Content-Transfer-Encoding: quoted-printable\r\n"+
+			"\r\n"+
+			"%s",
+		from, strings.Join(to, ","), encodedSubject, body,
+	))
 }
 
 // TestConfig 测试邮件配置
@@ -186,14 +208,18 @@ func (s *EmailService) TestConfig(cfg *EmailConfig) error {
 	body := fmt.Sprintf("这是一封测试邮件，如果您收到此邮件，说明邮件配置正确。\n\n配置信息：\n- SMTP 服务器: %s\n- 端口: %d\n- 发件人: %s",
 		cfg.Host, cfg.Port, from)
 
-	msg := []byte(fmt.Sprintf("From: Nexus-Panel <%s>\r\nTo: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s",
-		from, from, subject, body))
+	// 修复: 使用 buildMessage 构建符合 RFC 2047 标准的邮件内容
+	msg := buildMessage(from, []string{from}, subject, body)
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	auth := smtp.PlainAuth("", cfg.User, cfg.Password, cfg.Host)
 
 	// 收件人 = from (发件人自己), 确保 cfg.From 是一个能收信的真实邮箱
-	return sendMailWithTLS(addr, auth, from, []string{from}, msg)
+	if err := sendMailWithTLS(addr, auth, from, []string{from}, msg); err != nil {
+		return err
+	}
+	log.Printf("[email] 测试邮件发送成功 to=%s", from)
+	return nil
 }
 
 // sendMailWithTLS 发送邮件:

@@ -179,12 +179,16 @@ func ForgotPassword(c *gin.Context) {
 		// 修复 EMAIL-FORGOT-01 (P0): 旧版只把 token 写进 Redis 后直接返回,
 		// 从未调用 send() 发送重置邮件, 生产环境用户永远收不到重置链接,
 		// 前端却提示"重置链接已发送"。现异步发送中文重置邮件(防阻塞 HTTP 请求)。
+		// 修复 EMAIL-FORGOT-02 (P0): send() 内部通过 app.Get() 获取配置,
+		// 不依赖 handler EmailService 的 DB/Redis 字段, 可传 nil。
 		go func(to, linkStr string) {
 			subject := "【Nexus-Panel】密码重置"
 			body := fmt.Sprintf("您正在申请重置密码,请点击以下链接完成重置(30 分钟内有效):\n%s\n如非本人操作请忽略本邮件,账号安全无需担心。", linkStr)
-			emailSvc := NewEmailService(getDB(), getRedis())
+			emailSvc := NewEmailService(nil, nil)
 			if err := emailSvc.send(to, subject, body); err != nil {
 				log.Printf("[email] 密码重置链接发送失败 email=%s: %v", to, err)
+			} else {
+				log.Printf("[email] 密码重置链接发送成功 email=%s", to)
 			}
 		}(email, link)
 	}

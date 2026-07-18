@@ -142,6 +142,8 @@ func (s *EmailService) SendVerifyLink(ctx context.Context, email string) error {
 		}
 		if err := s.send(emailTo, subject, body); err != nil {
 			log.Printf("[email] 激活链接发送失败 userID=%s: %v", userID, err)
+		} else {
+			log.Printf("[email] 激活链接发送成功 userID=%s email=%s", userID, emailTo)
 		}
 	}(email, link, row.ID)
 	return nil
@@ -190,6 +192,7 @@ func (s *EmailService) SendVerifyCodeAsync(userID string, email, typ string) err
 			s.DB.Model(&model.EmailEvent{}).Where("id = ?", evID).
 				Updates(map[string]interface{}{"success": false, "error_msg": sendErr.Error()})
 		} else {
+			log.Printf("[email] 验证码发送成功 evID=%d email=%s", evID, emailTo)
 			s.DB.Model(&model.EmailEvent{}).Where("id = ?", evID).Update("success", true)
 		}
 	}(email, code, ev.ID)
