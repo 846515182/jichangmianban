@@ -179,18 +179,18 @@
                 </el-form-item>
                 <el-form-item label="SMTP 端口">
                   <el-input-number v-model="email.port" :min="1" :max="65535" controls-position="right" style="width: 100%" />
-                  <span class="form-tip">Mailtrap 推荐 587(TLS)，QQ/163 用 465(SSL)</span>
+                  <span class="form-tip">Mailtrap 推荐 587(TLS)，也支持 2525/25；QQ/163 用 465(SSL)</span>
                 </el-form-item>
                 <el-form-item label="SMTP 用户名">
-                  <el-input v-model="email.user" placeholder="APIsmtp@mailtrap.io 或 noreply@example.com" />
-                  <span class="form-tip">SMTP 登录用户名。Mailtrap 填 APIsmtp@mailtrap.io，QQ邮箱填完整邮箱地址</span>
+                  <el-input v-model="email.user" placeholder="api 或 完整邮箱地址" />
+                  <span class="form-tip">Mailtrap 新版本固定填 "api"；QQ/163 邮箱填完整邮箱地址</span>
                 </el-form-item>
                 <el-form-item label="发件人地址">
                   <el-input v-model="email.from" placeholder="noreply@yourdomain.com" />
                   <span class="form-tip">收件人看到的发件人邮箱，必须是 SMTP 服务商已验证域名的邮箱</span>
                 </el-form-item>
                 <el-form-item label="邮箱密码">
-                  <el-input v-model="email.password" :type="showEmailPwd ? 'text' : 'password'" show-password placeholder="已保存，如需修改请输入新密码">
+                  <el-input v-model="email.password" :type="showEmailPwd ? 'text' : 'password'" show-password placeholder="SMTP 密码或 API Token（Mailtrap 用 API Token）">
                     <template #append>
                       <el-button @click="showEmailPwd = !showEmailPwd">
                         <el-icon><View v-if="!showEmailPwd" /><Hide v-else /></el-icon>
@@ -213,14 +213,15 @@
                 <li>SMTP 服务器用于发送用户注册验证、密码重置等邮件。</li>
                 <li>推荐 SMTP 配置：
                   <ul>
-                    <li><strong>Mailtrap</strong>：smtp.mailtrap.io:587（测试环境推荐）</li>
+                    <li><strong>Mailtrap</strong>：live.smtp.mailtrap.io:587（生产环境）<br/>
+                      <small>用户名固定为 <code>api</code>，密码为 <strong>API Token</strong>（在 Sending Setup → SMTP 获取）</small></li>
                     <li>QQ邮箱：smtp.qq.com:587</li>
                     <li>163邮箱：smtp.163.com:465</li>
                     <li>Gmail：smtp.gmail.com:587</li>
                   </ul>
                 </li>
-                <li>发件人密码通常为邮箱的授权码（非登录密码）。</li>
-                <li>Mailtrap 用户可在 Email Testing → Sandboxes → Integration 中获取 SMTP 凭据。</li>
+                <li>Mailtrap 密码为 <strong>API Token</strong>（非登录密码），需先在 Mailtrap 控制台验证发送域名。</li>
+                <li>其他邮箱密码通常为邮箱的授权码（非登录密码）。</li>
                 <li>保存配置后请点击「测试发送」验证配置是否正确。</li>
               </ul>
               <el-divider />

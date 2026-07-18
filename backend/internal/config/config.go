@@ -171,7 +171,7 @@ func (c *Config) LoadGRPCTLSConfig() (*tls.Config, error) {
 }
 
 func (c *Config) SMTPEnabled() bool {
-	return c.SMTPHost != "" && c.SMTPUser != ""
+	return c.SMTPHost != "" && c.SMTPUser != "" && c.SMTPPass != ""
 }
 
 func (c *Config) TelegramEnabled() bool {

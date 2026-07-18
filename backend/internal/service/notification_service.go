@@ -53,24 +53,28 @@ func (s *NotificationService) SendEmail(payload EmailPayload) error {
 		return nil
 	}
 	// 回退: EmailService 未注入(启动早期/cron 首次触发), 用环境变量
+	// 使用 TLS-aware 发送 (兼容 Mailtrap 等需要 STARTTLS 的 SMTP 服务)
 	if !s.cfg.SMTPEnabled() {
 		return nil
 	}
 	addr := fmt.Sprintf("%s:%d", s.cfg.SMTPHost, s.cfg.SMTPPort)
 	from := s.cfg.SMTPFrom
-	if s.cfg.SMTPFromName != "" {
-		from = fmt.Sprintf("%s <%s>", s.cfg.SMTPFromName, s.cfg.SMTPFrom)
+	fromName := s.cfg.SMTPFromName
+	if fromName == "" {
+		fromName = "Nexus-Panel"
 	}
+	fromHeader := fmt.Sprintf("%s <%s>", fromName, s.cfg.SMTPFrom)
 	msg := fmt.Sprintf("From: %s\r\n"+
 		"To: %s\r\n"+
 		"Subject: =?UTF-8?B?%s?=\r\n"+
 		"MIME-Version: 1.0\r\n"+
 		"Content-Type: text/html; charset=UTF-8\r\n"+
 		"\r\n"+
-		"%s", from, payload.To, base64Encode(payload.Subject), payload.Body)
+		"%s", fromHeader, payload.To, base64Encode(payload.Subject), payload.Body)
 
 	auth := smtp.PlainAuth("", s.cfg.SMTPUser, s.cfg.SMTPPass, s.cfg.SMTPHost)
-	if err := smtp.SendMail(addr, auth, s.cfg.SMTPFrom, []string{payload.To}, []byte(msg)); err != nil {
+	// 使用 sendMailWithTLS 替代 smtp.SendMail，后者不支持 STARTTLS
+	if err := sendMailWithTLS(addr, auth, s.cfg.SMTPFrom, []string{payload.To}, []byte(msg)); err != nil {
 		s.logger.Error("邮件发送失败", zap.String("to", payload.To), zap.Error(err))
 		return err
 	}

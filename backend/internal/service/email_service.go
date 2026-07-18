@@ -185,9 +185,15 @@ func (s *EmailService) SendMail(to []string, subject, body string) error {
 // buildMessage 构建符合 RFC 2047/MIME 标准的邮件内容
 // 注: b64enc 复用了同包 notification_service.go 中的 base64 编码函数
 func buildMessage(from string, to []string, subject, body string) []byte {
+	return buildMessageWithName("Nexus-Panel", from, to, subject, body)
+}
+
+// buildMessageWithName 构建带自定义发件人名称的邮件
+func buildMessageWithName(fromName, from string, to []string, subject, body string) []byte {
 	encodedSubject := b64enc(subject)
+	fromHeader := fmt.Sprintf("%s <%s>", fromName, from)
 	return []byte(fmt.Sprintf(
-		"From: Nexus-Panel <%s>\r\n"+
+		"From: %s\r\n"+
 			"To: %s\r\n"+
 			"Subject: =?UTF-8?B?%s?=\r\n"+
 			"MIME-Version: 1.0\r\n"+
@@ -195,7 +201,7 @@ func buildMessage(from string, to []string, subject, body string) []byte {
 			"Content-Transfer-Encoding: quoted-printable\r\n"+
 			"\r\n"+
 			"%s",
-		from, strings.Join(to, ","), encodedSubject, body,
+		fromHeader, strings.Join(to, ","), encodedSubject, body,
 	))
 }
 
