@@ -128,6 +128,8 @@ func (h *AdminNodeHandler) NodeList(c *gin.Context) {
 				"speed_bps":          0,
 				"uptime_seconds":     0,
 				"updated_at":         0,
+				"proxy_reachable":    int64(1),
+				"proxy_error":        "",
 			}
 		}
 		items = append(items, item)
@@ -167,6 +169,8 @@ func (h *AdminNodeHandler) readNodeRuntime(ctx context.Context, rdb *redis.Clien
 		"speed_bps":          0,
 		"uptime_seconds":     0,
 		"updated_at":         0,
+		"proxy_reachable":    int64(1),
+		"proxy_error":        "",
 	}
 	if err != nil || len(hb) == 0 {
 		return rt
@@ -200,6 +204,10 @@ func (h *AdminNodeHandler) buildNodeRuntimeFromCache(hb map[string]string, snap 
 		"speed_bps":          0,
 		"uptime_seconds":     0,
 		"updated_at":         0,
+		// NODE-PROXY-01: 透传 agent 上报的代理可达性状态
+		// 默认可达(1), 避免 agent 老版本无该字段时误报异常
+		"proxy_reachable": int64(1),
+		"proxy_error":    "",
 	}
 	if len(hb) == 0 {
 		return rt
@@ -214,6 +222,12 @@ func (h *AdminNodeHandler) buildNodeRuntimeFromCache(hb map[string]string, snap 
 	hbUpdatedAt, _ := strconv.ParseInt(hb["updated_at"], 10, 64)
 	// 主路径: speed_bps 由 traffic_service 写入 heartbeat hash, 直接读
 	speedBps, _ := strconv.ParseInt(hb["speed_bps"], 10, 64)
+	// NODE-PROXY-01: 读取代理可达性 (agent 上报, 0=不可达 1=可达)
+	proxyReachable := int64(1)
+	if v, ok := hb["proxy_reachable"]; ok && v != "" {
+		proxyReachable, _ = strconv.ParseInt(v, 10, 64)
+	}
+	proxyError := hb["proxy_error"]
 
 	// 兜底: speed_bps 缺失或为 0 时, 回退到 snap 算法估算
 	// 场景: 新面板刚部署 traffic_service 还没收到首次流量上报 / agent 低负载无流量不上报
@@ -234,6 +248,8 @@ func (h *AdminNodeHandler) buildNodeRuntimeFromCache(hb map[string]string, snap 
 	rt["uptime_seconds"] = uptime
 	rt["updated_at"] = hbUpdatedAt
 	rt["speed_bps"] = speedBps
+	rt["proxy_reachable"] = proxyReachable
+	rt["proxy_error"] = proxyError
 	return rt
 }
 

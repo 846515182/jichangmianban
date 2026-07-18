@@ -59,6 +59,20 @@ func (s *NodeService) CreateNode(in *CreateNodeInput) (*model.Node, error) {
 		return nil, errors.New("请至少选择一个套餐绑定")
 	}
 
+	// NODE-DUP-01 兜底校验: 防止创建重复节点 (name + server_address + port)
+	// 数据库已加 partial unique index (uq_nodes_name_addr_port_active) 防并发,
+	// 但提前查询可以给出更友好的中文错误, 而不是 raw DB 错误
+	var exists int64
+	if err := app.Get().DB.Model(&model.Node{}).
+		Where("name = ? AND server_address = ? AND port = ? AND is_deleted = false",
+			in.Name, in.ServerAddress, in.Port).
+		Count(&exists).Error; err != nil {
+		return nil, fmt.Errorf("校验节点唯一性失败: %w", err)
+	}
+	if exists > 0 {
+		return nil, fmt.Errorf("节点已存在: 名称=%s 地址=%s:%d, 请勿重复创建(可编辑现有节点或先删除旧节点)", in.Name, in.ServerAddress, in.Port)
+	}
+
 	// 验证协议是否支持
 	supportedProtocols := map[string]bool{
 		"vless":       true,
