@@ -37,26 +37,29 @@
           </div>
         </div>
 
-        <!-- 详细事件流 -->
-        <div class="cp-events">
-          <div v-for="(ev, i) in events" :key="i" class="cp-event" :class="ev.status">
-            <div class="cp-ev-head">
-              <span class="cp-ev-icon">
-                <span v-if="ev.status === 'running'" class="cp-spin">⟳</span>
-                <span v-else-if="ev.status === 'done'">✓</span>
-                <span v-else-if="ev.status === 'error'">✗</span>
-                <span v-else-if="ev.status === 'warning'">⚠</span>
-                <span v-else>·</span>
-              </span>
-              <span class="cp-ev-step">{{ stepName(ev.step) }}</span>
-              <el-tag v-if="ev.status === 'done'" size="small" type="success">完成</el-tag>
-              <el-tag v-else-if="ev.status === 'error'" size="small" type="danger">失败</el-tag>
-              <el-tag v-else-if="ev.status === 'running'" size="small" type="warning">进行中</el-tag>
-              <el-tag v-else-if="ev.status === 'warning'" size="small" type="warning" effect="dark">警告</el-tag>
+        <!-- 详细事件流 (渐进式展示, 每个事件独立渲染, 不会一次性跳出) -->
+        <div class="cp-events" ref="eventsContainer">
+          <TransitionGroup name="cp-ev" tag="div">
+            <div v-for="(ev, i) in displayedEvents" :key="i" class="cp-event" :class="ev.status">
+              <div class="cp-ev-head">
+                <span class="cp-ev-icon">
+                  <span v-if="ev.status === 'running'" class="cp-spin">⟳</span>
+                  <span v-else-if="ev.status === 'done'">✓</span>
+                  <span v-else-if="ev.status === 'error'">✗</span>
+                  <span v-else-if="ev.status === 'warning'">⚠</span>
+                  <span v-else-if="ev.status === 'log'" class="cp-ev-dot">·</span>
+                  <span v-else>·</span>
+                </span>
+                <span class="cp-ev-step">{{ stepName(ev.step) }}</span>
+                <el-tag v-if="ev.status === 'done'" size="small" type="success">完成</el-tag>
+                <el-tag v-else-if="ev.status === 'error'" size="small" type="danger">失败</el-tag>
+                <el-tag v-else-if="ev.status === 'running'" size="small" type="warning">进行中</el-tag>
+                <el-tag v-else-if="ev.status === 'warning'" size="small" type="warning" effect="dark">警告</el-tag>
+              </div>
+              <div v-if="ev.msg" class="cp-ev-msg">{{ ev.msg }}</div>
+              <pre v-if="ev.output" class="cp-ev-output">{{ ev.output }}</pre>
             </div>
-            <div v-if="ev.msg" class="cp-ev-msg">{{ ev.msg }}</div>
-            <pre v-if="ev.output" class="cp-ev-output">{{ ev.output }}</pre>
-          </div>
+          </TransitionGroup>
         </div>
 
         <div v-if="running" class="cp-loading">
@@ -72,7 +75,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, computed } from 'vue'
+import { ref, watch, computed, nextTick } from 'vue'
 import { ElIcon, ElMessage } from 'element-plus'
 import { Delete, Loading } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
@@ -98,6 +101,12 @@ const started = ref(false)
 const running = ref(false)
 const finished = ref(false)
 const events = ref<Array<{step: string; status: string; msg: string; output: string}>>([])
+
+// 渐进式展示: 用 displayedEvents 逐条渲染, 配合 CSS transition 实现动画
+const displayedEvents = ref<Array<{step: string; status: string; msg: string; output: string}>>([])
+let revealTimer: ReturnType<typeof setInterval> | null = null
+
+const eventsContainer = ref<HTMLElement>()
 
 // 5 步阶段定义
 const phaseSteps = [
@@ -136,10 +145,47 @@ const resetIfClosed = (v: boolean) => {
       running.value = false
       finished.value = false
       events.value = []
+      displayedEvents.value = []
       activePhase.value = ''
       password.value = ''
       removeImg.value = false
+      stopReveal()
     }, 300)
+  }
+}
+
+// 渐进展示定时器: 逐条将 events 推入 displayedEvents, 每条间隔 ~80ms
+const startReveal = () => {
+  stopReveal()
+  let idx = 0
+  revealTimer = setInterval(() => {
+    if (idx < events.value.length) {
+      displayedEvents.value.push(events.value[idx])
+      idx++
+      // 自动滚动到底部
+      nextTick(() => {
+        if (eventsContainer.value) {
+          eventsContainer.value.scrollTop = eventsContainer.value.scrollHeight
+        }
+      })
+    } else {
+      stopReveal()
+      // 兜底: 确保 running 结束时所有事件都展示了
+      if (!running.value) {
+        // 如果 stopped, 立即展示剩余
+        while (idx < events.value.length) {
+          displayedEvents.value.push(events.value[idx])
+          idx++
+        }
+      }
+    }
+  }, 80)
+}
+
+const stopReveal = () => {
+  if (revealTimer) {
+    clearInterval(revealTimer)
+    revealTimer = null
   }
 }
 
@@ -160,7 +206,11 @@ const start = async () => {
   running.value = true
   finished.value = false
   events.value = []
+  displayedEvents.value = []
   activePhase.value = ''
+
+  // 启动渐进展示定时器
+  startReveal()
 
   const auth = useAuthStore()
   const token = auth.token
@@ -186,6 +236,9 @@ const start = async () => {
       addEvent('finalize', 'error', `HTTP ${resp.status}: ${txt}`)
       running.value = false
       finished.value = true
+      stopReveal()
+      // 立即展示所有事件
+      displayedEvents.value = [...events.value]
       return
     }
     const reader = resp.body!.getReader()
@@ -220,6 +273,14 @@ const start = async () => {
   } finally {
     running.value = false
     finished.value = true
+    // 等渐进展示完成后再停
+    setTimeout(() => {
+      stopReveal()
+      // 确保所有事件都已展示
+      if (displayedEvents.value.length < events.value.length) {
+        displayedEvents.value = [...events.value]
+      }
+    }, 500)
     // 通知父组件刷新列表
     emit('done')
   }
@@ -295,4 +356,22 @@ const close = () => {
   display: flex; align-items: center; justify-content: center; gap: 8px;
 }
 .cp-done { margin-top: 12px; text-align: center; }
+
+/* 渐进展示动画: 每个事件淡入滑入 */
+.cp-ev-enter-active {
+  transition: all 0.35s ease-out;
+}
+.cp-ev-leave-active {
+  transition: all 0.2s ease-in;
+}
+.cp-ev-enter-from {
+  opacity: 0;
+  transform: translateY(-10px);
+}
+.cp-ev-leave-to {
+  opacity: 0;
+}
+.cp-ev-dot {
+  color: var(--np-text-muted, #909399);
+}
 </style>
