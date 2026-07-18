@@ -266,9 +266,17 @@
                   <span class="git-label">最近提交:</span>
                   <pre class="git-log">{{ gitStatus.recent5 || '加载中...' }}</pre>
                 </div>
+                <div v-if="gitStatus.behind > 0 && gitStatus.changelog" class="git-info">
+                  <span class="git-label">更新说明:</span>
+                  <pre class="git-log git-changelog">{{ gitStatus.changelog }}</pre>
+                </div>
                 <div class="git-info">
-                  <span class="git-label">变更文件:</span>
+                  <span class="git-label">本地变更:</span>
                   <pre class="git-log" :class="{ 'has-changes': gitStatus.status }">{{ gitStatus.status || '无变更' }}</pre>
+                </div>
+                <div v-if="gitStatus.behind > 0 && gitStatus.changed_files" class="git-info">
+                  <span class="git-label">待更新文件:</span>
+                  <pre class="git-log git-changed-files">{{ gitStatus.changed_files }}</pre>
                 </div>
               </div>
               <div class="git-actions">
@@ -755,6 +763,8 @@ const gitStatus = reactive({
   behind: 0,
   ahead: 0,
   up_to_date: false,
+  changelog: '',
+  changed_files: '',
 })
 
 const loadGitStatus = async (silent = false) => {
@@ -770,6 +780,8 @@ const loadGitStatus = async (silent = false) => {
     gitStatus.behind = d.behind || 0
     gitStatus.ahead = d.ahead || 0
     gitStatus.up_to_date = !!d.up_to_date
+    gitStatus.changelog = d.changelog || ''
+    gitStatus.changed_files = d.changed_files || ''
   } catch { /* */ } finally {
     loadingGitStatus.value = false
   }

@@ -1127,6 +1127,8 @@ func (h *AdminSystemHandler) GitStatus(c *gin.Context) {
 
 	behind := 0
 	ahead := 0
+	changelog := ""
+	changedFiles := ""
 	if localHead != "" && remoteHead != "" && localHead != remoteHead {
 		// 落后数: 远程有而本地没有的提交
 		if c := execCommand("git", "rev-list", "--count", "HEAD.."+remoteRef).Output; c != "" {
@@ -1140,17 +1142,24 @@ func (h *AdminSystemHandler) GitStatus(c *gin.Context) {
 				ahead = n
 			}
 		}
+		// 有更新时, 获取远程相比本地的详细更新说明和变更文件列表
+		if behind > 0 {
+			changelog = execCommand("git", "log", "--format=%h %s%n%b", "HEAD.."+remoteRef).Output
+			changedFiles = execCommand("git", "diff", "--stat", "HEAD..."+remoteRef).Output
+		}
 	}
 
 	response.OK(c, gin.H{
-		"status":      statusResult.Output,
-		"recent_5":    logResult.Output,
-		"branch":      branch,
-		"local_head":  localHead,
-		"remote_head": remoteHead,
-		"behind":      behind,
-		"ahead":       ahead,
-		"up_to_date":  behind == 0 && ahead == 0,
+		"status":        statusResult.Output,
+		"recent_5":      logResult.Output,
+		"branch":        branch,
+		"local_head":    localHead,
+		"remote_head":   remoteHead,
+		"behind":        behind,
+		"ahead":         ahead,
+		"up_to_date":    behind == 0 && ahead == 0,
+		"changelog":     strings.TrimSpace(changelog),
+		"changed_files": strings.TrimSpace(changedFiles),
 	})
 }
 
