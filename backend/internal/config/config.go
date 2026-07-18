@@ -13,11 +13,12 @@ import (
 )
 
 type Config struct {
-	DBHost string
-	DBPort string
-	DBUser string
-	DBPass string
-	DBName string
+	DBHost   string
+	DBPort   string
+	DBUser   string
+	DBPass   string
+	DBName   string
+	DBSSlMode string
 
 	RedisAddr string
 	RedisPass string
@@ -74,8 +75,9 @@ func Load() (*Config, error) {
 		DBHost:          getEnv("DB_HOST", "127.0.0.1"),
 		DBPort:          getEnv("DB_PORT", "5432"),
 		DBUser:          getEnv("DB_USER", "nexus"),
-		DBPass:          getEnv("DB_PASS", "nexus"),
+		DBPass:          getEnv("DB_PASS", ""),
 		DBName:          getEnv("DB_NAME", "nexus_panel"),
+		DBSSlMode:       getEnv("DB_SSLMODE", "disable"),
 		RedisAddr:       getEnv("REDIS_ADDR", "127.0.0.1:6379"),
 		RedisPass:       getEnv("REDIS_PASS", ""),
 		JWTSecret:       getEnv("JWT_SECRET", ""),
@@ -111,6 +113,9 @@ func Load() (*Config, error) {
 	cfg.JWTAccessTTL = getEnvDuration("JWT_ACCESS_TTL", 24*time.Hour)
 	cfg.JWTRefreshTTL = getEnvDuration("JWT_REFRESH_TTL", 7*24*time.Hour)
 
+	if cfg.DBPass == "" {
+		return nil, fmt.Errorf("环境变量 DB_PASSWORD 未设置, 请在 .env 中配置 PostgreSQL 密码")
+	}
 	if cfg.JWTSecret == "" {
 		return nil, fmt.Errorf("环境变量 JWT_SECRET 未设置")
 	}
@@ -138,8 +143,8 @@ func Load() (*Config, error) {
 }
 
 func (c *Config) DSN() string {
-	return fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable TimeZone=UTC",
-		c.DBHost, c.DBPort, c.DBUser, c.DBPass, c.DBName)
+	return fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s TimeZone=UTC",
+		c.DBHost, c.DBPort, c.DBUser, c.DBPass, c.DBName, c.DBSSlMode)
 }
 
 func (c *Config) GRPCTLSEnabled() bool {

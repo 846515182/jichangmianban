@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 
@@ -223,7 +224,11 @@ func (s *NodeService) UpdateNode(id string, in *UpdateNodeInput) (*model.Node, e
 	}
 	if in.ExtraConfig != nil {
 		var existing map[string]interface{}
-		_ = json.Unmarshal(node.ServerConfig, &existing)
+		if err := json.Unmarshal(node.ServerConfig, &existing); err != nil {
+			if logger := app.Get().Logger; logger != nil {
+				logger.Warn("解析节点 ServerConfig 失败，使用空配置继续", zap.String("node_id", id), zap.Error(err))
+			}
+		}
 		if existing == nil {
 			existing = map[string]interface{}{}
 		}
@@ -255,7 +260,13 @@ func (s *NodeService) UpdateNode(id string, in *UpdateNodeInput) (*model.Node, e
 				}
 			}
 		}
-		b, _ := json.Marshal(existing)
+		b, err := json.Marshal(existing)
+		if err != nil {
+			if logger := app.Get().Logger; logger != nil {
+				logger.Error("序列化节点 ServerConfig 失败", zap.String("node_id", id), zap.Error(err))
+			}
+			return nil, fmt.Errorf("序列化节点配置失败")
+		}
 		node.ServerConfig = datatypes.JSON(b)
 	}
 
@@ -296,15 +307,21 @@ func (s *NodeService) DeleteNode(id string) error {
 	// 清零 online(不过滤 is_deleted，因为节点刚被软删除)
 	if err := s.repo.MarkOffline(id); err != nil {
 		// 非致命，仅记录
-		_ = err
+		if logger := app.Get().Logger; logger != nil {
+			logger.Warn("标记节点离线失败", zap.String("node_id", id), zap.Error(err))
+		}
 	}
 	// 清理 user_nodes 关联
 	if err := s.repo.DeleteUserNodesByNodeID(id); err != nil {
-		_ = err
+		if logger := app.Get().Logger; logger != nil {
+			logger.Warn("删除节点用户关联失败", zap.String("node_id", id), zap.Error(err))
+		}
 	}
 	// 清理 node_plan_bindings(物理删除，绑定关系不需要软删除保留)
 	if err := s.repo.DeletePlanBindingsByNode(id); err != nil {
-		_ = err
+		if logger := app.Get().Logger; logger != nil {
+			logger.Warn("删除节点套餐绑定失败", zap.String("node_id", id), zap.Error(err))
+		}
 	}
 	// 清理 Redis 残留 key
 	if rdb := app.Get().RDB; rdb != nil {
@@ -329,11 +346,19 @@ func (s *NodeService) DeleteNode(id string) error {
 				for iter.Next(ctx) {
 					keys = append(keys, iter.Val())
 				}
-				_ = iter.Err()
+				if err := iter.Err(); err != nil {
+					if logger := app.Get().Logger; logger != nil {
+						logger.Warn("Redis SCAN 清理 SSH 指纹失败", zap.String("pattern", pattern), zap.Error(err))
+					}
+				}
 			}
 		}
 		for _, k := range keys {
-			_ = rdb.Del(ctx, k).Err()
+			if err := rdb.Del(ctx, k).Err(); err != nil {
+				if logger := app.Get().Logger; logger != nil {
+					logger.Warn("Redis DEL 失败", zap.String("key", k), zap.Error(err))
+				}
+			}
 		}
 	}
 	return nil

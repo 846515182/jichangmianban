@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 
 	"nexus-panel/internal/app"
@@ -166,7 +167,12 @@ func (s *OrderService) CancelOrder(orderID, userID string) error {
 		}
 		// 回退优惠券使用次数
 		if o.CouponID != "" {
-			_ = s.couponRepo.DecrUsedSafeTx(tx, o.CouponID)
+			if err := s.couponRepo.DecrUsedSafeTx(tx, o.CouponID); err != nil {
+				// 非致命：优惠券计数回退失败不影响订单取消
+				if logger := app.Get().Logger; logger != nil {
+					logger.Warn("回退优惠券使用次数失败", zap.String("coupon_id", o.CouponID), zap.Error(err))
+				}
+			}
 		}
 		return nil
 	})
@@ -199,7 +205,11 @@ func (s *OrderService) ExpireOrders() (int, error) {
 				return nil // 已被并发处理
 			}
 			if o.CouponID != "" {
-				_ = s.couponRepo.DecrUsedSafeTx(tx, o.CouponID)
+				if err := s.couponRepo.DecrUsedSafeTx(tx, o.CouponID); err != nil {
+					if logger := app.Get().Logger; logger != nil {
+						logger.Warn("过期订单回退优惠券失败", zap.String("coupon_id", o.CouponID), zap.Error(err))
+					}
+				}
 			}
 			return nil
 		})
@@ -344,7 +354,11 @@ func (s *OrderService) AdminRefund(orderID, reason string) error {
 			return err
 		}
 		if locked.CouponID != "" {
-			_ = s.couponRepo.DecrUsedSafeTx(tx, locked.CouponID)
+			if err := s.couponRepo.DecrUsedSafeTx(tx, locked.CouponID); err != nil {
+				if logger := app.Get().Logger; logger != nil {
+					logger.Warn("退款回退优惠券失败", zap.String("coupon_id", locked.CouponID), zap.Error(err))
+				}
+			}
 		}
 		// 重置用户套餐：清除 plan_id、重置流量配额、将状态置为 expired
 		u, err := s.userRepo.GetByID(locked.UserID)
@@ -407,7 +421,11 @@ func (s *OrderService) AdminCancelOrder(orderID, reason string) error {
 			return err
 		}
 		if wasPending && wasPendingNow && locked.CouponID != "" {
-			_ = s.couponRepo.DecrUsedSafeTx(tx, locked.CouponID)
+			if err := s.couponRepo.DecrUsedSafeTx(tx, locked.CouponID); err != nil {
+				if logger := app.Get().Logger; logger != nil {
+					logger.Warn("管理员取消订单回退优惠券失败", zap.String("coupon_id", locked.CouponID), zap.Error(err))
+				}
+			}
 		}
 		return nil
 	})

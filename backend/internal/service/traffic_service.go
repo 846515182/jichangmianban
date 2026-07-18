@@ -3,6 +3,9 @@ package service
 import (
 	"time"
 
+	"go.uber.org/zap"
+
+	"nexus-panel/internal/app"
 	"nexus-panel/internal/model"
 	"nexus-panel/internal/repo"
 )
@@ -33,8 +36,12 @@ func (s *TrafficService) RecordTraffic(in *RecordTrafficInput) error {
 	if err := s.trafficRepo.RecordLog(in.UserID, in.NodeID, in.UploadBytes, in.DownloadBytes, day); err != nil {
 		return err
 	}
-	// 累加用户流量统计(忽略错误，避免阻断上报)
-	_ = s.userRepo.AddTraffic(in.UserID, in.UploadBytes, in.DownloadBytes)
+	// 累加用户流量统计
+	if err := s.userRepo.AddTraffic(in.UserID, in.UploadBytes, in.DownloadBytes); err != nil {
+		if logger := app.Get().Logger; logger != nil {
+			logger.Warn("累加用户流量失败", zap.String("user_id", in.UserID), zap.Error(err))
+		}
+	}
 	return nil
 }
 

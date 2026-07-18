@@ -125,6 +125,11 @@ func (s *NotificationService) NotifyAll(subject, message string) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					s.logger.Error("SendEmail goroutine panic", zap.Any("panic", r))
+				}
+			}()
 			_ = s.SendEmail(EmailPayload{
 				To:      s.notifyRecipient(),
 				Subject: subject,
@@ -137,6 +142,11 @@ func (s *NotificationService) NotifyAll(subject, message string) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					s.logger.Error("SendTelegram goroutine panic", zap.Any("panic", r))
+				}
+			}()
 			_ = s.SendTelegram(TelegramPayload{
 				Text: fmt.Sprintf("<b>%s</b>\n\n%s", subject, message),
 			})

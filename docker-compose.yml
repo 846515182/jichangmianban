@@ -73,7 +73,7 @@ services:
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "${REDIS_PASSWORD:?REDIS_PASSWORD 必须在 .env 中设置}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -98,7 +98,7 @@ services:
     image: nexus-panel:latest
     container_name: nexus-panel
     restart: "no"
-    # [S6 fix 2026-07-14] 移除 user:0:0 改用默认非 root 运行
+    # !! [安全警告] root+ docker.sock = 容器可控制宿主机, 生产环境考虑移除 docker.sock 挂载改用远程 Docker API+TLS
     user: "0:0"  # 以 root 运行，确保能访问 docker.sock 调用宿主机 docker(用于预编译 node-agent)
     env_file:
       - .env
@@ -107,6 +107,8 @@ services:
       REDIS_ADDR: redis:6379
     ports:
       - "8080:8080"
+      # gRPC 端口 - 节点 agent 通过此端口上报心跳和流量
+      # !! 生产建议改为仅监听内网 IP(如 10.0.0.0/8) 而非 0.0.0.0
       - "0.0.0.0:50051:50051"
     volumes:
       - ./deployments/tls:/app/tls:ro
@@ -117,7 +119,8 @@ services:
       # 注意: 挂载宿主机 /usr/bin/docker 在 alpine 容器内无法运行(glibc 不兼容)
       # 所以用静态编译的 docker CLI 放在 /root/nexus-panel/docker-cli/docker
       - /root/nexus-panel:/root/nexus-panel:rw
-      # [S6 fix 2026-07-14] 移除 docker.sock 挂载, 降低容器逃逸风险
+      # !! [安全警告] docker.sock 挂载 + root 运行 = 容器可完全控制宿主机
+      # 若面板被入侵，攻击者可访问宿主机所有容器和数据
       - /var/run/docker.sock:/var/run/docker.sock
     entrypoint: >
       sh -c "apk add --no-cache git docker-cli docker-cli-compose >/dev/null 2>&1 &&

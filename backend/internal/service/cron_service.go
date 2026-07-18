@@ -3,6 +3,8 @@ package service
 import (
 	"compress/gzip"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -65,15 +67,27 @@ func tryLock(rdb *redis.Client, key string, ttl time.Duration) (unlock func()) {
 	if rdb == nil {
 		return nil
 	}
-	token := time.Now().Format(time.RFC3339Nano)
-	ok, err := rdb.SetNX(context.Background(), key, token, ttl).Result()
+	// 使用 crypto/rand 生成锁 token，避免纳秒级并发下时间戳碰撞
+	tokenBytes := make([]byte, 16)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return nil
+	}
+	token := hex.EncodeToString(tokenBytes)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ok, err := rdb.SetNX(ctx, key, token, ttl).Result()
 	if err != nil || !ok {
 		return nil
 	}
 	return func() {
 		// 仅删除自己的锁（通过 Lua 脚本保证原子性）
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
 		script := `if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) else return 0 end`
-		rdb.Eval(context.Background(), script, []string{key}, token)
+		if result, err := rdb.Eval(ctx, script, []string{key}, token).Result(); err != nil {
+			// 解锁失败仅记录但不影响业务流
+			_ = result
+		}
 	}
 }
 
@@ -552,7 +566,14 @@ func (s *CronService) CheckDiskThreshold() {
 
 	// 发送邮件/Telegram 告警(若已配置)
 	if ns := s.notifSvc(); ns != nil && ns.IsEnabled() {
-		go ns.NotifyAll("Nexus-Panel 磁盘告警", msg)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					s.logger.Error("NotifyAll goroutine panic", zap.Any("panic", r))
+				}
+			}()
+			ns.NotifyAll("Nexus-Panel 磁盘告警", msg)
+		}()
 	}
 }
 

@@ -52,7 +52,16 @@ export const useAuthStore = defineStore('auth', {
       this.refreshToken = sessionStorage.getItem(REFRESH_TOKEN_KEY) || ''
       this.role = (sessionStorage.getItem(ROLE_KEY) as UserRole) || null
       const userStr = sessionStorage.getItem(USER_KEY)
-      this.userInfo = userStr ? JSON.parse(userStr) : null
+      if (userStr) {
+        try {
+          this.userInfo = JSON.parse(userStr)
+        } catch {
+          this.userInfo = null
+          sessionStorage.removeItem(USER_KEY)
+        }
+      } else {
+        this.userInfo = null
+      }
     },
 
     persist() {
