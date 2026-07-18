@@ -8,6 +8,7 @@ import (
 	mrand "math/rand"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -160,20 +161,27 @@ func VerifyCaptcha(c *gin.Context, captchaID, captchaCode string) bool {
 	if captchaID == "" || captchaCode == "" {
 		return false
 	}
+	// 统一转大写比较（字符集不含小写字母，前端可能输入小写）
+	captchaCode = strings.ToUpper(strings.TrimSpace(captchaCode))
+
 	// 1) 内存校验（线程安全）
 	captchaMu.Lock()
 	entry, ok := captchaStore[captchaID]
-	if ok {
-		delete(captchaStore, captchaID)
-	}
+	// 修复: 只在匹配成功时才删除，避免输错一次后内存中验证码被误删
 	captchaMu.Unlock()
 
 	if ok {
 		// 检查是否过期
 		if time.Now().After(entry.expiresAt) {
+			captchaMu.Lock()
+			delete(captchaStore, captchaID)
+			captchaMu.Unlock()
 			return false
 		}
 		if entry.code == captchaCode {
+			captchaMu.Lock()
+			delete(captchaStore, captchaID)
+			captchaMu.Unlock()
 			return true
 		}
 	}
@@ -182,7 +190,7 @@ func VerifyCaptcha(c *gin.Context, captchaID, captchaCode string) bool {
 	rdb := getRedis()
 	if rdb != nil {
 		saved, err := rdb.Get(c.Request.Context(), "captcha:"+captchaID).Result()
-		if err == nil && saved == captchaCode {
+		if err == nil && strings.EqualFold(saved, captchaCode) {
 			rdb.Del(c.Request.Context(), "captcha:"+captchaID)
 			return true
 		}

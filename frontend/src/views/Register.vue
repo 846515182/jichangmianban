@@ -64,6 +64,7 @@
               placeholder="请输入图形验证码"
               :prefix-icon="Key"
               maxlength="4"
+              @input="form.captchaCode = form.captchaCode.toUpperCase().replace(/[^0-9A-Z]/g, '')"
               @keyup.enter="handleRegister"
             />
             <img
