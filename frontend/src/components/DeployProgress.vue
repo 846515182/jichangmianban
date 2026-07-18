@@ -151,6 +151,8 @@ const resetIfClosed = (v: boolean) => {
       finished.value = false
       events.value = []
       activePhase.value = ''
+      // 安全: 关闭弹窗时清除密码, 避免缓存残留导致下次部署用错密码
+      password.value = ''
     }, 300)
   }
 }

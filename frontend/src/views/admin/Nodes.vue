@@ -701,6 +701,9 @@ const openDialog = (row?: NodeRow) => {
       port: row.port,
       plan_ids: row.plan_ids ? [...row.plan_ids] : [],
       trafficLimitGB: row.traffic_limit ? Math.round(row.traffic_limit / 1024 / 1024 / 1024 * 100) / 100 : 0,
+      // 安全: 编辑节点时清空密码, 避免上次添加节点时的密码缓存
+      sshPassword: '',
+      sshPort: 22,
     })
   } else {
     Object.assign(form, {
