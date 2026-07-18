@@ -1656,7 +1656,7 @@ func scpViaSSH(client *ssh.Client, localPath, remotePath string) (string, error)
 		}
 		var errBuf bytes.Buffer
 		session.Stderr = &errBuf
-		if err := session.Start("base64 -d >> " + remotePath); err != nil {
+		if err := session.Start("export " + defaultPath + "; base64 -d >> " + remotePath); err != nil {
 			session.Close()
 			return "", fmt.Errorf("启动命令失败(块 %d/%d): %w", i+1, totalChunks, err)
 		}
@@ -1679,6 +1679,9 @@ func scpViaSSH(client *ssh.Client, localPath, remotePath string) (string, error)
 	return fmt.Sprintf("已传输 %d 字节(分 %d 块), 远程文件: %s", len(data), totalChunks, verifyOut), nil
 }
 
+// defaultPath SSH 会话中注入的默认 PATH，防止某些服务器 SSH 会话 PATH 为空导致命令找不到
+const defaultPath = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 func sshRun(client *ssh.Client, cmd string) (string, error) {
 	session, err := client.NewSession()
 	if err != nil {
@@ -1688,7 +1691,8 @@ func sshRun(client *ssh.Client, cmd string) (string, error) {
 	var buf bytes.Buffer
 	session.Stdout = &buf
 	session.Stderr = &buf
-	err = session.Run(cmd)
+	// 兜底: 部分服务器 SSH 会话 PATH 为空, 导致 docker/curl/tar 等命令找不到
+	err = session.Run("export " + defaultPath + "; " + cmd)
 	return buf.String(), err
 }
 
@@ -1705,7 +1709,7 @@ func sshWriteFile(client *ssh.Client, path, content string) error {
 		return err
 	}
 
-	if err := session.Start("cat > " + path); err != nil {
+	if err := session.Start("export " + defaultPath + "; cat > " + path); err != nil {
 		stdin.Close()
 		return err
 	}
@@ -1730,7 +1734,8 @@ func sshStream(client *ssh.Client, cmd string, onLine func(string)) (string, err
 	session.Stdout = pw
 	session.Stderr = pw
 
-	if err := session.Start(cmd); err != nil {
+	// 兜底: 部分服务器 SSH 会话 PATH 为空, 导致 docker/curl/tar 等命令找不到
+	if err := session.Start("export " + defaultPath + "; " + cmd); err != nil {
 		pw.Close()
 		return "", err
 	}
@@ -1803,7 +1808,7 @@ func uploadNodeAgent(client *ssh.Client, deployDir string) error {
 	if err != nil {
 		return err
 	}
-	if err := session.Start("tar -xzf - -C " + deployDir); err != nil {
+	if err := session.Start("export " + defaultPath + "; tar -xzf - -C " + deployDir); err != nil {
 		return err
 	}
 
