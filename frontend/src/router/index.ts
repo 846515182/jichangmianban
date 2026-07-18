@@ -14,24 +14,6 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/Register.vue'),
     meta: { title: '注册', public: true },
   },
-  {
-    path: '/verify-email',
-    name: 'VerifyEmail',
-    component: () => import('@/views/VerifyEmail.vue'),
-    meta: { title: '验证邮箱', public: true },
-  },
-  {
-    path: '/forgot-password',
-    name: 'ForgotPassword',
-    component: () => import('@/views/ForgotPassword.vue'),
-    meta: { title: '忘记密码', public: true },
-  },
-  {
-    path: '/reset-password',
-    name: 'ResetPassword',
-    component: () => import('@/views/ResetPassword.vue'),
-    meta: { title: '重置密码', public: true },
-  },
   // 管理端路由（需要 admin 角色）
   {
     path: '/admin',

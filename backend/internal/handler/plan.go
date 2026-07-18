@@ -20,6 +20,19 @@ func NewPlanHandler(ps *service.PlanService) *PlanHandler {
 	return &PlanHandler{planSvc: ps}
 }
 
+// attachNodeCount 为套餐列表附加 node_count 字段(每个套餐绑定的节点数量)
+func (h *PlanHandler) attachNodeCount(plans []any) {
+	for i, p := range plans {
+		if m, ok := p.(map[string]any); ok {
+			if id, ok := m["id"].(string); ok {
+				count, _ := h.planSvc.CountNodesByPlanID(id)
+				m["node_count"] = count
+				plans[i] = m
+			}
+		}
+	}
+}
+
 // AdminPlanList [28] GET /api/v1/admin/plans
 // 管理端套餐列表(含禁用)
 func (h *PlanHandler) AdminPlanList(c *gin.Context) {
@@ -30,7 +43,27 @@ func (h *PlanHandler) AdminPlanList(c *gin.Context) {
 		response.Fail(c, response.CodeDBError)
 		return
 	}
-	response.OK(c, gin.H{"list": list, "total": total})
+	// 附加 node_count
+	result := make([]gin.H, 0, len(list))
+	for _, p := range list {
+		count, _ := h.planSvc.CountNodesByPlanID(p.ID)
+		result = append(result, gin.H{
+			"id":                  p.ID,
+			"name":                p.Name,
+			"description":         p.Description,
+			"features":            p.Features,
+			"limitations":         p.Limitations,
+			"traffic_limit":       p.TrafficLimit,
+			"duration_days":       p.DurationDays,
+			"price_cents":         p.PriceCents,
+			"original_price_cents": p.OriginalPriceCents,
+			"device_limit":        p.DeviceLimit,
+			"sort_order":          p.SortOrder,
+			"is_enabled":          p.IsEnabled,
+			"node_count":          count,
+		})
+	}
+	response.OK(c, gin.H{"list": result, "total": total})
 }
 
 // AdminPlanCreate [29] POST /api/v1/admin/plans
@@ -90,5 +123,25 @@ func (h *PlanHandler) UserPlanList(c *gin.Context) {
 		response.Fail(c, response.CodeDBError)
 		return
 	}
-	response.OK(c, gin.H{"list": list, "total": len(list)})
+	// 附加 node_count
+	result := make([]gin.H, 0, len(list))
+	for _, p := range list {
+		count, _ := h.planSvc.CountNodesByPlanID(p.ID)
+		result = append(result, gin.H{
+			"id":                  p.ID,
+			"name":                p.Name,
+			"description":         p.Description,
+			"features":            p.Features,
+			"limitations":         p.Limitations,
+			"traffic_limit":       p.TrafficLimit,
+			"duration_days":       p.DurationDays,
+			"price_cents":         p.PriceCents,
+			"original_price_cents": p.OriginalPriceCents,
+			"device_limit":        p.DeviceLimit,
+			"sort_order":          p.SortOrder,
+			"is_enabled":          p.IsEnabled,
+			"node_count":          count,
+		})
+	}
+	response.OK(c, gin.H{"list": result, "total": len(result)})
 }

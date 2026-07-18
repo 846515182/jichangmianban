@@ -51,6 +51,25 @@ func (r *PlanRepo) ListEnabled() ([]model.Plan, error) {
 	return list, nil
 }
 
+// GetTrialPlan 查找试用套餐 (name 含"试用"且启用), 用于注册自动发放
+func (r *PlanRepo) GetTrialPlan() (*model.Plan, error) {
+	var p model.Plan
+	if err := r.db.Where("is_deleted = false AND is_enabled = true AND name LIKE ?", "%试用%").
+		Order("sort_order ASC, created_at DESC").First(&p).Error; err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// CountNodesByPlanID 统计绑定该套餐的节点数量
+func (r *PlanRepo) CountNodesByPlanID(planID string) (int64, error) {
+	var count int64
+	if err := r.db.Table("node_plan_bindings").Where("plan_id = ?", planID).Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 // Create 创建套餐
 func (r *PlanRepo) Create(p *model.Plan) error {
 	return r.db.Create(p).Error

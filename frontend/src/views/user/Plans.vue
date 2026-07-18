@@ -46,6 +46,11 @@
             <span class="feature-label">设备数</span>
             <span class="feature-value">{{ plan.device_limit ? plan.device_limit : '不限' }}</span>
           </div>
+          <div class="feature-item">
+            <el-icon><Cpu /></el-icon>
+            <span class="feature-label">节点数</span>
+            <span class="feature-value">{{ plan.node_count || 0 }} 个</span>
+          </div>
         </div>
 
         <!-- 优点列表 -->
@@ -187,7 +192,7 @@
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh, DataLine, Calendar, Connection, Loading, CircleCheckFilled, CircleCloseFilled } from '@element-plus/icons-vue'
+import { Refresh, DataLine, Calendar, Connection, Cpu, Loading, CircleCheckFilled, CircleCloseFilled } from '@element-plus/icons-vue'
 import request from '@/utils/request'
 import { formatTraffic } from '@/utils/format'
 import QRCode from 'qrcode'

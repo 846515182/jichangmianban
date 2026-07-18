@@ -28,6 +28,13 @@
         <el-table-column label="设备限制" width="100">
           <template #default="{ row }">{{ row.device_limit || "无限" }}</template>
         </el-table-column>
+        <el-table-column label="节点数量" width="100">
+          <template #default="{ row }">
+            <el-tag :type="row.node_count > 0 ? 'success' : 'info'" effect="plain" size="small">
+              {{ row.node_count || 0 }} 个
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
             <el-switch :model-value="row.is_enabled" @change="(v: any) => toggleStatus(row, v)" />

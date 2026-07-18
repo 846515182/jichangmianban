@@ -124,9 +124,6 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 	paymentH := NewPaymentHandler(deps.PaymentSvc)
 	couponH := NewCouponHandler(deps.CouponRepo, deps.OrderRepo)
 	ticketH := NewTicketHandler(deps.TicketSvc)
-	// 修复 EMAIL-ROUTE-01 (P0): handler.EmailService.SendVerifyCode 此前是死代码
-	// (定义但未挂载路由), 导致用户无法触发邮箱激活/换绑验证码, ChangeEmail 流程不可用。
-	emailH := NewEmailService(app.Get().DB, app.Get().RDB)
 
 	api := r.Group("/api/v1")
 
@@ -138,12 +135,6 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 		auth.POST("/logout", middleware.AnyAuth(), middleware.RateLimit(middleware.RateScopeUser), authH.Logout)
 		auth.POST("/change-password", middleware.AnyAuth(), middleware.RateLimit(middleware.RateScopeUser), authH.ChangePassword)
 		auth.POST("/logout-all", middleware.AnyAuth(), middleware.RateLimit(middleware.RateScopeUser), authH.LogoutAll)
-		auth.POST("/forgot-password", middleware.RateLimit(middleware.RateScopeAdmin), ForgotPassword)
-		auth.POST("/reset-password", middleware.RateLimit(middleware.RateScopeAdmin), ResetPassword)
-		auth.GET("/verify-email", middleware.RateLimit(middleware.RateScopeAdmin), VerifyEmail)
-		// 修复 EMAIL-ROUTE-01 (P0): 挂载发送验证码/激活链接接口, type=verify 发激活链接, type=change 发换绑验证码
-		auth.POST("/send-verify-code", middleware.RateLimit(middleware.RateScopeAdmin), emailH.SendVerifyCode)
-		auth.POST("/change-email", middleware.AnyAuth(), middleware.RateLimit(middleware.RateScopeUser), ChangeEmail)
 	}
 
 	api.GET("/captcha", GetCaptcha)

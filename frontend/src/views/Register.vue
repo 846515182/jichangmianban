@@ -28,14 +28,6 @@
             :prefix-icon="User"
           />
         </el-form-item>
-        <el-form-item prop="email">
-          <el-input
-            v-model="form.email"
-            size="large"
-            placeholder="请输入邮箱"
-            :prefix-icon="Message"
-          />
-        </el-form-item>
         <el-form-item prop="password">
           <el-input
             v-model="form.password"
@@ -97,7 +89,7 @@
 
       <div class="register-tip">
         <el-icon><InfoFilled /></el-icon>
-        <span>注册后将自动获得试用套餐，详情请咨询管理员</span>
+        <span>注册即享 5GB 试用流量，开通立即使用</span>
       </div>
 
       <div class="login-link">
@@ -112,7 +104,7 @@
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
-import { User, Lock, Message, InfoFilled, Key, Refresh } from '@element-plus/icons-vue'
+import { User, Lock, InfoFilled, Key, Refresh } from '@element-plus/icons-vue'
 import request from '@/utils/request'
 
 const router = useRouter()
@@ -127,7 +119,6 @@ const captchaLoading = ref(false)
 
 const form = reactive({
   username: '',
-  email: '',
   password: '',
   confirmPassword: '',
   captchaCode: '',
@@ -139,10 +130,6 @@ const rules: FormRules = {
     { required: true, message: '请输入用户名', trigger: 'blur' },
     { min: 3, max: 20, message: '用户名长度 3-20 个字符', trigger: 'blur' },
     { pattern: /^[a-zA-Z0-9_]+$/, message: '仅支持字母、数字和下划线', trigger: 'blur' },
-  ],
-  email: [
-    { required: true, message: '请输入邮箱', trigger: 'blur' },
-    { type: 'email', message: '邮箱格式不正确', trigger: 'blur' },
   ],
   password: [
     { required: true, message: '请输入密码', trigger: 'blur' },
@@ -198,7 +185,6 @@ const handleRegister = async () => {
       // 调用后端注册接口
       await request.post('/api/v1/auth/register', {
         username: form.username,
-        email: form.email,
         password: form.password,
         captcha_id: captchaId.value,
         captcha_code: form.captchaCode,

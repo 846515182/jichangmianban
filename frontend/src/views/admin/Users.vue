@@ -7,14 +7,13 @@
           <p class="page-desc">管理用户账号、流量配额与状态</p>
         </div>
         <div class="header-actions">
-          <el-input v-model="keyword" placeholder="搜索用户名/邮箱" :prefix-icon="Search" clearable style="width: 220px" />
+          <el-input v-model="keyword" placeholder="搜索用户名" :prefix-icon="Search" clearable style="width: 220px" />
           <el-button type="primary" @click="openDialog()"><el-icon><Plus /></el-icon>新增用户</el-button>
         </div>
       </div>
 
       <el-table :data="filteredList" stripe v-loading="loading">
         <el-table-column prop="username" label="用户名" min-width="100" />
-        <el-table-column prop="email" label="邮箱" min-width="160" />
         <el-table-column label="套餐" min-width="120">
           <template #default="{ row }">{{ row.plan_id ? planName(row.plan_id) : "未选择" }}</template>
         </el-table-column>
@@ -72,18 +71,9 @@
         <el-form-item label="用户名" prop="username">
           <el-input v-model="form.username" :disabled="!!editing" />
         </el-form-item>
-        <el-form-item label="邮箱" prop="email">
-          <el-input v-model="form.email" />
-        </el-form-item>
         <el-form-item v-if="!editing" label="密码" prop="password">
           <el-input v-model="form.password" type="password" show-password />
         </el-form-item>
-        <el-form-item label="套餐">
-          <el-select v-model="form.plan_id" placeholder="选择套餐" clearable style="width:100%">
-            <el-option v-for="p in planList" :key="p.id" :label="p.name" :value="p.id" />
-          </el-select>
-        </el-form-item>
-
         <el-form-item label="流量配额(GB)">
           <el-input-number v-model="form.trafficLimitGB" :min="0" controls-position="right" style="width:100%" />
           <span class="form-tip">0 表示无限</span>

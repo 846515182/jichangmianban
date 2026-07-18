@@ -164,6 +164,11 @@ func (s *PlanService) ListEnabledPlans() ([]model.Plan, error) {
 	return s.repo.ListEnabled()
 }
 
+// CountNodesByPlanID 统计绑定该套餐的节点数量
+func (s *PlanService) CountNodesByPlanID(planID string) (int64, error) {
+	return s.repo.CountNodesByPlanID(planID)
+}
+
 // CalcExpiredAt 根据套餐计算过期时间(返回 nil 表示不限)
 func CalcExpiredAt(p *model.Plan, base time.Time) *time.Time {
 	if p.DurationDays <= 0 {

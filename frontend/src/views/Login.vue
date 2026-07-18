@@ -4,7 +4,7 @@
       <h2 class="title">登录 Nexus-Panel</h2>
       <el-form :model="form" :rules="rules" ref="formRef" @submit.prevent="onSubmit">
         <el-form-item label="账号" prop="username">
-          <el-input v-model="form.username" placeholder="用户名或邮箱" autocomplete="username" size="large" />
+          <el-input v-model="form.username" placeholder="用户名" autocomplete="username" size="large" />
         </el-form-item>
         <el-form-item label="密码" prop="password">
           <el-input v-model="form.password" type="password" show-password
@@ -16,8 +16,6 @@
 
         <div class="links">
           <router-link to="/register" class="link-item">没有账号?去注册</router-link>
-          <span class="divider" aria-hidden="true">|</span>
-          <router-link to="/forgot-password" class="link-item">忘记密码?</router-link>
         </div>
       </el-form>
     </el-card>
@@ -40,7 +38,7 @@ const formRef = ref()
 const loading = ref(false)
 
 const rules = {
-  username: [{ required: true, message: '请输入用户名或邮箱', trigger: 'blur' }],
+  username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
   password: [{ required: true, message: '请输入密码', trigger: 'blur' }],
 }
 

@@ -62,13 +62,34 @@ func (s *UserRegisterService) Register(in *RegisterInput) (*model.User, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// 默认 5GB 试用流量 (5 * 1024 * 1024 * 1024)
+	const trialTrafficLimit int64 = 5 * 1024 * 1024 * 1024
+	const trialDurationDays = 30
+
 	u := &model.User{
 		Username:     in.Username,
 		PasswordHash: string(hash),
-		Email:        in.Email,
-		TrafficLimit: 0,
+		TrafficLimit: trialTrafficLimit,
 		Status:       "active",
 	}
+	// 注册即享试用: 查找试用套餐(name 含"试用"且 enabled), 找到则绑定
+	trialPlan, pErr := s.planRepo.GetTrialPlan()
+	if pErr == nil && trialPlan != nil {
+		u.PlanID = &trialPlan.ID
+		if trialPlan.TrafficLimit > 0 {
+			u.TrafficLimit = trialPlan.TrafficLimit
+		}
+		if trialPlan.DurationDays > 0 {
+			t := time.Now().AddDate(0, 0, trialPlan.DurationDays)
+			u.ExpiredAt = &t
+		}
+	} else {
+		// 没有试用套餐, 仍然给 5GB + 30 天试用
+		t := time.Now().AddDate(0, 0, trialDurationDays)
+		u.ExpiredAt = &t
+	}
+
 	db := in.DB
 	if db == nil {
 		db = s.userRepo.GetDB() // 通过新增的方法获取默认 DB

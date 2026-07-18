@@ -163,82 +163,6 @@
         </el-row>
       </el-tab-pane>
 
-      <!-- 邮件配置 -->
-      <el-tab-pane label="邮件配置" name="email">
-        <el-row :gutter="20">
-          <el-col :xs="24" :md="14">
-            <div class="np-card section-card">
-              <div class="section-title"><el-icon><Message /></el-icon> SMTP 邮件配置</div>
-              <el-form label-width="120px" label-position="right">
-                <el-form-item label="启用邮件">
-                  <el-switch v-model="email.enabled" active-text="开启邮件" inactive-text="关闭邮件" />
-                  <span class="form-tip">关闭后用户将无法收到验证邮件</span>
-                </el-form-item>
-                <el-form-item label="SMTP 服务器">
-                  <el-input v-model="email.host" placeholder="smtp.example.com" />
-                </el-form-item>
-                <el-form-item label="SMTP 端口">
-                  <el-input-number v-model="email.port" :min="1" :max="65535" controls-position="right" style="width: 100%" />
-                  <span class="form-tip">Mailtrap 推荐 587(TLS)，也支持 2525/25；QQ/163 用 465(SSL)</span>
-                </el-form-item>
-                <el-form-item label="SMTP 用户名">
-                  <el-input v-model="email.user" placeholder="api 或 完整邮箱地址" />
-                  <span class="form-tip">Mailtrap 新版本固定填 "api"；QQ/163 邮箱填完整邮箱地址</span>
-                </el-form-item>
-                <el-form-item label="发件人地址">
-                  <el-input v-model="email.from" placeholder="noreply@yourdomain.com" />
-                  <span class="form-tip">收件人看到的发件人邮箱，必须是 SMTP 服务商已验证域名的邮箱</span>
-                </el-form-item>
-                <el-form-item label="邮箱密码">
-                  <el-input v-model="email.password" :type="showEmailPwd ? 'text' : 'password'" show-password placeholder="SMTP 密码或 API Token（Mailtrap 用 API Token）">
-                    <template #append>
-                      <el-button @click="showEmailPwd = !showEmailPwd">
-                        <el-icon><View v-if="!showEmailPwd" /><Hide v-else /></el-icon>
-                      </el-button>
-                    </template>
-                  </el-input>
-                </el-form-item>
-                <el-form-item>
-                  <el-button type="primary" @click="saveEmail" :loading="savingEmail">保存配置</el-button>
-                  <el-button @click="testEmail" :loading="testingEmail">测试发送</el-button>
-                </el-form-item>
-              </el-form>
-            </div>
-          </el-col>
-
-          <el-col :xs="24" :md="10">
-            <div class="np-card section-card">
-              <div class="section-title"><el-icon><InfoFilled /></el-icon> 邮件说明</div>
-              <ul class="pay-tips">
-                <li>SMTP 服务器用于发送用户注册验证、密码重置等邮件。</li>
-                <li>推荐 SMTP 配置：
-                  <ul>
-                    <li><strong>Mailtrap</strong>：live.smtp.mailtrap.io:587（生产环境）<br/>
-                      <small>用户名固定为 <code>api</code>，密码为 <strong>API Token</strong>（在 Sending Setup → SMTP 获取）</small></li>
-                    <li>QQ邮箱：smtp.qq.com:587</li>
-                    <li>163邮箱：smtp.163.com:465</li>
-                    <li>Gmail：smtp.gmail.com:587</li>
-                  </ul>
-                </li>
-                <li>Mailtrap 密码为 <strong>API Token</strong>（非登录密码），需先在 Mailtrap 控制台验证发送域名。</li>
-                <li>其他邮箱密码通常为邮箱的授权码（非登录密码）。</li>
-                <li>保存配置后请点击「测试发送」验证配置是否正确。</li>
-              </ul>
-              <el-divider />
-              <div class="section-title"><el-icon><CircleCheckFilled /></el-icon> 当前状态</div>
-              <div class="pay-status">
-                <el-tag :type="email.enabled ? 'success' : 'danger'" effect="dark">
-                  {{ email.enabled ? '邮件已启用' : '邮件已关闭' }}
-                </el-tag>
-                <el-tag v-if="lastEmailTestResult" :type="lastEmailTestResult.success ? 'success' : 'danger'" effect="plain">
-                  {{ lastEmailTestResult.success ? '测试成功' : '测试失败' }}
-                </el-tag>
-              </div>
-            </div>
-          </el-col>
-        </el-row>
-      </el-tab-pane>
-
       <!-- 系统维护 -->
       <el-tab-pane label="系统维护" name="maintenance">
         <el-row :gutter="20">
@@ -554,86 +478,6 @@ const pwdRules: FormRules = {
   }],
 }
 
-// 邮件配置
-const showEmailPwd = ref(false)
-const savingEmail = ref(false)
-const testingEmail = ref(false)
-const lastEmailTestResult = ref<{ success: boolean; message: string } | null>(null)
-const email = reactive({
-  enabled: false,
-  host: '',
-  port: 587,
-  user: '',
-  from: '',
-  password: '',
-})
-
-// 加载邮件配置
-const loadEmailConfig = async () => {
-  try {
-    const res: any = await request.get('/api/v1/admin/system/notify-config')
-    if (res && res.code === 0 && res.data) {
-      const d = res.data
-      email.enabled = !!d.email_enabled
-      email.host = d.email_host || ''
-      email.port = d.email_port || 587
-      email.user = d.email_user || ''
-      email.from = d.email_from || ''
-      email.password = '' // 不加载密码，让用户重新输入
-    }
-  } catch { /* 拦截器处理 */ }
-}
-
-// 保存邮件配置
-const saveEmail = async () => {
-  if (!email.host || !email.user) {
-    ElMessage.warning('请填写 SMTP 服务器和发件人邮箱')
-    return
-  }
-  savingEmail.value = true
-  try {
-    await request.put('/api/v1/admin/system/notify-config', {
-      email_enabled: email.enabled,
-      email_host: email.host,
-      email_port: email.port,
-      email_user: email.user,
-      email_from: email.from,
-      email_password: email.password,
-    })
-    ElMessage.success('邮件配置已保存')
-  } catch {
-    /* 拦截器已提示 */
-  } finally {
-    savingEmail.value = false
-  }
-}
-
-// 测试邮件发送
-const testEmail = async () => {
-  if (!email.host || !email.user || !email.password) {
-    ElMessage.warning('请先填写完整的 SMTP 配置')
-    return
-  }
-  testingEmail.value = true
-  try {
-    const res: any = await request.post('/api/v1/admin/system/notify-config/test', {
-      email_host: email.host,
-      email_port: email.port,
-      email_user: email.user,
-      email_password: email.password,
-      email_from: email.from,
-    })
-    lastEmailTestResult.value = { success: true, message: res?.msg || '测试邮件已发送' }
-    ElMessage.success('测试邮件已发送，请查收')
-  } catch (e: any) {
-    const backendMsg = e?.response?.data?.msg || e?.message || '发送失败'
-    lastEmailTestResult.value = { success: false, message: backendMsg }
-    ElMessage.error(backendMsg)
-  } finally {
-    testingEmail.value = false
-  }
-}
-
 
 const savePwd = async () => {
   if (!pwdFormRef.value) return
@@ -810,7 +654,6 @@ const diskCleanup = async () => {
 
 onMounted(() => {
   loadPaymentConfig()
-  loadEmailConfig()
   loadBackups()
   loadGitStatus()
   loadDiskUsage()
