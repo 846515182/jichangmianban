@@ -209,6 +209,7 @@ interface Plan {
   price_cents: number      // 分
   original_price_cents: number  // 原价(分, 划线价), 0=无
   device_limit: number     // 设备数, 0=不限
+  node_count?: number      // 绑定节点数量
   sort_order: number
   is_enabled: boolean
 }

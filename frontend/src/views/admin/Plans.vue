@@ -127,7 +127,7 @@ import { formatTraffic } from "@/utils/format"
 interface PlanRow {
   id: string; name: string; description: string; features: string; limitations: string
   traffic_limit: number; duration_days: number; price_cents: number; original_price_cents: number
-  device_limit: number; sort_order: number; is_enabled: boolean
+  device_limit: number; node_count?: number; sort_order: number; is_enabled: boolean
 }
 
 // 解析 JSON 数组字符串为字符串数组(容错)
