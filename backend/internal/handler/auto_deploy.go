@@ -73,9 +73,10 @@ func NewAutoDeployHandler(nodeRepo *repo.NodeRepo, jwt *security.JWTManager) *Au
 }
 
 type autoDeployReq struct {
-	Password string `json:"password"`
-	Username string `json:"username"`
-	Port     int    `json:"port"`
+	Password   string `json:"password"`
+	PrivateKey string `json:"private_key"` // SSH 私钥文本(支持密钥认证, 与密码二选一, 密钥优先)
+	Username   string `json:"username"`
+	Port       int    `json:"port"`
 }
 
 // node_agent 源码路径，优先使用环境变量 NODE_AGENT_PATH，否则回退值
@@ -160,8 +161,8 @@ func (h *AutoDeployHandler) Deploy(c *gin.Context) {
 	}
 
 	var req autoDeployReq
-	if err := c.ShouldBindJSON(&req); err != nil || req.Password == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"msg": "缺少 SSH 密码"})
+	if err := c.ShouldBindJSON(&req); err != nil || (req.Password == "" && req.PrivateKey == "") {
+		c.JSON(http.StatusBadRequest, gin.H{"msg": "缺少 SSH 密码或私钥"})
 		return
 	}
 	if req.Username == "" {
@@ -172,9 +173,11 @@ func (h *AutoDeployHandler) Deploy(c *gin.Context) {
 	}
 	// 安全：将敏感字段移出 req，避免后续误用或日志泄露
 	password := req.Password
+	privateKey := req.PrivateKey
 	port := req.Port
 	username := req.Username
 	req.Password = ""
+	req.PrivateKey = ""
 	req.Port = 0
 	req.Username = ""
 
@@ -229,10 +232,11 @@ func (h *AutoDeployHandler) Deploy(c *gin.Context) {
 		}
 
 		// 执行单次部署
-		ok, errCode, errMsg := h.runDeployOnce(c, sse, node, password, port, username)
+		ok, errCode, errMsg := h.runDeployOnce(c, sse, node, password, privateKey, port, username)
 		if ok {
-			// 安全：完成部署后清除密码
+			// 安全：完成部署后清除密码/密钥
 			password = ""
+			privateKey = ""
 			sse.event("finish", "done", "一键部署完成！请返回节点列表查看在线状态", "")
 			if f, ok2 := c.Writer.(http.Flusher); ok2 {
 				f.Flush()
@@ -266,7 +270,8 @@ func (h *AutoDeployHandler) Deploy(c *gin.Context) {
 
 
 // runDeployOnce 执行一次完整部署; 返回 (成功?, 错误码, 错误信息)
-func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *model.Node, password string, port int, username string) (bool, string, string) {
+// privateKey 为 SSH 私钥文本(PEM 格式), 与 password 二选一, 密钥优先
+func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *model.Node, password string, privateKey string, port int, username string) (bool, string, string) {
 	panelIP := getPanelIP()
 	if panelIP == "" {
 		sse.eventWithCode(PhaseConnectServer, "error",
@@ -302,9 +307,31 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	// Phase 1: 连接服务器
 	// ============================================================
 	sse.event(PhaseConnectServer, "running", "正在连接节点服务器 "+node.ServerAddress+":"+strconv.Itoa(port)+"...", "")
+
+	// 构建 SSH 认证方法: 密钥优先, 密码兜底
+	var authMethods []ssh.AuthMethod
+	if privateKey != "" {
+		// 密钥认证: 支持 PEM 格式私钥 (RSA/Ed25519/ECDSA)
+		signer, keyErr := parsePrivateKey(privateKey)
+		if keyErr != nil {
+			sse.eventWithCode(PhaseConnectServer, "error",
+				"SSH 私钥解析失败: "+keyErr.Error()+"\n\n请确认: 1) 私钥为 PEM 格式 2) 已粘贴完整内容(含 -----BEGIN ...----- 和 -----END ...-----)",
+				"", DeployErrSSHAuth)
+			return false, DeployErrSSHAuth, "SSH 私钥解析失败: " + keyErr.Error()
+		}
+		authMethods = append(authMethods, ssh.PublicKeys(signer))
+		// 兜底: 密钥失败时尝试密码
+		if password != "" {
+			authMethods = append(authMethods, ssh.Password(password))
+		}
+		sse.event(PhaseConnectServer, "log", "", "使用 SSH 密钥认证...")
+	} else {
+		authMethods = append(authMethods, ssh.Password(password))
+	}
+
 	sshConfig := &ssh.ClientConfig{
 		User:            username,
-		Auth:            []ssh.AuthMethod{ssh.Password(password)},
+		Auth:            authMethods,
 		HostKeyCallback: hostKeyCallback(node.ServerAddress),
 		Timeout:         15 * time.Second,
 		Config: ssh.Config{
@@ -1445,6 +1472,31 @@ func diagnoseSSHError(err error, port int) string {
 // ============================================================
 // SSH 辅助函数
 // ============================================================
+
+// parsePrivateKey 解析 PEM 格式的 SSH 私钥文本，返回 signer
+// 支持: RSA, Ed25519, ECDSA 私钥(含加密/无加密)
+// 私钥文本从用户输入直接粘贴，无需换行符转换
+func parsePrivateKey(pemData string) (ssh.Signer, error) {
+	// 尝试直接解析(支持加密私钥)
+	signer, err := ssh.ParsePrivateKey([]byte(pemData))
+	if err == nil {
+		return signer, nil
+	}
+	// 加密私钥需要密码，目前不支持加密密钥的密码输入
+	// 如果解析失败且是加密密钥，返回明确错误
+	if strings.Contains(err.Error(), "encrypted") {
+		return nil, fmt.Errorf("私钥已加密，暂不支持加密私钥。请使用无密码私钥: ssh-keygen -p -f ~/.ssh/id_ed25519")
+	}
+	// 尝试修复常见的粘贴格式问题: 去掉可能的前后空白
+	trimmed := strings.TrimSpace(pemData)
+	if trimmed != pemData {
+		signer, err2 := ssh.ParsePrivateKey([]byte(trimmed))
+		if err2 == nil {
+			return signer, nil
+		}
+	}
+	return nil, fmt.Errorf("私钥格式无效: %w", err)
+}
 
 // sshRunLocal 在面板服务器本地执行 shell 命令(用于预编译镜像)
 func sshRunLocal(cmd string) (string, error) {

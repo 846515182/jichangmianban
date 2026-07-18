@@ -1,18 +1,66 @@
 <template>
   <el-dialog v-model="visible" title="一键自动部署" width="780px" top="5vh" class="deploy-progress-dialog" :close-on-click-modal="false" :show-close="!running">
     <div class="dp-container">
-      <!-- 未开始：密码输入 -->
+      <!-- 未开始：认证方式选择 -->
       <div v-if="!started" class="dp-pwd-bar">
         <el-alert type="info" :closable="false" show-icon style="margin-bottom:12px">
           <template #title>面板将自动 SSH 连接节点服务器，推送文件、安装 Docker、启动 node-agent，全程无需手动操作。</template>
         </el-alert>
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-          <el-input v-model="password" type="password" show-password placeholder="节点服务器 root 密码" style="width:200px" @keyup.enter="start" />
+
+        <!-- 认证方式切换 -->
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+          <span style="font-size:13px;color:#606266">认证方式:</span>
+          <el-radio-group v-model="authMode" size="small">
+            <el-radio-button value="password">密码</el-radio-button>
+            <el-radio-button value="key">SSH 密钥</el-radio-button>
+          </el-radio-group>
           <el-input v-model="username" placeholder="用户" style="width:90px" />
           <el-input-number v-model="port" :min="1" :max="65535" controls-position="right" style="width:110px" />
-          <el-button type="primary" :disabled="!password" @click="start">
+          <el-button type="primary" :disabled="!canStart" @click="start">
             <el-icon><VideoPlay /></el-icon> 开始部署
           </el-button>
+        </div>
+
+        <!-- 密码模式 -->
+        <div v-if="authMode === 'password'" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <el-input v-model="password" type="password" show-password placeholder="节点服务器密码" style="width:260px" @keyup.enter="start" />
+          <span style="font-size:12px;color:#909399">输入 root 或其他 sudo 用户的密码</span>
+        </div>
+
+        <!-- SSH 密钥模式 -->
+        <div v-if="authMode === 'key'" style="display:flex;flex-direction:column;gap:8px">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <el-upload
+              :auto-upload="false"
+              :show-file-list="false"
+              :on-change="onKeyFileChange"
+              accept="*"
+              style="display:inline-flex"
+            >
+              <el-button size="small" type="primary" plain>选择私钥文件</el-button>
+            </el-upload>
+            <span style="font-size:12px;color:#909399">或直接粘贴私钥内容</span>
+            <el-button size="small" link type="primary" @click="showKeyHelp = !showKeyHelp">
+              {{ showKeyHelp ? '收起' : '如何获取私钥?' }}
+            </el-button>
+          </div>
+          <el-input
+            v-model="privateKey"
+            type="textarea"
+            :rows="5"
+            placeholder="粘贴 SSH 私钥内容 (PEM 格式)&#10;-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"
+            style="font-family:monospace;font-size:12px"
+          />
+          <el-alert v-if="showKeyHelp" type="info" :closable="false" style="margin-top:4px">
+            <template #title>
+              <div style="font-size:12px;line-height:1.6">
+                1. 生成密钥对: <code>ssh-keygen -t ed25519 -f ~/.ssh/nexus_deploy -N ""</code><br/>
+                2. 公钥写入服务器: <code>ssh-copy-id -i ~/.ssh/nexus_deploy.pub root@节点IP</code><br/>
+                3. 查看私钥: <code>cat ~/.ssh/nexus_deploy</code> 并复制全部内容粘贴到上方<br/>
+                4. 注意: 私钥不要设置密码 ( -N "" )，否则无法在此使用
+              </div>
+            </template>
+          </el-alert>
         </div>
       </div>
 
@@ -68,9 +116,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, watch, computed } from 'vue'
 import { ElIcon, ElMessage } from 'element-plus'
 import { VideoPlay, Loading } from '@element-plus/icons-vue'
+import type { UploadFile } from 'element-plus'
 import request from '@/utils/request'
 import { useAuthStore } from '@/stores/auth'
 
@@ -87,10 +136,34 @@ const visible = ref(props.modelValue)
 watch(() => props.modelValue, (v) => { visible.value = v; resetIfClosed(v) })
 watch(visible, (v) => emit('update:modelValue', v))
 
+// 认证模式: password | key
+const authMode = ref<'password' | 'key'>('password')
 const password = ref(props.prePassword || '')
+const privateKey = ref('')
 const username = ref(props.preUsername || 'root')
 const port = ref(props.prePort || 22)
 const started = ref(false)
+const showKeyHelp = ref(false)
+
+// 是否可以开始部署
+const canStart = computed(() => {
+  if (authMode.value === 'key') return !!privateKey.value
+  return !!password.value
+})
+
+// 文件选择: 读取私钥文件内容
+const onKeyFileChange = (file: UploadFile) => {
+  const reader = new FileReader()
+  reader.onload = (e) => {
+    privateKey.value = (e.target?.result as string) || ''
+  }
+  reader.onerror = () => {
+    ElMessage.error('读取私钥文件失败')
+  }
+  if (file.raw) {
+    reader.readAsText(file.raw)
+  }
+}
 const running = ref(false)
 const finished = ref(false)
 const events = ref<Array<{step: string; status: string; msg: string; output: string; errCode?: string}>>([])
@@ -151,8 +224,10 @@ const resetIfClosed = (v: boolean) => {
       finished.value = false
       events.value = []
       activePhase.value = ''
-      // 安全: 关闭弹窗时清除密码, 避免缓存残留导致下次部署用错密码
+      // 安全: 关闭弹窗时清除密码/密钥, 避免缓存残留导致下次部署用错凭证
       password.value = ''
+      privateKey.value = ''
+      showKeyHelp.value = false
     }, 300)
   }
 }
@@ -204,7 +279,7 @@ const waitForNodeOnline = async () => {
 }
 
 const start = async () => {
-  if (!password.value || !props.nodeId) return
+  if (!canStart.value || !props.nodeId) return
   started.value = true
   running.value = true
   finished.value = false
@@ -245,7 +320,12 @@ const start = async () => {
     const resp = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + bearerToken },
-      body: JSON.stringify({ password: password.value, username: username.value, port: port.value }),
+      body: JSON.stringify({
+        password: authMode.value === 'password' ? password.value : '',
+        private_key: authMode.value === 'key' ? privateKey.value : '',
+        username: username.value,
+        port: port.value,
+      }),
     })
 
     if (!resp.ok && resp.status !== 200) {
