@@ -249,10 +249,12 @@ func (h *AutoDeployHandler) Deploy(c *gin.Context) {
 		lastErrMsg = errMsg
 
 		// 致命/无意义重试的错误不重试
-		if errCode == DeployErrSSHAuth || errCode == DeployErrSSHConnect || errCode == DeployErrDockerNotInstalled {
+		if errCode == DeployErrSSHAuth || errCode == DeployErrSSHConnect || errCode == DeployErrDockerNotInstalled || errCode == DeployErrPortConflict {
 			reason := "部署失败"
 			if errCode == DeployErrDockerNotInstalled {
 				reason = "Docker 安装失败 (重试不会改变结果，请手动排查)"
+			} else if errCode == DeployErrPortConflict {
+				reason = "端口冲突 (Phase 1 已自动清理，仍被占用请手动释放)"
 			}
 			sse.eventWithCode(PhaseVerify, "error",
 				fmt.Sprintf("%s (%s): %s\n\n修复建议: %s", reason, errCode, errMsg, fixSuggestion(errCode)),
@@ -395,12 +397,12 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 		return false, DeployErrSSHConnect, "SSH 会话不可用"
 	}
 
-	// 清理同节点旧容器 + 旧部署目录 (容错: 可能本来就不存在)
+	// 清理同节点旧容器 + 旧部署目录 + 占用端口的旧进程 (容错: 可能本来就不存在)
 	// 修复 NODE-RETRY-01 (P0): 旧版只清同名容器, 不清部署目录。
 	//   3 次重试间若上次失败留下了脏 .env.node / 半截 agent 二进制 / 旧 xray-cache,
 	//   下次部署 mkdir -p 不会删旧文件, 可能与新版本冲突(xray-cache 版本不匹配等)。
 	//   现在重试前先 docker compose down + rm -rf 部署目录, 确保每次部署都是干净状态。
-	sse.event(PhaseConnectServer, "running", "正在清理旧部署残留(容器+目录)...", "")
+	sse.event(PhaseConnectServer, "running", "正在清理旧部署残留(容器+目录+端口)...", "")
 	// 兜底: 清理命令逐条执行, 每条独立容错, 避免一条失败导致后续不执行
 	cleanSteps := []struct {
 		desc string
@@ -409,6 +411,7 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 		{"docker compose down", fmt.Sprintf("cd %s 2>/dev/null && docker compose -f docker-compose.node.yml down --timeout 10 2>/dev/null; true", deployDir)},
 		{"停止旧容器", fmt.Sprintf("docker stop %s 2>/dev/null; true", containerName)},
 		{"删除旧容器", fmt.Sprintf("docker rm -f %s 2>/dev/null; true", containerName)},
+		{"释放端口进程", fmt.Sprintf("fuser -k %d/tcp 2>/dev/null; fuser -k %d/tcp 2>/dev/null; true", listenPort, healthPort)},
 		{"删除旧目录", fmt.Sprintf("rm -rf %s 2>/dev/null; true", deployDir)},
 	}
 	var cleanLines []string
