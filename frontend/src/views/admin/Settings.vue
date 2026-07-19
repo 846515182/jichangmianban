@@ -174,6 +174,24 @@
                   <span class="git-label">当前分支:</span>
                   <el-tag size="small" type="success">{{ gitStatus.branch }}</el-tag>
                 </div>
+                <div class="git-info git-version-row">
+                  <span class="git-label">运行版本:</span>
+                  <code class="git-commit-hash git-running-version">{{ gitStatus.binary_version || '未知' }}</code>
+                  <el-tooltip
+                    v-if="gitStatus.binary_version && gitStatus.local_head && gitStatus.binary_version !== gitStatus.local_head"
+                    content="运行版本 ≠ 当前代码版本, 说明代码已拉取但未重新构建部署, 点击下方「在线更新」部署"
+                    placement="top"
+                  >
+                    <el-tag size="small" type="warning" effect="dark">代码已更新待部署</el-tag>
+                  </el-tooltip>
+                  <el-tooltip
+                    v-else-if="gitStatus.binary_version && gitStatus.binary_version === gitStatus.local_head"
+                    content="运行版本 = 当前代码版本, 二进制和代码一致"
+                    placement="top"
+                  >
+                    <el-tag size="small" type="success" effect="plain">已同步</el-tag>
+                  </el-tooltip>
+                </div>
                 <div class="git-info">
                   <span class="git-label">版本状态:</span>
                   <el-tag v-if="gitStatus.needs_rebuild" size="small" type="danger" effect="dark">有更新待部署</el-tag>
@@ -656,6 +674,7 @@ const gitStatus = reactive({
   changelog: '',
   changed_files: '',
   running_version: '',
+  binary_version: '',
   needs_rebuild: false,
   rebuild_changelog: '',
 })
@@ -675,6 +694,7 @@ const loadGitStatus = async (silent = false) => {
     gitStatus.changelog = d.changelog || ''
     gitStatus.changed_files = d.changed_files || ''
     gitStatus.running_version = d.running_version || ''
+    gitStatus.binary_version = d.binary_version || ''
     gitStatus.needs_rebuild = !!d.needs_rebuild
     gitStatus.rebuild_changelog = d.rebuild_changelog || ''
   } catch { /* */ } finally {
@@ -838,6 +858,10 @@ onUnmounted(() => {
 .git-label { font-size: 12px; color: var(--np-text-muted); flex-shrink: 0; line-height: 24px; }
 .git-log { margin: 0; padding: 8px; background: var(--np-card); border-radius: 4px; font-size: 12px; color: var(--np-text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 120px; overflow-y: auto; flex: 1; min-width: 0; }
 .git-commit-hash { font-family: 'JetBrains Mono', monospace; font-size: 12px; padding: 2px 6px; background: var(--np-bg-soft); border-radius: 3px; color: var(--np-text-secondary); }
+/* 运行版本号 - 加粗加大, 让用户一眼能看到当前实际跑的二进制版本 */
+.git-running-version { font-size: 14px; font-weight: 700; padding: 4px 10px; color: var(--np-primary); background: var(--np-primary-soft, rgba(64, 158, 255, 0.1)); }
+.git-version-row { align-items: center; }
+.git-version-row .el-tag { margin-left: 8px; }
 .git-commit-new { color: var(--np-primary); border: 1px dashed var(--np-primary-dim); }
 .git-arrow { color: var(--np-text-muted); font-size: 12px; }
 .git-actions { display: flex; gap: 8px; flex-wrap: nowrap; }

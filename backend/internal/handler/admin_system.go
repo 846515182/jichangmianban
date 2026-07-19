@@ -1320,6 +1320,12 @@ func (h *AdminSystemHandler) GitStatus(c *gin.Context) {
 		runningVersion = strings.TrimSpace(string(data))
 	}
 
+	// 二进制实际版本: 从编译时 ldflags 注入的 app.Version 读取
+	// 这是"当前正在跑的二进制"的真实版本号, 比 .last_build_version 文件更可靠
+	// (.last_build_version 文件可能没更新或丢失, 但二进制里的版本号永远不会错)
+	// 用于前端显示"运行版本: abc1234", 用户更新后刷新看版本号变没变即可判断是否生效
+	binaryVersion := app.Version
+
 	behind := 0
 	ahead := 0
 	changelog := ""
@@ -1365,6 +1371,7 @@ func (h *AdminSystemHandler) GitStatus(c *gin.Context) {
 		"changelog":         strings.TrimSpace(changelog),
 		"changed_files":     strings.TrimSpace(changedFiles),
 		"running_version":   runningVersion,
+		"binary_version":    binaryVersion,
 		"needs_rebuild":     needsRebuild,
 		"rebuild_changelog": strings.TrimSpace(rebuildChangelog),
 	})
