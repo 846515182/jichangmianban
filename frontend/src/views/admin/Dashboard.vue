@@ -461,7 +461,8 @@ const growthOption = computed(() => ({
 
 const fetchSysStats = async () => {
   try {
-    const res: any = await request.get("/api/v1/admin/system/stats")
+    // silent: 3 秒轮询, 后端重启期间会连续 502, 不应弹错误刷屏
+    const res: any = await request.get("/api/v1/admin/system/stats", { silent: true })
     if (res && res.code === 0 && res.data) {
       sysStats.value = { ...sysStats.value, ...res.data }
     }

@@ -89,8 +89,12 @@ service.interceptors.response.use(
     }
 
     if (!isLoginReq && !(config as any)?.silent) {
-      const msg =
+      let msg =
         response?.data?.msg || response?.data?.message || error.message || '网络异常'
+      // 502/503 通常是后端重启或短暂不可用, 显示友好中文提示而非英文错误
+      if (response?.status === 502 || response?.status === 503) {
+        msg = '系统正在重启,请稍候...'
+      }
       ElMessage.error(msg)
     }
     return Promise.reject(error)
