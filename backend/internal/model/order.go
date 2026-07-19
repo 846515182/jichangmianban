@@ -18,7 +18,7 @@ type Order struct {
 	Status        string     `gorm:"type:varchar(16);default:'pending';index" json:"status"` // pending/paid/cancelled/refunded/expired
 	PaymentMethod string     `gorm:"type:varchar(32)" json:"payment_method"`                 // epay_alipay/epay_wechat
 	TradeNo       string     `gorm:"type:varchar(128)" json:"trade_no"`                      // 第三方支付流水号
-	CouponID      string     `gorm:"type:uuid" json:"coupon_id,omitempty"`                   // 使用的优惠券ID(审计)
+	CouponID      *string    `gorm:"type:uuid" json:"coupon_id,omitempty"`                   // 使用的优惠券ID(审计)
 	CouponCode    string     `gorm:"type:varchar(32)" json:"coupon_code,omitempty"`          // 优惠券码快照(审计)
 	PaidAt        *time.Time `json:"paid_at,omitempty"`
 	ExpiredAt     time.Time  `json:"expired_at"` // 订单过期时间(15分钟)

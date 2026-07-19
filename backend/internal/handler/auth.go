@@ -280,9 +280,13 @@ func (h *AuthHandler) LoginLogs(c *gin.Context) {
 
 // recordAudit 记录登录审计
 func (h *AuthHandler) recordAudit(ctx context.Context, targetType, targetID, ip, ua string, success bool) {
+	var tid *string
+	if targetID != "" {
+		tid = &targetID
+	}
 	_ = h.loginAuditRepo.Create(&model.LoginAudit{
 		TargetType: targetType,
-		TargetID:   targetID,
+		TargetID:   tid,
 		IP:         ip,
 		UserAgent:  ua,
 		Location:   "",

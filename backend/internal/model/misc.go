@@ -48,7 +48,7 @@ func (Setting) TableName() string {
 type LoginAudit struct {
 	ID         int64     `gorm:"primaryKey;autoIncrement" json:"id"`
 	TargetType string    `gorm:"type:varchar(16);not null" json:"target_type"` // admin / user
-	TargetID   string    `gorm:"type:uuid;index" json:"target_id"`
+	TargetID   *string   `gorm:"type:uuid;index" json:"target_id"`
 	IP         string    `gorm:"type:varchar(64)" json:"ip"`
 	UserAgent  string    `gorm:"type:varchar(255)" json:"user_agent"`
 	Location   string    `gorm:"type:varchar(128)" json:"location"`

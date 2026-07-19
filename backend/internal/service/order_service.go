@@ -59,7 +59,8 @@ func (s *OrderService) CreateOrder(in *CreateOrderInput) (*model.Order, error) {
 	now := time.Now()
 	amount := plan.PriceCents
 	// 优惠券折扣计算
-	var couponID, couponCode string
+	var couponID *string
+	var couponCode string
 	if in.CouponCode != "" {
 		coupon, err := s.couponRepo.GetByCode(in.CouponCode)
 		if err != nil {
@@ -76,7 +77,7 @@ func (s *OrderService) CreateOrder(in *CreateOrderInput) (*model.Order, error) {
 		if amount < 0 {
 			amount = 0
 		}
-		couponID = coupon.ID
+		couponID = &coupon.ID
 		couponCode = coupon.Code
 	}
 	orderNo, err := generateOrderNo()
@@ -101,7 +102,7 @@ func (s *OrderService) CreateOrder(in *CreateOrderInput) (*model.Order, error) {
 		if err := tx.Create(order).Error; err != nil {
 			return err
 		}
-		if couponID != "" {
+		if couponID != nil {
 			if err := s.couponRepo.IncrUsedSafeTx(tx, couponID, now); err != nil {
 				return errors.New("优惠券已被抢用完, 请刷新重试")
 			}
@@ -185,11 +186,11 @@ func (s *OrderService) CancelOrder(orderID, userID string) error {
 			return errors.New("订单状态已变更, 无法取消")
 		}
 		// 回退优惠券使用次数
-		if o.CouponID != "" {
-			if err := s.couponRepo.DecrUsedSafeTx(tx, o.CouponID); err != nil {
+		if o.CouponID != nil {
+			if err := s.couponRepo.DecrUsedSafeTx(tx, *o.CouponID); err != nil {
 				// 非致命：优惠券计数回退失败不影响订单取消
 				if logger := app.Get().Logger; logger != nil {
-					logger.Warn("回退优惠券使用次数失败", zap.String("coupon_id", o.CouponID), zap.Error(err))
+					logger.Warn("回退优惠券使用次数失败", zap.String("coupon_id", *o.CouponID), zap.Error(err))
 				}
 			}
 		}
@@ -223,10 +224,10 @@ func (s *OrderService) ExpireOrders() (int, error) {
 			if result.RowsAffected == 0 {
 				return nil // 已被并发处理
 			}
-			if o.CouponID != "" {
-				if err := s.couponRepo.DecrUsedSafeTx(tx, o.CouponID); err != nil {
+			if o.CouponID != nil {
+				if err := s.couponRepo.DecrUsedSafeTx(tx, *o.CouponID); err != nil {
 					if logger := app.Get().Logger; logger != nil {
-						logger.Warn("过期订单回退优惠券失败", zap.String("coupon_id", o.CouponID), zap.Error(err))
+						logger.Warn("过期订单回退优惠券失败", zap.String("coupon_id", *o.CouponID), zap.Error(err))
 					}
 				}
 			}
@@ -286,11 +287,11 @@ func (s *OrderService) PaySuccess(orderNo, tradeNo string) error {
 			return fmt.Errorf("订单已支付但套餐不存在: %w", err)
 		}
 		// 过期订单履约: 重新消费优惠券(抵消 ExpireOrders 的回退), 保持计数准确
-		if wasExpired && locked.CouponID != "" {
-			if err := s.couponRepo.IncrUsedSafeTx(tx, locked.CouponID, now); err != nil {
+		if wasExpired && locked.CouponID != nil {
+			if err := s.couponRepo.IncrUsedSafeTx(tx, *locked.CouponID, now); err != nil {
 				if logger := app.Get().Logger; logger != nil {
 					logger.Warn("过期订单履约时重新消费优惠券失败(非致命, 套餐仍开通)",
-						zap.String("coupon_id", locked.CouponID), zap.Error(err))
+						zap.String("coupon_id", *locked.CouponID), zap.Error(err))
 				}
 			}
 		}
@@ -386,10 +387,10 @@ func (s *OrderService) AdminRefund(orderID, reason string) error {
 		if err := tx.Save(&locked).Error; err != nil {
 			return err
 		}
-		if locked.CouponID != "" {
-			if err := s.couponRepo.DecrUsedSafeTx(tx, locked.CouponID); err != nil {
+		if locked.CouponID != nil {
+			if err := s.couponRepo.DecrUsedSafeTx(tx, *locked.CouponID); err != nil {
 				if logger := app.Get().Logger; logger != nil {
-					logger.Warn("退款回退优惠券失败", zap.String("coupon_id", locked.CouponID), zap.Error(err))
+					logger.Warn("退款回退优惠券失败", zap.String("coupon_id", *locked.CouponID), zap.Error(err))
 				}
 			}
 		}
@@ -470,10 +471,10 @@ func (s *OrderService) AdminCancelOrder(orderID, reason string) error {
 		if err := tx.Save(&locked).Error; err != nil {
 			return err
 		}
-		if wasPending && wasPendingNow && locked.CouponID != "" {
-			if err := s.couponRepo.DecrUsedSafeTx(tx, locked.CouponID); err != nil {
+		if wasPending && wasPendingNow && locked.CouponID != nil {
+			if err := s.couponRepo.DecrUsedSafeTx(tx, *locked.CouponID); err != nil {
 				if logger := app.Get().Logger; logger != nil {
-					logger.Warn("管理员取消订单回退优惠券失败", zap.String("coupon_id", locked.CouponID), zap.Error(err))
+					logger.Warn("管理员取消订单回退优惠券失败", zap.String("coupon_id", *locked.CouponID), zap.Error(err))
 				}
 			}
 		}
