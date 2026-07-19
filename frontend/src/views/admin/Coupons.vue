@@ -269,7 +269,7 @@ const handleSave = async () => {
 }
 
 // 启用/禁用
-const toggleStatus = async (row: Coupon, value: boolean | string | number) => {
+const toggleStatus = async (row: any, value: boolean | string | number) => {
   const newStatus = value ? 'active' : 'disabled'
   try {
     await request.patch(`/api/v1/admin/coupons/${row.id}/status`, { status: newStatus })
