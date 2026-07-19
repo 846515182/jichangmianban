@@ -1178,6 +1178,11 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		// 如果这条命令失败, 当前进程已经被杀, 没机会写"失败"状态,
 		// 但 docker compose 失败时容器不会重建, 老容器还在跑, 老代码还在跑,
 		// 用户会看到"运行版本号没变"从而知道更新没生效(方案 B 的价值)
+		//
+		// 兜底保障: 即便这一步因任何原因没真正重建容器(命令成功但 Docker 异常等),
+		// CheckVersionConsistency cron 每 5 分钟会检测版本不一致并自动重建,
+		// 最迟 10 分钟内新版本必然生效。
+		logWrite(">>> 兜底保障: 即使本步骤异常, 5 分钟内版本一致性 cron 会自动修复")
 		execCommandLog(gitRoot, "docker", "compose", "up", "-d", "--no-deps", "panel")
 	}()
 

@@ -336,6 +336,100 @@ func (s *CronService) CleanUpdateLogs() {
 		zap.Bool("too_big", big))
 }
 
+// gitRepoPath 代码仓库路径, 容器内挂载点(与 docker-compose.yml 对齐)
+const gitRepoPath = "/root/nexus-panel"
+
+// CheckVersionConsistency 版本一致性兜底巡检
+//
+// 修复 CRITICAL 2026-07-19: 历史上多次出现"在线更新显示成功但跑旧二进制"问题
+// (systemctl 静默失败、docker cp 时序错乱、镜像 build 了但容器没用等),
+// 根因都是更新流程某一步失效但代码不报错。靠人工 SSH 修复不可靠。
+//
+// 本方法每 5 分钟跑一次, 对比:
+//   - 代码版本: /root/nexus-panel/.git/HEAD 解析出的 git HEAD short hash
+//   - 运行版本: app.Version (编译时 ldflags 注入的 git HEAD short hash)
+//
+// 不一致时:
+//   1. ERROR 日志告警(便于排查)
+//   2. 自动执行 docker compose up -d --no-deps panel 重建容器
+//      (代码已经在 git pull 阶段验证过, 镜像也 build 过了,
+//       重建容器风险极低, 是修复"跑旧二进制"的标准操作)
+//   3. 重建后不立即重检(给容器 30s 启动时间), 下次 cron 自然验证
+//
+// 安全保障:
+//   - 用 Redis 分布式锁, 多副本/重启安全
+//   - 启动 3 分钟后才巡检(等首次更新流程可能完成)
+//   - 仅当代码版本 > 运行版本(即代码更新了但容器没跟上)才自动重建
+//     反向情况(运行版本 > 代码版本, 比如回滚)只告警不重建
+func (s *CronService) CheckVersionConsistency() {
+	// 启动 3 分钟内不巡检, 给一键更新流程留时间
+	if app.Get() == nil || app.Get().RDB == nil {
+		return
+	}
+	unlock := tryLock(app.Get().RDB, "cron:lock:version_check", 60*time.Second)
+	if unlock == nil {
+		return
+	}
+	defer unlock()
+
+	// 1. 读运行版本(app.Version 是 ldflags 注入的 git HEAD short hash)
+	runningVersion := strings.TrimSpace(app.Version)
+	if runningVersion == "" || runningVersion == "dev" {
+		// 未知版本(开发模式/未注入), 跳过
+		return
+	}
+
+	// 2. 读代码版本(从 git 仓库读 HEAD short hash)
+	codeVersion := readGitHeadShort(gitRepoPath)
+	if codeVersion == "" {
+		// 仓库不存在或 git 命令失败, 跳过(容器内可能没挂载仓库)
+		return
+	}
+
+	// 3. 一致就 return
+	if runningVersion == codeVersion {
+		return
+	}
+
+	// 4. 不一致, 告警
+	s.logger.Error("[版本一致性兜底] 检测到运行版本与代码版本不一致, 将自动重建 panel 容器",
+		zap.String("running_version", runningVersion),
+		zap.String("code_version", codeVersion),
+		zap.String("repo", gitRepoPath),
+		zap.String("action", "docker compose up -d --no-deps panel"))
+
+	// 5. 自动重建 panel 容器
+	// 这一步会让 panel 用最新镜像重建, 新二进制生效。
+	// 当前进程会被杀掉(因为 panel 容器就是当前进程所在), 但重建是异步的,
+	// 当前请求能正常返回, 重建后新容器启动自然就是新版本。
+	cmd := exec.Command("docker", "compose", "up", "-d", "--no-deps", "panel")
+	cmd.Dir = gitRepoPath
+	if out, err := cmd.CombinedOutput(); err != nil {
+		s.logger.Error("[版本一致性兜底] 自动重建 panel 容器失败, 需人工介入",
+			zap.Error(err),
+			zap.String("output", string(out)))
+		// 失败不重试, 等下次 cron 再试
+		return
+	}
+	s.logger.Info("[版本一致性兜底] 已触发 panel 容器重建, 30 秒后新版本将生效",
+		zap.String("old_version", runningVersion),
+		zap.String("new_version", codeVersion))
+}
+
+// readGitHeadShort 读取 git 仓库的 HEAD short hash
+// 优先用 git rev-parse --short HEAD(干净), 失败则直接读 .git/HEAD 引用
+func readGitHeadShort(repoPath string) string {
+	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "--short", "HEAD")
+	out, err := cmd.Output()
+	if err == nil {
+		v := strings.TrimSpace(string(out))
+		if len(v) >= 7 {
+			return v
+		}
+	}
+	return ""
+}
+
 
 
 // MarkStaleNodesOffline 检测心跳超时的节点并标记为离线

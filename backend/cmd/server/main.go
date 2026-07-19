@@ -245,6 +245,34 @@ func main() {
 	}()
 	logger.Info("掉单对账(5m)定时任务已启动")
 
+	// 修复 CRITICAL 2026-07-19: 版本一致性兜底巡检 cron。
+	// 每 5 分钟对比代码版本(git HEAD)与运行版本(app.Version),
+	// 不一致自动 docker compose up -d --no-deps panel 重建容器。
+	// 兜底"在线更新显示成功但跑旧二进制"类问题, 不再依赖人工 SSH 修复。
+	go func() {
+		// 启动后延迟 3 分钟再开始巡检, 给一键更新流程留时间
+		startupGrace := time.NewTimer(3 * time.Minute)
+		defer startupGrace.Stop()
+		select {
+		case <-startupGrace.C:
+		case <-ctx.Done():
+			return
+		}
+		tickerVer := time.NewTicker(5 * time.Minute)
+		defer tickerVer.Stop()
+		// 启动后先跑一次, 立即修复历史不一致
+		cronSvc.CheckVersionConsistency()
+		for {
+			select {
+			case <-tickerVer.C:
+				cronSvc.CheckVersionConsistency()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	logger.Info("版本一致性兜底巡检(5m)定时任务已启动")
+
 	// 10. 启动 HTTP/HTTPS 服务
 	httpSrv := &http.Server{
 		Addr:         cfg.HTTPListen,
