@@ -103,7 +103,7 @@ func (s *OrderService) CreateOrder(in *CreateOrderInput) (*model.Order, error) {
 			return err
 		}
 		if couponID != nil {
-			if err := s.couponRepo.IncrUsedSafeTx(tx, couponID, now); err != nil {
+			if err := s.couponRepo.IncrUsedSafeTx(tx, *couponID, now); err != nil {
 				return errors.New("优惠券已被抢用完, 请刷新重试")
 			}
 		}
