@@ -53,7 +53,12 @@ type Agent struct {
 
 	// fatalShutdown=1 表示因致命错误(节点被删/token失效)已停止 Xray 代理服务
 	// 进入停服状态后不再发心跳，进程不退出(避免 docker unless-stopped 重启死循环)
+	// 修复 NODE-FATAL-RECOVERY: fatalShutdown 不再是永久状态, tryRecoverFromFatal 会周期性重新 bootstrap, 成功则清除本标记
 	fatalShutdown int32
+
+	// recoverInProgress=1 表示当前有 tryRecoverFromFatal 在执行(bootstrap 最多 2.5 分钟)
+	// 用 CAS 防止 recoverTicker 与 handleFatalShutdown 立即恢复并发触发多次 bootstrap
+	recoverInProgress int32
 
 	// 实际 Xray 监听端口（面板分配或 LISTEN_PORT 覆盖）
 	// 用于健康检查，保证始终与 Xray 实际监听端口一致
@@ -354,14 +359,29 @@ func (a *Agent) applyConfig() error {
 // 面板重启(一键更新)期间, agent 心跳连续失败, 面板回来后还要等最多 30s 才能恢复
 // online=true, 这段时间节点在面板上显示离线。现在失败后 10s 内立即补一次心跳,
 // 面板一回来就能尽快把 online 刷新回 true。
+//
+// 修复 NODE-FATAL-RECOVERY (P0, 2026-07-19): 旧版 fatalShutdown 是永久状态, 一旦触发
+// (如 panel 重启期间 gRPC 返回 Unauthenticated/NotFound), agent 永远不再发心跳,
+// 节点永久离线, 必须 docker restart 才能恢复。这就是"修一下 panel 节点就掉线"的根因。
+// 现改为: fatalShutdown 状态下, 每 1 分钟尝试一次 tryRecoverFromFatal(重新 bootstrap),
+// 成功则清除 fatalShutdown 标记, 恢复正常心跳。panel 重启后 agent 自动恢复, 无需人工介入。
+// 此外 handleFatalShutdown 触发后立即异步执行一次恢复(不等 ticker), 加快 panel 短暂重启场景的恢复。
 func (a *Agent) heartbeatLoop(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
+	// 恢复探测 ticker: fatalShutdown 状态下每 1 分钟尝试恢复
+	// (旧版 5 分钟太慢, panel 重启后节点最多离线 5+ 分钟, 用户感知明显)
+	recoverTicker := time.NewTicker(1 * time.Minute)
+	defer recoverTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// fatalShutdown 状态下不发心跳, 等恢复探测 ticker 处理
+			if atomic.LoadInt32(&a.fatalShutdown) == 1 {
+				continue
+			}
 			ok := a.doHeartbeat()
 			if !ok {
 				// 心跳失败(非致命), 10s 后立即补一次, 不等下一个 30s 周期
@@ -369,11 +389,53 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 				case <-ctx.Done():
 					return
 				case <-time.After(10 * time.Second):
+					// 补发前再次检查 fatalShutdown(可能上一次心跳触发了致命错误)
+					if atomic.LoadInt32(&a.fatalShutdown) == 1 {
+						continue
+					}
 					a.doHeartbeat()
 				}
 			}
+		case <-recoverTicker.C:
+			// 仅在 fatalShutdown 状态下尝试恢复
+			if atomic.LoadInt32(&a.fatalShutdown) == 1 {
+				a.tryRecoverFromFatal(ctx)
+			}
 		}
 	}
+}
+
+// tryRecoverFromFatal 尝试从 fatalShutdown 状态恢复。
+//
+// 修复 NODE-FATAL-RECOVERY (P0, 2026-07-19):
+// 旧版 handleFatalShutdown 是永久停服, agent 进程不退出但永远不再发心跳。
+// 典型事故场景: panel 重启期间 gRPC 短暂返回 Unauthenticated/NotFound(因为 panel
+// 还没加载完节点表), agent 误判为"节点被删/token 失效", 触发 fatalShutdown 永久停服。
+// panel 起来后 agent 也不重连, 节点永久离线, 必须人工 docker restart。
+//
+// 现改为: 每 1 分钟尝试一次完整 bootstrap(重新注册 + 拉配置 + 启动 Xray),
+// - 成功: 清除 fatalShutdown 标记, 恢复正常心跳
+// - 失败: 继续等下一个 1 分钟周期重试, 进程不退出
+//
+// 注意: bootstrap 内部已有 30 次重试(每次 5s 间隔), 一次 tryRecoverFromFatal
+// 调用最多耗时 2.5 分钟, 失败后等 1 分钟再试, 不会高频刷日志。
+// recoverInProgress CAS 防止 handleFatalShutdown 立即恢复 与 recoverTicker 周期恢复
+// 并发触发多次 bootstrap(bootstrap 修改共享状态, 不能并发)。
+func (a *Agent) tryRecoverFromFatal(ctx context.Context) {
+	if !atomic.CompareAndSwapInt32(&a.recoverInProgress, 0, 1) {
+		log.Printf("[recovery] 已有恢复尝试在执行, 跳过本次")
+		return
+	}
+	defer atomic.StoreInt32(&a.recoverInProgress, 0)
+
+	log.Printf("[recovery] fatalShutdown 状态下尝试恢复: 重新 bootstrap...")
+	if err := a.bootstrap(); err != nil {
+		log.Printf("[recovery] 恢复失败, 将在 1 分钟后重试: %v", err)
+		return
+	}
+	// bootstrap 成功, 清除 fatalShutdown 标记, 恢复心跳
+	atomic.StoreInt32(&a.fatalShutdown, 0)
+	log.Printf("[recovery] bootstrap 成功, 已清除 fatalShutdown 标记, 恢复正常心跳")
 }
 
 // doHeartbeat 发送一次心跳。返回 true 表示心跳成功(面板已刷新 online=true),
@@ -450,6 +512,11 @@ func (a *Agent) doHeartbeat() bool {
 
 // handleFatalShutdown 致命错误停服: 停止 Xray 并标记停服状态
 // 不退出进程(docker restart=unless-stopped 会重启导致死循环)，保持容器运行但 Xray 已停
+//
+// 修复 NODE-FATAL-RECOVERY: 触发 fatalShutdown 后, 立即异步执行一次 tryRecoverFromFatal
+// (不等 recoverTicker 的下一个 1 分钟周期)。这样 panel 短暂重启(几秒~几十秒)的场景下,
+// agent 能在 panel 恢复后立即(5s 延迟后)尝试恢复, 不用等下一个 ticker 周期。
+// recoverInProgress CAS 保证不会与 recoverTicker 并发执行多次 bootstrap。
 func (a *Agent) handleFatalShutdown(reason string) {
 	if !atomic.CompareAndSwapInt32(&a.fatalShutdown, 0, 1) {
 		return // 已停服
@@ -460,7 +527,13 @@ func (a *Agent) handleFatalShutdown(reason string) {
 			log.Printf("[FATAL] 停止 Xray 失败: %v", err)
 		}
 	}
-	log.Printf("[FATAL] 节点已停服，等待运维处理 (docker stop nexus-node-agent 或在面板重新部署该节点)")
+	log.Printf("[FATAL] 节点已停服，5s 后异步触发恢复尝试(后续每 1 分钟重试)...")
+	// 立即异步触发一次恢复, 不等 ticker (加快 panel 短暂重启场景的恢复)
+	// 等 5s 是给 panel 一点喘息时间(刚返回 fatal 错误, 立即重试大概率还是失败)
+	safeGo(func() {
+		time.Sleep(5 * time.Second)
+		a.tryRecoverFromFatal(context.Background())
+	})
 }
 
 // isFatalHeartbeatError 判断 gRPC 错误是否为致命错误(节点被删/token失效/被禁用)
