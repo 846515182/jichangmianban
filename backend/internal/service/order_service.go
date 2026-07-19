@@ -59,6 +59,12 @@ func (s *OrderService) CreateOrder(in *CreateOrderInput) (*model.Order, error) {
 	if plan.IsTrial {
 		return nil, errors.New("试用套餐无法购买")
 	}
+	// 兜底防御: 即便 is_trial 字段没正确标记, 0 元套餐也拒绝创建订单
+	// (试用套餐特征就是 PriceCents=0, 用户购买应走注册赠送流程, 不应走下单)
+	// 这层防御确保即便旧镜像还在跑、is_trial 字段为 false, 用户也下不了试用套餐
+	if plan.PriceCents <= 0 {
+		return nil, errors.New("该套餐不可购买, 请联系管理员")
+	}
 	now := time.Now()
 	amount := plan.PriceCents
 	// 优惠券折扣计算

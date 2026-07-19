@@ -404,21 +404,41 @@ func ensureSuperAdmin(db *gorm.DB, cfg *config.Config, logger *zap.Logger) {
 // 修复 CRITICAL 2026-07-19: 旧版漏设 IsTrial: true, 导致试用套餐的 is_trial=false,
 // ListEnabled 的 WHERE is_trial=false 过滤失效, 试用套餐出现在用户购买列表中,
 // 用户点击购买会触发"试用套餐无法购买"或订单创建失败。
-// 现在显式设置 IsTrial: true, 并对已存在的旧记录做幂等修正(UPDATE is_trial=true)。
+//
+// 防御策略(三层兜底, 确保任何情况下试用套餐不会出现在购买列表):
+//  1. 新建试用套餐时显式 IsTrial: true
+//  2. 每次启动无条件 UPDATE: 把所有 name 含"试用"且 is_trial=false 的套餐修正为 true
+//     (不依赖查询-判断-更新的脆弱链路, 直接批量 UPDATE, 一次搞定)
+//  3. 同时 UPDATE: 把所有 PriceCents=0 且 DurationDays=30 且 DeviceLimit=2 的套餐也标为试用
+//     (兜底: 即便 name 不含"试用"但符合试用套餐特征的也标记, 防止用户重命名后漏标)
 func ensureTrialPlan(db *gorm.DB, logger *zap.Logger) {
+	// 第 1 步: 兜底修正存量数据 - 无条件批量 UPDATE, 不依赖查询判断
+	// 修正策略 A: 按名称匹配
+	resultA := db.Model(&model.Plan{}).
+		Where("is_deleted = false AND is_trial = false AND name LIKE ?", "%试用%").
+		Update("is_trial", true)
+	if resultA.Error != nil {
+		logger.Warn("兜底修正试用套餐 is_trial 失败(按名称)", zap.Error(resultA.Error))
+	} else if resultA.RowsAffected > 0 {
+		logger.Info("已兜底修正试用套餐 is_trial 字段(按名称)", zap.Int64("affected", resultA.RowsAffected))
+	}
+
+	// 修正策略 B: 按试用套餐特征匹配(0元/30天/2设备/5GB) - 防止用户改过名字后漏标
+	fiveGB := int64(5 * 1024 * 1024 * 1024)
+	resultB := db.Model(&model.Plan{}).
+		Where("is_deleted = false AND is_trial = false AND price_cents = 0 AND duration_days = 30 AND device_limit = 2 AND traffic_limit = ?", fiveGB).
+		Update("is_trial", true)
+	if resultB.Error != nil {
+		logger.Warn("兜底修正试用套餐 is_trial 失败(按特征)", zap.Error(resultB.Error))
+	} else if resultB.RowsAffected > 0 {
+		logger.Info("已兜底修正试用套餐 is_trial 字段(按特征)", zap.Int64("affected", resultB.RowsAffected))
+	}
+
+	// 第 2 步: 确保存在试用套餐记录(若全表都没匹配到, 才创建新的)
 	var existing model.Plan
-	err := db.Where("is_deleted = false AND name LIKE ?", "%试用%").First(&existing).Error
+	err := db.Where("is_deleted = false AND is_trial = true").First(&existing).Error
 	if err == nil {
-		// 已存在试用套餐, 但旧版创建的可能 is_trial=false, 顺手修正
-		if !existing.IsTrial {
-			if err := db.Model(&model.Plan{}).Where("id = ?", existing.ID).
-				Update("is_trial", true).Error; err != nil {
-				logger.Warn("修正试用套餐 is_trial 字段失败", zap.String("id", existing.ID), zap.Error(err))
-			} else {
-				logger.Info("已修正旧试用套餐的 is_trial 字段为 true", zap.String("id", existing.ID))
-			}
-		}
-		return
+		return // 已存在试用套餐
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		logger.Warn("查询试用套餐失败", zap.Error(err))

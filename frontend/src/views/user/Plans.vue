@@ -460,7 +460,12 @@ const loadData = async () => {
     // 后端返回 { code:0, data:{ list:[...], total:n } }
     // request 拦截器已解包 response.data，所以 res = { code:0, data:{ list:[...], total:n } }
     const arr = res?.data?.list || (Array.isArray(res?.data) ? res.data : []) || []
-    planList.value = Array.isArray(arr) ? arr.sort((a: Plan, b: Plan) => a.sort_order - b.sort_order) : []
+    // 防御性过滤: 即便后端 ListEnabled 没过滤掉试用套餐, 前端也过滤掉
+    // 防止后端 is_trial 字段未正确标记时试用套餐泄露到商店
+    const filtered = Array.isArray(arr)
+      ? arr.filter((p: any) => !p.is_trial && (p.price_cents === undefined || p.price_cents > 0))
+      : []
+    planList.value = filtered.sort((a: Plan, b: Plan) => a.sort_order - b.sort_order)
   } catch {
     planList.value = []
   } finally {
