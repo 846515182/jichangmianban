@@ -150,7 +150,7 @@
             <el-input-number v-model="logMonitor.tail" :min="50" :max="2000" :step="100" size="small" style="width: 130px" @change="onFilterChange" />
             <span class="log-tail-label">行数</span>
             <div class="log-toolbar-spacer"></div>
-            <el-button size="small" type="primary" @click="fetchContainerLogs" :loading="logMonitor.loading">
+            <el-button size="small" type="primary" @click="fetchContainerLogs()" :loading="logMonitor.loading">
               <el-icon><Refresh /></el-icon><span>刷新</span>
             </el-button>
             <el-button size="small" :type="logMonitor.autoRefresh ? 'success' : 'info'" @click="toggleAutoRefresh">
