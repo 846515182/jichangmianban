@@ -264,9 +264,11 @@ const LOG_ERROR_RE = /\b(error|err\b|fatal|panic|exception|failed|failure|nil po
 const LOG_WARN_RE = /\b(warn(ing)?|deprecat(ed|ion)|slow query|retry|backoff)\b/i
 
 // 拉取容器列表
+// silent: true - 后端没这个接口(旧版本)时不弹"资源不存在"toast, 静默降级
+// 这是首页弹"资源不存在"的根因: 新前端调旧后端, /system/containers 接口不存在
 const fetchContainers = async () => {
   try {
-    const res: any = await request.get('/api/v1/admin/system/containers')
+    const res: any = await request.get('/api/v1/admin/system/containers', { silent: true })
     const d = res?.data || res
     logMonitor.available = d?.available !== false
     logMonitor.containers = d?.containers || []
@@ -275,7 +277,11 @@ const fetchContainers = async () => {
       const np = logMonitor.containers.find(c => c.name === 'nexus-panel' || c.name.includes('panel'))
       logMonitor.selectedContainer = (np || logMonitor.containers[0]).name
     }
-  } catch { /* 拦截器处理 */ }
+  } catch {
+    // 旧后端没有 /system/containers 接口, 静默降级, 日志监控卡片显示"不可用"
+    logMonitor.available = false
+    logMonitor.containers = []
+  }
 }
 
 // 拉取选中容器的日志
