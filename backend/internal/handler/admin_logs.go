@@ -239,7 +239,6 @@ func (h *AdminSystemHandler) ContainerLogs(c *gin.Context) {
 		"--tail", strconv.Itoa(tail),
 		"--since", since,
 		"--timestamps",
-		"--no-color",
 		name,
 	)
 	output, err := cmd.CombinedOutput()
@@ -365,7 +364,6 @@ func (h *AdminSystemHandler) ContainerLogStream(c *gin.Context) {
 		"--tail", "100",   // 先拉最近 100 行历史
 		"--follow",        // 然后持续跟随
 		"--timestamps",
-		"--no-color",
 		name,
 	)
 	stdout, err := cmd.StdoutPipe()
