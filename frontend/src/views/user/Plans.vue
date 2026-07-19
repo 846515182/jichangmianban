@@ -262,11 +262,8 @@ const payForm = reactive({
 const discountAmount = computed(() => {
   if (!couponApplied.value || !couponResult.value || !currentPlan.value) return 0
   const priceYuan = currentPlan.value.price_cents / 100
-  const r = couponResult.value
-  if (r.type === 'percent') {
-    return +(priceYuan * r.discount / 100).toFixed(2)
-  }
-  return Math.min(r.discount, priceYuan)
+  // discount 已是元, 钳制在套餐价格内
+  return Math.min(couponResult.value.discount, priceYuan)
 })
 
 // 实付金额
@@ -309,20 +306,23 @@ const verifyCoupon = async () => {
   }
   verifyingCoupon.value = true
   try {
-    const res: any = await request.get('/api/v1/user/coupon/validate', {
-      params: { code: payForm.couponCode, amount: currentPlan.value ? currentPlan.value.price_cents / 100 : 0 },
+    const res: any = await request.post('/api/v1/user/coupon/validate', {
+      code: payForm.couponCode,
+      amount_cents: currentPlan.value ? currentPlan.value.price_cents : 0,
     })
     // 兼容多种返回结构
     const data = res?.data || res
     if (data && data.valid) {
-      couponResult.value = { valid: true, discount: data.discount, type: data.type }
+      // discount_cents 是分, 转换为元
+      const discountYuan = (data.discount_cents || 0) / 100
+      couponResult.value = { valid: true, discount: discountYuan, type: data.type }
       couponApplied.value = true
       ElMessage.success(`优惠码已应用，减免 ¥${discountAmount.value.toFixed(2)}`)
     } else {
       ElMessage.error(data?.message || '优惠码无效')
     }
   } catch {
-    ElMessage.error('优惠码校验失败，请检查网络或稍后重试')
+    // 错误提示已由 request 拦截器统一处理
   } finally {
     verifyingCoupon.value = false
   }

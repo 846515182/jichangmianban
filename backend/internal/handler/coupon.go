@@ -121,8 +121,9 @@ func (h *CouponHandler) AdminCouponToggleStatus(c *gin.Context) {
 // validateCouponRequest 验证优惠券请求
 
 type validateCouponRequest struct {
-	Code    string `json:"code" binding:"required"`
-	OrderID string `json:"order_id"`
+	Code        string `json:"code" binding:"required"`
+	OrderID     string `json:"order_id"`
+	AmountCents int64  `json:"amount_cents"` // 套餐价格(分), 未下单时用于计算折扣
 }
 
 // UserCouponValidate [44] POST /api/v1/user/coupon/validate
@@ -172,7 +173,27 @@ func (h *CouponHandler) UserCouponValidate(c *gin.Context) {
 		})
 		return
 	}
-	// 未提供 order_id 时只返回优惠券基础信息
+	// 未提供 order_id 但提供 amount_cents: 基于套餐价格计算实际折扣(下单前预览)
+	if req.AmountCents > 0 {
+		discount, err := calcUserCouponDiscount(coupon, req.AmountCents)
+		if err != nil {
+			response.FailMsg(c, response.CodeServerError, err.Error())
+			return
+		}
+		amount := req.AmountCents - discount
+		if amount < 0 {
+			amount = 0
+		}
+		response.OK(c, gin.H{
+			"valid":          true,
+			"discount_cents": discount,
+			"amount_cents":   amount,
+			"type":           coupon.Type,
+			"value":          coupon.Value,
+		})
+		return
+	}
+	// 未提供 order_id 与 amount_cents 时只返回优惠券基础信息
 	response.OK(c, gin.H{
 		"valid":            true,
 		"type":             coupon.Type,
