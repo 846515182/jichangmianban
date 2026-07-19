@@ -187,7 +187,7 @@
                   <code class="git-commit-hash">{{ gitStatus.running_version || '-' }}</code>
                   <span class="git-arrow">→</span>
                   <code class="git-commit-hash git-commit-new">{{ gitStatus.local_head || '-' }}</code>
-                  <el-tag size="small" type="warning" style="margin-left: 8px">代码已更新, 点击下方「一键在线更新」部署</el-tag>
+                  <el-tag size="small" type="warning" style="margin-left: 8px">代码已更新, 点击下方「在线更新」部署</el-tag>
                 </div>
                 <div v-else class="git-info">
                   <span class="git-label">当前版本:</span>
@@ -213,8 +213,14 @@
                 </div>
               </div>
               <div class="git-actions">
-                <el-button type="primary" @click="gitPull" :loading="pulling">
-                  <el-icon><Download /></el-icon><span>一键在线更新</span>
+                <el-button
+                  type="primary"
+                  @click="gitPull"
+                  :loading="pulling"
+                  :disabled="!hasUpdate"
+                  :title="hasUpdate ? '检测到新版本, 点击更新' : '当前已是最新版本, 无需更新'"
+                >
+                  <el-icon><Download /></el-icon><span>在线更新</span>
                 </el-button>
                 <el-button type="warning" @click="systemRestart" :loading="restarting">
                   <el-icon><RefreshRight /></el-icon><span>重启面板</span>
@@ -304,7 +310,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { CopyDocument, Delete } from '@element-plus/icons-vue'
 import request from '@/utils/request'
@@ -678,8 +684,16 @@ const loadGitStatus = async (silent = false) => {
 // 更新/重启期间静默刷新 git 状态(面板可能正在重启, 请求会失败, 不弹错误弹窗)
 const loadGitStatusSilent = () => loadGitStatus(true)
 
+// hasUpdate 是否有可用更新: 本地落后远程 OR 已有未部署的代码变更
+// - behind > 0: 本地 HEAD 落后 origin, 有新提交可拉
+// - needs_rebuild: 代码已 git pull 但还没 docker compose build/重启
+// 两种情况都算"有更新", 此时"在线更新"按钮高亮可点; 否则灰色禁用
+const hasUpdate = computed(() => {
+  return gitStatus.behind > 0 || gitStatus.needs_rebuild
+})
+
 const gitPull = async () => {
-  ElMessageBox.confirm('将从 GitHub 拉取最新代码，编译后端、构建前端，然后重启面板。确定继续？', '一键在线更新', {
+  ElMessageBox.confirm('将从 GitHub 拉取最新代码，编译后端、构建前端，然后重启面板。确定继续？', '在线更新', {
     type: 'warning', confirmButtonText: '确认更新', cancelButtonText: '取消',
   }).then(async () => {
     pulling.value = true
