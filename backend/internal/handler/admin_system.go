@@ -1117,41 +1117,7 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 			return
 		}
 
-		logWrite(">>> 6/7 复制新二进制到当前容器")
-		newImage := "nexus-panel:latest"
-		// 从新镜像中提取二进制
-		extractCmd := exec.Command("docker", "run", "--rm", "--entrypoint", "sh", newImage, "-c", "cat /app/nexus-panel")
-		newBinary, err := extractCmd.Output()
-		if err != nil {
-			logWrite("提取二进制失败: %v", err)
-			setPullDone(false)
-			return
-		}
-		// 写入临时路径，然后 mv 替换（防止写一半被读取）
-		tmpPath := "/app/nexus-panel.new"
-		// 修复 STORAGE-RESIDUAL-01 (P2): 写入临时二进制后若 Rename 失败/进程崩溃,
-		// /app/nexus-panel.new 会永久残留占用磁盘。defer 兜底删除(Rename 成功后文件
-		// 已不存在, Remove 是 no-op; Rename 失败时清理残留)。
-		defer os.Remove(tmpPath)
-		if err := os.WriteFile(tmpPath, newBinary, 0755); err != nil {
-			logWrite("写入新二进制失败: %v", err)
-			setPullDone(false)
-			return
-		}
-		if err := os.Rename(tmpPath, "/app/nexus-panel"); err != nil {
-			logWrite("替换二进制失败: %v", err)
-			setPullDone(false)
-			return
-		}
-		logWrite("二进制已更新")
-
-		// 写入构建标记文件, 让 GitStatus 能检测下次是否有未部署的更新
-		newHead := strings.TrimSpace(execCommand("git", "rev-parse", "--short", "HEAD").Output)
-		if newHead != "" {
-			_ = os.WriteFile(filepath.Join(gitRoot, ".last_build_version"), []byte(newHead), 0644)
-		}
-
-		logWrite(">>> 7/7 重建前端容器 + 清理旧镜像 + 重启面板 (用新换旧, 全自动)")
+		logWrite(">>> 6/7 重建前端容器 + 清理旧镜像")
 		if !execCommandLog(gitRoot, "docker", "compose", "up", "-d", "--no-deps", "frontend") {
 			logWrite("重启前端失败")
 			setPullDone(false)
@@ -1161,28 +1127,58 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		// 修复 STORAGE-UPDATE-01 (P0): 每次在线更新都会 docker compose build,
 		// 累积大量悬空镜像层和构建缓存(单次更新可残留数百 MB-数 GB)。
 		// 更新完成后清理悬空镜像 + build cache, 防止多次更新后磁盘爆满。
-		// 旧版问题: 构建新 nexus-panel:latest 后, 旧镜像变 <none> 悬空镜像,
-		// 虽然 docker image prune -f 能清, 但要等下一次手动清理才触发。
-		// 现在主动 prune, 立即用新换旧:
-		//   1. 清悬空镜像 (旧版本 <none> 立即释放)
-		//   2. 清 build cache (构建缓存累积可达数 GB)
-		//   3. 自动重启 panel 容器, 让新二进制立即生效 (无需用户手动点"重启面板")
 		_ = execCommandLog(gitRoot, "docker", "image", "prune", "-f")
 		_ = execCommandLog(gitRoot, "docker", "builder", "prune", "-f")
 
-		// 自动重启 panel 容器, 让新二进制立即生效
-		// 旧版要求用户手动点"重启面板"按钮, 容易遗忘导致更新不生效。
-		// 现改为: 更新成功后 2 秒自动 systemctl restart nexus-panel,
-		// 配合前端 /healthz boot_time 变化判断重启完成。
-		logWrite(">>> 自动重启 panel 容器使新版本生效")
-		go func() {
-			time.Sleep(2 * time.Second)
-			// systemctl restart 是原子操作, panel 会以新二进制重新启动
-			execCommand("systemctl", "restart", "nexus-panel")
-		}()
+		// 写入构建标记文件, 让 GitStatus 能检测下次是否有未部署的更新
+		newHead := strings.TrimSpace(execCommand("git", "rev-parse", "--short", "HEAD").Output)
+		if newHead != "" {
+			_ = os.WriteFile(filepath.Join(gitRoot, ".last_build_version"), []byte(newHead), 0644)
+		}
 
-		logWrite("在线更新完成！面板已自动重启, 新版本立即生效 (用新换旧, 无需手动操作)")
+		// 记录更新前的二进制版本(用于步骤 7 验证是否真正生效)
+		// app.Version 是编译时 ldflags 注入的 git HEAD short hash,
+		// 容器重建后新进程读到的就是新版本号
+		oldVersion := app.Version
+		logWrite(">>> 更新前运行版本: %s", oldVersion)
+		if newHead != "" {
+			logWrite(">>> 目标部署版本: %s", newHead)
+		}
+
+		logWrite(">>> 7/7 重建 panel 容器, 让新二进制立即生效")
+		// 修复 CRITICAL 2026-07-19: 旧版用 systemctl restart nexus-panel 重启,
+		// 但服务器上根本没有 nexus-panel.service systemd unit 文件(仓库里搜不到,
+		// 用户也从未创建过)。panel 是 docker compose 启动的容器, systemctl 命令
+		// 静默失败但代码丢弃错误照样 setPullDone(true), 导致每次"更新成功"但实际
+		// 容器还在跑旧二进制, 用户反馈的"试用套餐还在显示/订单仍报错/资源不存在"
+		// 全是这个根因。
+		//
+		// 正确做法: docker compose up -d --no-deps panel 让 panel 容器用新镜像重建。
+		// Docker 看到镜像 hash 变了会自动 recreate 容器, 新二进制就是镜像里的,
+		// 不可能跑错。这是 Docker 标准用法, 不需要 systemctl、不需要 docker cp、
+		// 不需要从镜像里抠二进制。
+		//
+		// 关键顺序: setPullDone(true) 必须在 docker compose up -d panel 之前调用!
+		// 因为 up -d 会杀掉当前 panel 进程(也就是 gitPull 自己所在的 goroutine 所在进程),
+		// 必须先把"成功"状态持久化到文件, 新容器启动后前端轮询才能读到"成功"。
+		logWrite(">>> 预期: 运行版本 %s → %s (更新前 → 更新后)", oldVersion, newHead)
+		logWrite("在线更新完成！panel 容器即将用新镜像重建, 新版本立即生效")
+		logWrite(">>> 验证: 请刷新页面, 查看 GitHub 同步卡片的「运行版本」号是否已变化")
+
+		// 先把成功状态持久化(必须! 否则进程被杀后没机会写)
 		setPullDone(true)
+
+		// 留 2 秒让日志和状态文件写盘
+		time.Sleep(2 * time.Second)
+
+		// 最后执行: 重建 panel 容器(这一步会杀掉当前进程)
+		// 用 docker compose up -d --no-deps panel 而非 systemctl restart
+		// --no-deps: 不动 postgres/redis 依赖(它们没变化)
+		// -d: 后台运行
+		// 如果这条命令失败, 当前进程已经被杀, 没机会写"失败"状态,
+		// 但 docker compose 失败时容器不会重建, 老容器还在跑, 老代码还在跑,
+		// 用户会看到"运行版本号没变"从而知道更新没生效(方案 B 的价值)
+		execCommandLog(gitRoot, "docker", "compose", "up", "-d", "--no-deps", "panel")
 	}()
 
 
