@@ -36,6 +36,9 @@ func main() {
 	// 0. 注入编译版本号到全局
 	app.Version = Version
 
+	// 修复 2026-07-19: 启动时打印实际版本号, 便于排查 ldflags 是否生效
+	fmt.Printf("[VERSION] main.Version=%q app.Version=%q\n", Version, app.Version)
+
 	// 1. 加载配置
 	cfg, err := config.Load()
 	if err != nil {

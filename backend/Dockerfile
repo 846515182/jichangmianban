@@ -31,8 +31,10 @@ COPY . .
 # 现改为由调用方(gitPull 流程 / 部署脚本)通过 --build-arg VERSION=<git HEAD short> 显式传入。
 ARG VERSION=dev
 ENV GOPROXY=https://goproxy.cn,direct
+# 双重注入: main.Version 和 app.Version 都注入,
+# 防止 main.go 的 app.Version = Version 赋值因任何原因失效
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-    -ldflags="-s -w -X 'main.Version=${VERSION}'" \
+    -ldflags="-s -w -X 'main.Version=${VERSION}' -X 'nexus-panel/internal/app.Version=${VERSION}'" \
     -o nexus-panel \
     ./cmd/server
 
