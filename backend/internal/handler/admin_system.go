@@ -1404,14 +1404,16 @@ func (h *AdminSystemHandler) GitStatus(c *gin.Context) {
 		}
 	}
 
-	// 检测容器是否需要重建: 上次构建版本 != 当前代码版本
+	// 检测容器是否需要重建: 二进制实际版本 != 当前代码版本
 	// 场景: git pull 拉了新代码但还没 docker compose build, 或手动改了代码
+	// 用 binaryVersion(编译时 ldflags 注入) 判断, 比 .last_build_version 标记文件更可靠
+	// (.last_build_version 文件可能没更新或丢失, 但二进制里的版本号永远不会错)
 	needsRebuild := false
 	rebuildChangelog := ""
-	if runningVersion != "" && localHead != "" && runningVersion != localHead {
+	if binaryVersion != "" && localHead != "" && binaryVersion != localHead {
 		needsRebuild = true
-		// 获取从上次构建版本到当前 HEAD 的提交记录(即未部署的更新)
-		rebuildChangelog = execCommand("git", "log", "--oneline", runningVersion+".."+localHead).Output
+		// 获取从二进制版本到当前 HEAD 的提交记录(即未部署的更新)
+		rebuildChangelog = execCommand("git", "log", "--oneline", binaryVersion+".."+localHead).Output
 	}
 
 	response.OK(c, gin.H{

@@ -200,14 +200,7 @@
                   <el-tag v-else-if="gitStatus.ahead > 0" size="small" type="info" effect="dark">本地有 {{ gitStatus.ahead }} 个未推送提交</el-tag>
                   <el-tag v-else size="small" type="info">检测中...</el-tag>
                 </div>
-                <div v-if="gitStatus.needs_rebuild" class="git-info">
-                  <span class="git-label">运行版本:</span>
-                  <code class="git-commit-hash">{{ gitStatus.running_version || '-' }}</code>
-                  <span class="git-arrow">→</span>
-                  <code class="git-commit-hash git-commit-new">{{ gitStatus.local_head || '-' }}</code>
-                  <el-tag size="small" type="warning" style="margin-left: 8px">代码已更新, 点击下方「在线更新」部署</el-tag>
-                </div>
-                <div v-else class="git-info">
+                <div v-if="gitStatus.local_head" class="git-info">
                   <span class="git-label">当前版本:</span>
                   <code class="git-commit-hash">{{ gitStatus.local_head || '-' }}</code>
                   <span v-if="gitStatus.behind > 0" class="git-arrow">→</span>
