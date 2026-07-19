@@ -983,7 +983,71 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		gitRoot := getGitRoot()
 		branch := getCurrentBranch()
 
-		logWrite(">>> 1/6 预检工作树")
+		logWrite(">>> 1/7 清理残余垃圾 (历史备份/旧二进制/旧日志)")
+		// [fix 2026-07-19] 一键更新流程 historically 会留下大量残留:
+		//   - /app/nexus-panel.new / nexus-panel-fix / nexus-panel.backup.* (旧二进制)
+		//   - gitRoot 下 *.bak* / backend.bak*/ / frontend.bak*/ (代码备份)
+		//   - .update-state/git-pull.log.* (历史轮转日志)
+		//   - /tmp/nexus-git-pull.{log,state} (老版本路径残留)
+		// 每次更新前主动清理, 避免长期累积占用磁盘。
+		cleanupPatterns := []string{
+			"/app/nexus-panel.new",
+			"/app/nexus-panel-fix",
+			"/app/nexus-panel-new",
+			"/tmp/nexus-git-pull.log",
+			"/tmp/nexus-git-pull.state",
+		}
+		cleanedCount := 0
+		for _, p := range cleanupPatterns {
+			if err := os.RemoveAll(p); err == nil {
+				cleanedCount++
+			}
+		}
+		// 通配清理 /app/nexus-panel.backup.* (按时间轮转的旧二进制)
+		if entries, err := filepath.Glob("/app/nexus-panel.backup.*"); err == nil {
+			for _, e := range entries {
+				if err := os.Remove(e); err == nil {
+					cleanedCount++
+				}
+			}
+		}
+		// 通配清理 gitRoot 下的 .bak* 文件和 backend.bak*/ frontend.bak*/ 目录
+		bakGlobPatterns := []string{
+			filepath.Join(gitRoot, "*.bak*"),
+			filepath.Join(gitRoot, "backend.bak*"),
+			filepath.Join(gitRoot, "frontend.bak*"),
+		}
+		for _, pattern := range bakGlobPatterns {
+			entries, err := filepath.Glob(pattern)
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				// 跳过 .gitignore 等关键文件(虽然 *.bak* 不会匹配到, 但防御性写法)
+				if strings.HasPrefix(filepath.Base(e), ".git") {
+					continue
+				}
+				if err := os.RemoveAll(e); err == nil {
+					cleanedCount++
+				}
+			}
+		}
+		// 清理 .update-state/ 下的轮转历史日志(保留当前 git-pull.log/state, 它们刚被重置过)
+		if stateEntries, err := os.ReadDir(gitPullLogDir); err == nil {
+			for _, e := range stateEntries {
+				name := e.Name()
+				// 只清轮转/备份文件, 当前正在用的 git-pull.log / git-pull.state 不动
+				if name == "git-pull.log" || name == "git-pull.state" {
+					continue
+				}
+				if err := os.RemoveAll(filepath.Join(gitPullLogDir, name)); err == nil {
+					cleanedCount++
+				}
+			}
+		}
+		logWrite("已清理 %d 个残留文件/目录", cleanedCount)
+
+		logWrite(">>> 2/7 预检工作树")
 		// [fix 2026-07-19] 用 git status --porcelain=2 拿到结构化输出, 过滤掉未跟踪文件(?? 前缀),
 		// 只对已跟踪文件的修改做 stash, 避免对 .update-state/ 等运行时目录做无意义的 stash
 		// 导致后续 git stash pop 失败的问题。
@@ -1019,14 +1083,14 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 			logWrite("工作树干净(仅有未跟踪文件, 不影响 git reset)")
 		}
 
-		logWrite(">>> 2/6 拉取代码 git fetch origin (branch=%s)", branch)
+		logWrite(">>> 3/7 拉取代码 git fetch origin (branch=%s)", branch)
 		if !execCommandLog(gitRoot, "git", "fetch", "origin") {
 			logWrite("git fetch 失败")
 			setPullDone(false)
 			return
 		}
 
-		logWrite(">>> 3/6 同步代码 git reset --hard origin/%s", branch)
+		logWrite(">>> 4/7 同步代码 git reset --hard origin/%s", branch)
 		if !execCommandLog(gitRoot, "git", "reset", "--hard", "origin/"+branch) {
 			logWrite("git reset 失败")
 			setPullDone(false)
@@ -1045,7 +1109,7 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 			}
 		}
 
-		logWrite(">>> 4/6 构建镜像 docker compose build panel frontend")
+		logWrite(">>> 5/7 构建镜像 docker compose build panel frontend")
 		logWrite("（首次构建约3-5分钟，后续有缓存会快很多）")
 		if !execCommandLogTimeout(gitRoot, "docker", 1800, "compose", "build", "panel", "frontend") {
 			logWrite("镜像构建失败，请查看上方日志")
@@ -1053,7 +1117,7 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 			return
 		}
 
-		logWrite(">>> 5/6 复制新二进制到当前容器")
+		logWrite(">>> 6/7 复制新二进制到当前容器")
 		newImage := "nexus-panel:latest"
 		// 从新镜像中提取二进制
 		extractCmd := exec.Command("docker", "run", "--rm", "--entrypoint", "sh", newImage, "-c", "cat /app/nexus-panel")
@@ -1087,7 +1151,7 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 			_ = os.WriteFile(filepath.Join(gitRoot, ".last_build_version"), []byte(newHead), 0644)
 		}
 
-		logWrite(">>> 6/6 重建前端容器 docker compose up -d --no-deps frontend")
+		logWrite(">>> 7/7 重建前端容器 + 清理旧镜像 + 重启面板 (用新换旧, 全自动)")
 		if !execCommandLog(gitRoot, "docker", "compose", "up", "-d", "--no-deps", "frontend") {
 			logWrite("重启前端失败")
 			setPullDone(false)
@@ -1097,7 +1161,6 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		// 修复 STORAGE-UPDATE-01 (P0): 每次在线更新都会 docker compose build,
 		// 累积大量悬空镜像层和构建缓存(单次更新可残留数百 MB-数 GB)。
 		// 更新完成后清理悬空镜像 + build cache, 防止多次更新后磁盘爆满。
-		logWrite(">>> 7/7 自动清理旧镜像 + 重启面板 (用新换旧, 全自动)")
 		// 旧版问题: 构建新 nexus-panel:latest 后, 旧镜像变 <none> 悬空镜像,
 		// 虽然 docker image prune -f 能清, 但要等下一次手动清理才触发。
 		// 现在主动 prune, 立即用新换旧:
@@ -1219,7 +1282,6 @@ func (h *AdminSystemHandler) GitPush(c *gin.Context) {
 // 查看当前 git 状态
 // 返回:
 //   - branch: 当前分支
-//   - status: 工作树变更(git status --short)
 //   - recent_5: 最近 5 条提交(用于查看历史)
 //   - local_head / remote_head: 本地与远程最新提交哈希(短)
 //   - behind: 本地落后远程多少个提交(>0 表示有可更新)
@@ -1230,9 +1292,11 @@ func (h *AdminSystemHandler) GitPush(c *gin.Context) {
 // "是否有新版本可更新"。用户更新到最新后, 历史提交列表照常显示, 看起来
 // 像"更新了还在显示", 体验混乱。新增 behind/up_to_date 让前端能明确展示
 // "已是最新版本"或"有 N 个更新可用"。
+//
+// [fix 2026-07-19] 移除 status 字段: 一键更新流程会 stash 本地修改, .update-state/
+// 已加 .gitignore, 工作树始终干净, "本地变更"显示区已无意义, 前端也已删除该 UI。
 func (h *AdminSystemHandler) GitStatus(c *gin.Context) {
 	gitRoot := getGitRoot()
-	statusResult := execCommand("git", "status", "--short")
 	logResult := execCommand("git", "log", "--oneline", "-5")
 	branch := getCurrentBranch()
 
@@ -1291,7 +1355,6 @@ func (h *AdminSystemHandler) GitStatus(c *gin.Context) {
 	}
 
 	response.OK(c, gin.H{
-		"status":            statusResult.Output,
 		"recent_5":          logResult.Output,
 		"branch":            branch,
 		"local_head":        localHead,

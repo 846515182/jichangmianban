@@ -207,10 +207,6 @@
                   <span class="git-label">更新说明:</span>
                   <pre class="git-log git-changelog">{{ gitStatus.changelog }}</pre>
                 </div>
-                <div class="git-info">
-                  <span class="git-label">本地变更:</span>
-                  <pre class="git-log" :class="{ 'has-changes': gitStatus.status }">{{ gitStatus.status || '无变更' }}</pre>
-                </div>
                 <div v-if="gitStatus.behind > 0 && gitStatus.changed_files" class="git-info">
                   <span class="git-label">待更新文件:</span>
                   <pre class="git-log git-changed-files">{{ gitStatus.changed_files }}</pre>
@@ -646,7 +642,6 @@ const clearPullLog = async () => {
 const gitStatus = reactive({
   branch: '',
   recent5: '',
-  status: '',
   local_head: '',
   remote_head: '',
   behind: 0,
@@ -666,7 +661,6 @@ const loadGitStatus = async (silent = false) => {
     const d = res?.data || res
     gitStatus.branch = d.branch || ''
     gitStatus.recent5 = d.recent_5 || ''
-    gitStatus.status = d.status || ''
     gitStatus.local_head = d.local_head || ''
     gitStatus.remote_head = d.remote_head || ''
     gitStatus.behind = d.behind || 0
@@ -829,7 +823,6 @@ onUnmounted(() => {
 .git-info { margin-bottom: 8px; display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
 .git-label { font-size: 12px; color: var(--np-text-muted); flex-shrink: 0; line-height: 24px; }
 .git-log { margin: 0; padding: 8px; background: var(--np-card); border-radius: 4px; font-size: 12px; color: var(--np-text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 120px; overflow-y: auto; flex: 1; min-width: 0; }
-.git-log.has-changes { color: var(--np-warning); }
 .git-commit-hash { font-family: 'JetBrains Mono', monospace; font-size: 12px; padding: 2px 6px; background: var(--np-bg-soft); border-radius: 3px; color: var(--np-text-secondary); }
 .git-commit-new { color: var(--np-primary); border: 1px dashed var(--np-primary-dim); }
 .git-arrow { color: var(--np-text-muted); font-size: 12px; }
