@@ -1213,15 +1213,18 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 	// 前置: 先清理可能存在的同名 helper 容器(上次失败残留)
 	logWrite(">>> 重建 panel 容器(通过 helper 容器, 避免自杀时序问题)")
 	_ = exec.Command("docker", "rm", "-f", "nexus-panel-restarter").Run()
+	// 关键: 仓库必须挂载到 /root/nexus-panel (与原项目目录一致),
+	// 否则 docker compose 项目名会变成挂载目录名(如 repo), 与原项目(nexus-panel)
+	// 不一致, 导致 docker compose 试图创建同名新容器, 报 "container name already in use"
 	helperCmd := exec.Command("docker", "run", "-d",
 		"--name", "nexus-panel-restarter",
 		"-v", "/var/run/docker.sock:/var/run/docker.sock",
-		"-v", "/root/nexus-panel:/repo",
+		"-v", "/root/nexus-panel:/root/nexus-panel",
+		"-w", "/root/nexus-panel",
 		"alpine:latest",
 		"sh", "-c",
 		"apk add --no-cache docker-cli docker-cli-compose >/dev/null 2>&1 && "+
 			"sleep 3 && "+
-			"cd /repo && "+
 			"docker compose up -d --no-deps panel && "+
 			"docker rm -f nexus-panel-restarter",
 	)
