@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -339,6 +340,11 @@ func (s *CronService) CleanUpdateLogs() {
 // gitRepoPath 代码仓库路径, 容器内挂载点(与 docker-compose.yml 对齐)
 const gitRepoPath = "/root/nexus-panel"
 
+// gitPullStateFile 一键更新流程的状态文件, 与 admin_system.go 对齐
+// 内容: {"done":false,"success":false} 表示正在更新中
+//       {"done":true,"success":true} 表示更新完成
+const gitPullStateFile = "/root/nexus-panel/.update-state/git-pull.state"
+
 // CheckVersionConsistency 版本一致性兜底巡检
 //
 // 修复 CRITICAL 2026-07-19: 历史上多次出现"在线更新显示成功但跑旧二进制"问题
@@ -361,6 +367,14 @@ const gitRepoPath = "/root/nexus-panel"
 //   - 启动 3 分钟后才巡检(等首次更新流程可能完成)
 //   - 仅当代码版本 > 运行版本(即代码更新了但容器没跟上)才自动重建
 //     反向情况(运行版本 > 代码版本, 比如回滚)只告警不重建
+//
+// 修复 CRITICAL 2026-07-19 (v2): 防止与一键更新流程冲突
+//   事故: 用户点了"在线更新", gitPull 流程开始 git pull + docker build (耗时 3-5 分钟),
+//   期间 cron 检测到 code_version 已变(git pull 已完成)但 image 还没 build 好,
+//   cron 执行 docker compose up -d panel 用旧镜像重建容器, 杀掉了正在跑的 panel 进程,
+//   导致 gitPull 流程被杀, state 文件永远停在 done=false, panel 容器 502。
+//   修复: cron 先检查 gitPullStateFile, 若 done=false 且 mtime < 10 分钟, 说明更新中, 跳过。
+//   若 done=false 但 mtime > 10 分钟, 说明 gitPull 流程已死(被杀/崩溃), cron 接管修复。
 func (s *CronService) CheckVersionConsistency() {
 	// 启动 3 分钟内不巡检, 给一键更新流程留时间
 	if app.Get() == nil || app.Get().RDB == nil {
@@ -391,14 +405,23 @@ func (s *CronService) CheckVersionConsistency() {
 		return
 	}
 
-	// 4. 不一致, 告警
+	// 4. 检查是否正在一键更新中, 防止与 gitPull 流程冲突
+	//    若 state 文件存在且 done=false 且 mtime < 10 分钟, 说明更新进行中, 跳过
+	if isGitPullInProgress() {
+		s.logger.Info("[版本一致性兜底] 检测到一键更新进行中, 跳过本次巡检(避免冲突)",
+			zap.String("running_version", runningVersion),
+			zap.String("code_version", codeVersion))
+		return
+	}
+
+	// 5. 不一致, 告警
 	s.logger.Error("[版本一致性兜底] 检测到运行版本与代码版本不一致, 将自动重建 panel 容器",
 		zap.String("running_version", runningVersion),
 		zap.String("code_version", codeVersion),
 		zap.String("repo", gitRepoPath),
 		zap.String("action", "docker compose up -d --no-deps panel"))
 
-	// 5. 自动重建 panel 容器
+	// 6. 自动重建 panel 容器
 	// 这一步会让 panel 用最新镜像重建, 新二进制生效。
 	// 当前进程会被杀掉(因为 panel 容器就是当前进程所在), 但重建是异步的,
 	// 当前请求能正常返回, 重建后新容器启动自然就是新版本。
@@ -414,6 +437,37 @@ func (s *CronService) CheckVersionConsistency() {
 	s.logger.Info("[版本一致性兜底] 已触发 panel 容器重建, 30 秒后新版本将生效",
 		zap.String("old_version", runningVersion),
 		zap.String("new_version", codeVersion))
+}
+
+// isGitPullInProgress 检查一键更新是否正在进行中
+// 判断依据: gitPullStateFile 存在 + 内容 done=false + mtime 距今 < 10 分钟
+//   - done=false 且 mtime 近期: 更新进行中, cron 应跳过
+//   - done=false 但 mtime > 10 分钟: gitPull 流程已死(被杀/崩溃), cron 可接管
+//   - done=true 或文件不存在: 无更新任务, 正常巡检
+func isGitPullInProgress() bool {
+	info, err := os.Stat(gitPullStateFile)
+	if err != nil {
+		// 文件不存在, 无更新任务
+		return false
+	}
+	// mtime > 10 分钟, 认为更新流程已死, 不算"进行中"
+	if time.Since(info.ModTime()) > 10*time.Minute {
+		return false
+	}
+	// 读文件内容, 检查 done 字段
+	data, err := os.ReadFile(gitPullStateFile)
+	if err != nil {
+		return false
+	}
+	var st struct {
+		Done    bool `json:"done"`
+		Success bool `json:"success"`
+	}
+	if err := json.Unmarshal(data, &st); err != nil {
+		return false
+	}
+	// done=false 说明更新未完成(进行中或异常中断, 配合 mtime 判断)
+	return !st.Done
 }
 
 // readGitHeadShort 读取 git 仓库的 HEAD short hash
