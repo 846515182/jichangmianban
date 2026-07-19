@@ -4,7 +4,7 @@
       <div class="page-header">
         <div>
           <h2 class="page-title">优惠券管理</h2>
-          <p class="page-desc">创建、管理优惠券，支持批量生成优惠码</p>
+          <p class="page-desc">创建、管理优惠券</p>
         </div>
         <div class="header-actions">
           <el-input v-model="keyword" placeholder="搜索优惠码" :prefix-icon="Search" clearable style="width: 220px" />
@@ -30,17 +30,17 @@
         <el-table-column label="面值" width="100">
           <template #default="{ row }">
             <span class="value-text">
-              {{ row.type === 'percent' ? row.value + '%' : '¥ ' + row.value.toFixed(2) }}
+              {{ row.type === 'percent' ? row.value + '%' : '¥ ' + (row.value / 100).toFixed(2) }}
             </span>
           </template>
         </el-table-column>
         <el-table-column label="最低消费" width="110">
-          <template #default="{ row }">¥ {{ row.minSpend.toFixed(2) }}</template>
+          <template #default="{ row }">¥ {{ (row.min_amount_cents / 100).toFixed(2) }}</template>
         </el-table-column>
         <el-table-column label="使用情况" width="140">
           <template #default="{ row }">
             <div class="usage-cell">
-              <span>{{ row.usedCount }} / {{ row.totalCount }}</span>
+              <span>{{ row.used_count }} / {{ row.max_uses === 0 ? '不限' : row.max_uses }}</span>
               <el-progress
                 :percentage="usagePercent(row)"
                 :stroke-width="6"
@@ -52,14 +52,14 @@
         </el-table-column>
         <el-table-column label="过期时间" min-width="160">
           <template #default="{ row }">
-            <span :class="{ expired: isExpired(row) }">{{ formatTime(row.expireAt) }}</span>
+            <span :class="{ expired: isExpired(row) }">{{ row.expire_at ? formatTime(row.expire_at) : '永不过期' }}</span>
           </template>
         </el-table-column>
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
             <el-switch
-              :model-value="row.status === 'active'"
-              :disabled="isExpired(row) || row.usedCount >= row.totalCount"
+              :model-value="!!row.is_enabled"
+              :disabled="isExpired(row) || (row.max_uses > 0 && row.used_count >= row.max_uses)"
               @change="(v) => toggleStatus(row, v)"
             />
           </template>
@@ -73,7 +73,7 @@
       </el-table>
     </div>
 
-    <!-- 新增/批量生成对话框 -->
+    <!-- 新增对话框 -->
     <el-dialog
       v-model="dialogVisible"
       title="新增优惠券"
@@ -102,25 +102,22 @@
           <el-input-number v-model="form.minSpend" :min="0" :precision="2" controls-position="right" style="width: 100%" />
         </el-form-item>
         <el-form-item label="发行总量" prop="totalCount">
-          <el-input-number v-model="form.totalCount" :min="1" :max="100000" controls-position="right" style="width: 100%" />
+          <el-input-number v-model="form.totalCount" :min="0" :max="100000" controls-position="right" style="width: 100%" />
+          <span class="form-tip">0 表示不限</span>
         </el-form-item>
         <el-form-item label="过期时间" prop="expireAt">
           <el-date-picker
             v-model="form.expireAt"
             type="datetime"
-            placeholder="选择过期时间"
+            placeholder="选择过期时间(可留空表示永不过期)"
             style="width: 100%"
-            value-format="YYYY-MM-DD HH:mm:ss"
+            value-format="YYYY-MM-DDTHH:mm:ssZ"
           />
         </el-form-item>
-        <el-form-item label="批量生成">
-          <el-switch v-model="form.batch" />
-          <span class="form-tip">开启后按下列数量批量生成优惠码</span>
+        <el-form-item label="启用状态">
+          <el-switch v-model="form.isEnabled" />
         </el-form-item>
-        <el-form-item v-if="form.batch" label="生成数量" prop="batchCount">
-          <el-input-number v-model="form.batchCount" :min="1" :max="1000" controls-position="right" style="width: 100%" />
-        </el-form-item>
-        <el-form-item v-if="!form.batch" label="优惠码">
+        <el-form-item label="优惠码">
           <el-input v-model="form.code" placeholder="自定义优惠码，留空自动生成">
             <template #append>
               <el-button @click="generateCode">随机生成</el-button>
@@ -144,19 +141,24 @@ import request from '@/utils/request'
 import { formatTime } from '@/utils/format'
 
 type CouponType = 'percent' | 'fixed'
-type CouponStatus = 'active' | 'disabled'
 
+// 修复 P1 bug: 字段名/单位与后端 model.Coupon JSON tag 完全对齐
+// - value: percent 时 1-100 整数; fixed 时金额(分)
+// - min_amount_cents: 最低消费(分)
+// - max_uses: 0=不限
+// - expire_at: *time.Time, 可空
+// - is_enabled: bool (后端切换接口接受 status: 'active'/'disabled')
 interface Coupon {
   id: string
   code: string
   type: CouponType
   value: number
-  minSpend: number
-  usedCount: number
-  totalCount: number
-  expireAt: string
-  status: CouponStatus
-  createdAt: string
+  min_amount_cents: number
+  max_uses: number
+  used_count: number
+  expire_at: string | null
+  is_enabled: boolean
+  created_at: string
 }
 
 const loading = ref(false)
@@ -164,29 +166,28 @@ const saving = ref(false)
 const keyword = ref('')
 const list = ref<Coupon[]>([])
 
-
-
 const filteredList = computed(() => {
   if (!keyword.value) return list.value
   const k = keyword.value.toLowerCase()
   return list.value.filter((c) => c.code.toLowerCase().includes(k))
 })
 
-// 使用率
-const usagePercent = (row: any): number => {
-  if (!row.totalCount) return 0
-  return Math.min(100, Math.round((row.usedCount / row.totalCount) * 100))
+const usagePercent = (row: Coupon): number => {
+  if (!row.max_uses || row.max_uses === 0) {
+    return row.used_count > 0 ? 100 : 0
+  }
+  return Math.min(100, Math.round((row.used_count / row.max_uses) * 100))
 }
-const usageColor = (row: any): string => {
+const usageColor = (row: Coupon): string => {
   const p = usagePercent(row)
   if (p >= 100) return '#ff006e'
   if (p >= 80) return '#ffbe0b'
   return '#00f5d4'
 }
 
-// 是否过期
-const isExpired = (row: any): boolean => {
-  return new Date(row.expireAt).getTime() < Date.now()
+const isExpired = (row: Coupon): boolean => {
+  if (!row.expire_at) return false
+  return new Date(row.expire_at).getTime() < Date.now()
 }
 
 // 对话框
@@ -198,8 +199,7 @@ const form = reactive({
   minSpend: 0,
   totalCount: 100,
   expireAt: '',
-  batch: false,
-  batchCount: 10,
+  isEnabled: true,
   code: '',
 })
 
@@ -207,10 +207,8 @@ const rules: FormRules = {
   type: [{ required: true, message: '请选择优惠类型', trigger: 'change' }],
   value: [{ required: true, message: '请输入面值', trigger: 'blur' }],
   totalCount: [{ required: true, message: '请输入发行总量', trigger: 'blur' }],
-  expireAt: [{ required: true, message: '请选择过期时间', trigger: 'change' }],
 }
 
-// 随机生成优惠码
 const generateCode = () => {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
   let code = ''
@@ -220,53 +218,50 @@ const generateCode = () => {
   form.code = code
 }
 
-// 打开对话框
 const openDialog = () => {
   Object.assign(form, {
     type: 'percent', value: 10, minSpend: 0, totalCount: 100,
-    expireAt: '', batch: false, batchCount: 10, code: '',
+    expireAt: '', isEnabled: true, code: '',
   })
-  // 默认过期时间为30天后
-  const d = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
-  form.expireAt = d.toISOString().replace('T', ' ').slice(0, 19)
   dialogVisible.value = true
 }
 
-// 保存（新增或批量生成）
 const handleSave = async () => {
   if (!formRef.value) return
   await formRef.value.validate(async (valid) => {
     if (!valid) return
+    // 校验优惠码必填(后端 binding:"required")
+    if (!form.code.trim()) {
+      ElMessage.warning('请输入优惠码或点击随机生成')
+      return
+    }
     saving.value = true
     try {
-      const payload = {
+      // 修复 P1 bug: 字段名/单位对齐后端 createCouponRequest
+      // - fixed 类型 value 从元转分; percent 类型 value 直接为百分比整数
+      // - min_amount_cents 从元转分
+      // - expire_at: 后端 *time.Time 接受 RFC3339, el-date-picker value-format 已设为 RFC3339
+      const isPercent = form.type === 'percent'
+      const payload: any = {
+        code: form.code.trim(),
         type: form.type,
-        value: form.value,
-        minSpend: form.minSpend,
-        totalCount: form.totalCount,
-        expireAt: form.expireAt,
-        batch: form.batch,
-        batchCount: form.batchCount,
-        code: form.code,
+        value: isPercent ? Math.round(form.value) : Math.round(form.value * 100),
+        min_amount_cents: Math.round(form.minSpend * 100),
+        max_uses: form.totalCount,
+        is_enabled: form.isEnabled,
       }
-      let createdCount = 0
+      if (form.expireAt) payload.expire_at = form.expireAt
       try {
         const res: any = await request.post('/api/v1/admin/coupons', payload)
         const data = res?.data || res
-        if (Array.isArray(data)) {
-          // 批量返回
-          list.value.unshift(...data)
-          createdCount = data.length
-        } else if (data && data.id) {
-          list.value.unshift(data)
-          createdCount = 1
+        if (data && data.id) {
+          list.value.unshift(data as Coupon)
+          ElMessage.success('优惠券创建成功')
+          dialogVisible.value = false
         }
       } catch {
-        ElMessage.error('创建优惠券失败，请稍后重试')
-        return
+        // 错误提示已由 request 拦截器统一处理
       }
-      ElMessage.success(`成功创建 ${createdCount} 张优惠券`)
-      dialogVisible.value = false
     } finally {
       saving.value = false
     }
@@ -274,29 +269,48 @@ const handleSave = async () => {
 }
 
 // 启用/禁用
-const toggleStatus = async (row: any, value: boolean | string | number) => {
-  const newStatus: CouponStatus = value ? 'active' : 'disabled'
-  try { await request.patch(`/api/v1/admin/coupons/${row.id}/status`, { status: newStatus }) } catch { /* */ }
-  row.status = newStatus
-  ElMessage.success(newStatus === 'active' ? '已启用' : '已禁用')
+const toggleStatus = async (row: Coupon, value: boolean | string | number) => {
+  const newStatus = value ? 'active' : 'disabled'
+  try {
+    await request.patch(`/api/v1/admin/coupons/${row.id}/status`, { status: newStatus })
+    row.is_enabled = value === true
+    ElMessage.success(newStatus === 'active' ? '已启用' : '已禁用')
+  } catch {
+    // 错误提示已由 request 拦截器统一处理
+  }
 }
 
 // 删除
-const handleDelete = (row: any) => {
+const handleDelete = (row: Coupon) => {
   ElMessageBox.confirm(`确定删除优惠码「${row.code}」吗？`, '提示', {
     type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消',
   }).then(async () => {
-    try { await request.delete(`/api/v1/admin/coupons/${row.id}`) } catch { /* */ }
-    list.value = list.value.filter((c) => c.id !== row.id)
-    ElMessage.success('优惠券已删除')
+    try {
+      await request.delete(`/api/v1/admin/coupons/${row.id}`)
+      list.value = list.value.filter((c) => c.id !== row.id)
+      ElMessage.success('优惠券已删除')
+    } catch { /* */ }
   }).catch(() => {})
 }
 
 // 复制优惠码
-const copyCode = async (row: any) => {
+const copyCode = async (row: Coupon) => {
+  const text = row.code
   try {
-    await navigator.clipboard.writeText(row.code)
-    ElMessage.success(`已复制：${row.code}`)
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text)
+      ElMessage.success(`已复制：${text}`)
+      return
+    }
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.top = '-9999px'
+    document.body.appendChild(ta)
+    ta.select()
+    document.execCommand('copy')
+    document.body.removeChild(ta)
+    ElMessage.success(`已复制：${text}`)
   } catch {
     ElMessage.warning('复制失败，请手动复制')
   }
@@ -307,16 +321,10 @@ onMounted(async () => {
   loading.value = true
   try {
     const res: any = await request.get('/api/v1/admin/coupons')
-    const arr = res?.data || res
-    if (Array.isArray(arr)) {
-      list.value = arr
-    } else {
-      list.value = []
-      ElMessage.error('优惠券数据格式异常')
-    }
+    // 修复 P1 bug: 后端返回 {code:0, data:{list:[...], total:N}}
+    list.value = res?.data?.list || (Array.isArray(res?.data) ? res.data : []) || []
   } catch {
     list.value = []
-    ElMessage.error('加载优惠券列表失败，请稍后重试')
   } finally {
     loading.value = false
   }

@@ -128,9 +128,10 @@ const handleSave = async () => {
       } else {
         const newItem: AnnouncementRecord = {
           id: 'a' + Date.now(), title: form.title, content: form.content, pinned: form.pinned,
-          publishedAt: new Date().toISOString().replace('T', ' ').slice(0, 19),
+          published_at: new Date().toISOString().replace('T', ' ').slice(0, 19),
         }
-        try { const res = await request.post('/api/v1/admin/announcements', { ...form }); if (res && res.id) newItem.id = res.id } catch { /* */ }
+        // 修复 P1 bug: 后端 response.OK 包装为 {code:0, data: a}, 真正的 id 在 res.data.id
+        try { const res: any = await request.post('/api/v1/admin/announcements', { ...form }); if (res && res.data && res.data.id) newItem.id = res.data.id } catch { /* */ }
         list.value.unshift(newItem)
         ElMessage.success('公告已发布')
       }
@@ -158,10 +159,10 @@ const togglePin = async (row: any) => {
 onMounted(async () => {
   loading.value = true
   try {
-    const res = await request.get('/api/v1/admin/announcements')
-    if (Array.isArray(res)) list.value = res
-    else if (res && Array.isArray(res.data)) list.value = res.data
-  } catch { /* mock */ } finally { loading.value = false }
+    const res: any = await request.get('/api/v1/admin/announcements')
+    // 修复 P1 bug: 后端返回 {code:0, data:{list:[...], total:N}}, 旧代码两个分支都不命中
+    list.value = res?.data?.list || (Array.isArray(res?.data) ? res.data : []) || []
+  } catch { /* */ } finally { loading.value = false }
 })
 </script>
 

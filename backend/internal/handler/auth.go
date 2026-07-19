@@ -26,6 +26,10 @@ type AuthHandler struct {
 	jwtMgr        *security.JWTManager
 }
 
+// bcryptCost 与 service.user_register_service / service.user_service 保持一致,
+// 避免改密码产生的哈希 cost 比注册时弱(P2 fix 2026-07-19)
+const bcryptCost = 12
+
 // NewAuthHandler 创建认证处理器
 func NewAuthHandler(a *repo.AdminRepo, u *repo.UserRepo, la *repo.LoginAuditRepo, jwtMgr *security.JWTManager) *AuthHandler {
 	return &AuthHandler{adminRepo: a, userRepo: u, loginAuditRepo: la, jwtMgr: jwtMgr}
@@ -330,7 +334,7 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 			response.Fail(c, response.CodeAccountPwdError)
 			return
 		}
-		newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+		newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcryptCost)
 		if err != nil {
 			response.Fail(c, response.CodeServerError)
 			return
@@ -356,7 +360,7 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 		response.Fail(c, response.CodeAccountPwdError)
 		return
 	}
-	newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcryptCost)
 	if err != nil {
 		response.Fail(c, response.CodeServerError)
 		return

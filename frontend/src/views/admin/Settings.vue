@@ -230,8 +230,18 @@
               <div v-if="pullResult" class="cmd-output">
                 <div class="output-title" :class="pullDone ? (pullSuccess ? 'text-success' : 'text-danger') : 'text-pending'">
                   {{ pullDone ? (pullSuccess ? '更新成功 — 面板已自动重启, 请稍后刷新页面查看新版本' : '更新失败') : '更新中...' }}
+                  <el-button
+                    size="small"
+                    link
+                    type="primary"
+                    class="copy-log-btn"
+                    :loading="copyingLog"
+                    @click="copyPullLog"
+                  >
+                    <el-icon><CopyDocument /></el-icon><span>复制日志</span>
+                  </el-button>
                 </div>
-                <pre class="pull-log">{{ pullResult }}</pre>
+                <pre class="pull-log" ref="pullLogRef">{{ pullResult }}</pre>
               </div>
             </div>
           </el-col>
@@ -286,6 +296,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, onUnmounted, nextTick } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import { CopyDocument } from '@element-plus/icons-vue'
 import request from '@/utils/request'
 import { formatTime } from '@/utils/format'
 
@@ -495,10 +506,20 @@ const savePwd = async () => {
   if (!pwdFormRef.value) return
   await pwdFormRef.value.validate(async (valid) => {
     if (!valid) return
-    try { await request.post('/api/v1/auth/change-password', { oldPassword: pwdForm.oldPwd, newPassword: pwdForm.newPwd }) } catch { /* */ }
-    ElMessage.success('密码已修改')
-    pwdDialog.value = false
-    Object.assign(pwdForm, { oldPwd: '', newPwd: '', confirmPwd: '' })
+    // 修复 P1 bug: 后端 changePasswordRequest JSON tag 为 snake_case,
+    // 前端原本发 camelCase 导致 ShouldBindJSON required 校验失败,
+    // 同时 catch 吞错后仍弹"密码已修改"成功提示, 用户以为改了实际没改。
+    try {
+      await request.post('/api/v1/auth/change-password', {
+        old_password: pwdForm.oldPwd,
+        new_password: pwdForm.newPwd,
+      })
+      ElMessage.success('密码已修改')
+      pwdDialog.value = false
+      Object.assign(pwdForm, { oldPwd: '', newPwd: '', confirmPwd: '' })
+    } catch {
+      // 错误提示已由 request 拦截器统一处理
+    }
   })
 }
 
@@ -509,7 +530,64 @@ const restarting = ref(false)
 const pullResult = ref('')
 const pullSuccess = ref(false)
 const pullDone = ref(false)
+const copyingLog = ref(false)
+const pullLogRef = ref<HTMLElement | null>(null)
 let pollTimer: any = null
+
+// 一键复制更新日志: 优先 navigator.clipboard, 失败回退到 textarea + execCommand
+// (兼容 HTTP 站点 / 旧浏览器 / iframe 限制等 clipboard API 不可用场景)
+const copyPullLog = async () => {
+  if (!pullResult.value) {
+    ElMessage.warning('暂无日志可复制')
+    return
+  }
+  copyingLog.value = true
+  const text = pullResult.value
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text)
+      ElMessage.success('日志已复制到剪贴板')
+      return
+    }
+    // 回退方案: 临时 textarea + execCommand('copy')
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.top = '-9999px'
+    ta.style.left = '-9999px'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.focus()
+    ta.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(ta)
+    if (ok) {
+      ElMessage.success('日志已复制到剪贴板')
+    } else {
+      // 兜底: 选中日志区让用户手动 Ctrl+C
+      if (pullLogRef.value) {
+        const range = document.createRange()
+        range.selectNodeContents(pullLogRef.value)
+        const sel = window.getSelection()
+        sel?.removeAllRanges()
+        sel?.addRange(range)
+      }
+      ElMessage.warning('复制失败, 已选中日志, 请按 Ctrl+C 手动复制')
+    }
+  } catch {
+    // 最后兜底: 选中日志区让用户手动复制
+    if (pullLogRef.value) {
+      const range = document.createRange()
+      range.selectNodeContents(pullLogRef.value)
+      const sel = window.getSelection()
+      sel?.removeAllRanges()
+      sel?.addRange(range)
+    }
+    ElMessage.warning('复制失败, 已选中日志, 请按 Ctrl+C 手动复制')
+  } finally {
+    copyingLog.value = false
+  }
+}
 
 
 const gitStatus = reactive({
@@ -711,10 +789,12 @@ onUnmounted(() => {
 .disk-output { background: var(--np-bg-soft); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
 .disk-output pre { margin: 0; font-size: 12px; color: var(--np-text-secondary); white-space: pre-wrap; max-height: 200px; overflow-y: auto; }
 .cmd-output { margin-top: 12px; background: var(--np-bg-soft); border-radius: 8px; padding: 12px; }
-.cmd-output .output-title { font-size: 13px; font-weight: 600; color: var(--np-text); margin-bottom: 6px; }
+.cmd-output .output-title { font-size: 13px; font-weight: 600; color: var(--np-text); margin-bottom: 6px; display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
 .cmd-output .output-title.text-success { color: #67c23a; }
 .cmd-output .output-title.text-danger { color: #f56c6c; }
 .cmd-output .output-title.text-pending { color: var(--np-text-muted); }
+.copy-log-btn { margin-left: auto; font-weight: normal; }
+.copy-log-btn .el-icon { margin-right: 4px; }
 .cmd-output pre { margin: 0; font-size: 12px; color: var(--np-text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }
 
 

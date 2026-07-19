@@ -1433,9 +1433,10 @@ func diagnoseContainerStartup(client *ssh.Client, containerName string, listenPo
 
 	time.Sleep(3 * time.Second)
 	// 兜底: 端口检测使用多种工具降级
+	// [P3 fix 2026-07-19] 修正 fmt.Sprintf 参数数量(原 3 个 listenPort, 实际只需要 2 个 %d)
 	portCheck, _ := sshRun(client, fmt.Sprintf(
 		"(ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null || lsof -i -P -n 2>/dev/null | grep LISTEN) | grep ':%d' || echo '端口 %d 尚未监听'",
-		listenPort, listenPort, listenPort))
+		listenPort, listenPort))
 	lines = append(lines, "=== 端口监听检测 ===")
 	lines = append(lines, portCheck)
 

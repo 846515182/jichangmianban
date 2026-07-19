@@ -17,20 +17,25 @@
 
       <el-table :data="filteredList" stripe v-loading="loading">
         <el-table-column prop="id" label="日志号" width="80" />
-        <el-table-column prop="username" label="用户名" min-width="120" />
+        <el-table-column label="目标" min-width="140">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.target_type === 'admin' ? 'warning' : 'info'" effect="plain">{{ row.target_type || '-' }}</el-tag>
+            <span v-if="row.target_id" class="target-id" :title="row.target_id">{{ row.target_id.slice(0, 8) }}</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="ip" label="IP地址" min-width="140" />
         <el-table-column prop="location" label="登录位置" min-width="120" />
-        <el-table-column prop="userAgent" label="User-Agent" min-width="240" show-overflow-tooltip />
+        <el-table-column prop="user_agent" label="User-Agent" min-width="240" show-overflow-tooltip />
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
-            <el-tag size="small" :type="row.status === 'success' ? 'success' : 'danger'" effect="dark">
-              <el-icon style="vertical-align: middle"><CircleCheck v-if="row.status === 'success'" /><CircleClose v-else /></el-icon>
-              {{ row.status === 'success' ? '成功' : '失败' }}
+            <el-tag size="small" :type="row.success ? 'success' : 'danger'" effect="dark">
+              <el-icon style="vertical-align: middle"><CircleCheck v-if="row.success" /><CircleClose v-else /></el-icon>
+              {{ row.success ? '成功' : '失败' }}
             </el-tag>
           </template>
         </el-table-column>
         <el-table-column label="时间" width="180">
-          <template #default="{ row }">{{ formatTime(row.createdAt) }}</template>
+          <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
         </el-table-column>
       </el-table>
 
@@ -65,34 +70,38 @@ import { ref, computed, onMounted } from 'vue'
 import { Search } from '@element-plus/icons-vue'
 import request from '@/utils/request'
 import { formatTime } from '@/utils/format'
-import { mockLoginAudits, type LoginAuditRecord } from '@/mock/data'
 
 const loading = ref(false)
 const keyword = ref('')
 const statusFilter = ref('')
-const list = ref<LoginAuditRecord[]>([...mockLoginAudits])
+const list = ref<any[]>([])
 
 const filteredList = computed(() => {
   return list.value.filter((item) => {
-    if (statusFilter.value && item.status !== statusFilter.value) return false
+    // 后端 success 是 bool, 状态筛选器值是 'success'/'failed'
+    if (statusFilter.value) {
+      const wantSuccess = statusFilter.value === 'success'
+      if (!!item.success !== wantSuccess) return false
+    }
     if (keyword.value) {
       const k = keyword.value.toLowerCase()
-      if (!item.username.toLowerCase().includes(k) && !item.ip.toLowerCase().includes(k)) return false
+      const hay = `${item.target_type || ''} ${item.target_id || ''} ${item.ip || ''} ${item.location || ''}`.toLowerCase()
+      if (!hay.includes(k)) return false
     }
     return true
   })
 })
 
-const successCount = computed(() => list.value.filter((l) => l.status === 'success').length)
-const failedCount = computed(() => list.value.filter((l) => l.status === 'failed').length)
+const successCount = computed(() => list.value.filter((l) => l.success).length)
+const failedCount = computed(() => list.value.filter((l) => !l.success).length)
 
 onMounted(async () => {
   loading.value = true
   try {
-    const res = await request.get('/api/v1/admin/system/login-audit')
-    if (Array.isArray(res)) list.value = res
-    else if (res && Array.isArray(res.data)) list.value = res.data
-  } catch { /* mock */ } finally { loading.value = false }
+    const res: any = await request.get('/api/v1/admin/system/login-audit')
+    // 修复 P1 bug: 后端返回 {code:0, data:{list:[...], total:N}}
+    list.value = res?.data?.list || (Array.isArray(res?.data) ? res.data : []) || []
+  } catch { /* */ } finally { loading.value = false }
 })
 </script>
 
@@ -108,4 +117,5 @@ onMounted(async () => {
 .stat-mini-value { font-size: 28px; font-weight: 700; color: var(--np-text); }
 .stat-mini-value.success { color: var(--np-primary); }
 .stat-mini-value.danger { color: var(--np-danger); }
+.target-id { margin-left: 6px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--np-text-muted); }
 </style>

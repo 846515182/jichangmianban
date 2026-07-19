@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,18 +24,42 @@ import (
 //               之后 BinaryMessage=终端输入, TextMessage(JSON)=控制(resize)
 //   后端->前端: TextMessage(JSON)=事件(ready/error/closed), BinaryMessage=终端输出
 
+// sshAllowedOrigins 从环境变量 SSH_TERMINAL_ALLOWED_ORIGINS (逗号分隔) 读取允许的 Origin。
+// 未配置时回退到本地开发常用 Origin。生产环境应通过环境变量配置面板实际域名,
+// 例如: SSH_TERMINAL_ALLOWED_ORIGINS=https://panel.example.com,https://panel2.example.com
+func sshAllowedOrigins() []string {
+	if v := strings.TrimSpace(os.Getenv("SSH_TERMINAL_ALLOWED_ORIGINS")); v != "" {
+		parts := strings.Split(v, ",")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			if s := strings.TrimSpace(p); s != "" {
+				out = append(out, s)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return []string{"http://localhost", "http://127.0.0.1", "https://localhost", "https://127.0.0.1"}
+}
+
 var sshUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		// [S4 fix 2026-07-14] WebSocket CheckOrigin whitelist
+		// [P1 fix 2026-07-19] 支持从环境变量配置生产域名, 避免生产环境 403
 		origin := r.Header.Get("Origin")
 		if origin == "" {
 			return false  // [P0#2 2026-07-14] 拒绝空 Origin,防 CSRF 绕过
 		}
-		allowed := []string{"http://localhost", "http://127.0.0.1", "https://localhost", "https://127.0.0.1"}
-		for _, a := range allowed {
+		for _, a := range sshAllowedOrigins() {
 			if origin == a || origin == a+":8080" || origin == a+":80" || origin == a+":443" || origin == a+":5173" {
 				return true
 			}
+			// 也允许 origin 直接等于配置项(用户可在环境变量里写完整带端口的 origin)
+		}
+		// 同时允许 origin 的 host 部分等于请求 Host(同源场景, 反向代理后常见)
+		if u, err := url.Parse(origin); err == nil && u.Host == r.Host {
+			return true
 		}
 		log.Printf("[ssh_terminal] reject websocket origin=%s remote=%s", origin, r.RemoteAddr)
 		return false
