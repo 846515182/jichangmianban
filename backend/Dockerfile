@@ -24,11 +24,15 @@ RUN go mod download
 # 复制源码
 COPY . .
 
-# 编译静态二进制（关闭 CGO，便于在 alpine 运行）
-# 输出名为 nexus-panel
+# 通过 build arg 注入版本号(默认 dev)
+# 修复 CRITICAL 2026-07-19: 旧版用 `git rev-parse --short HEAD` 在 build 阶段取版本,
+# 但 build context 是 ./backend, 不含 .git 目录, 命令必然失败 fallback 到 dev,
+# 导致 app.Version 永远是 "dev", CheckVersionConsistency 兜底 cron 直接跳过失效。
+# 现改为由调用方(gitPull 流程 / 部署脚本)通过 --build-arg VERSION=<git HEAD short> 显式传入。
+ARG VERSION=dev
 ENV GOPROXY=https://goproxy.cn,direct
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-    -ldflags="-s -w -X 'main.Version=$(git rev-parse --short HEAD 2>/dev/null || echo dev)'" \
+    -ldflags="-s -w -X 'main.Version=${VERSION}'" \
     -o nexus-panel \
     ./cmd/server
 

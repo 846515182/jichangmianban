@@ -1109,9 +1109,24 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 			}
 		}
 
-		logWrite(">>> 5/7 构建镜像 docker compose build panel frontend")
+		// 在 build 之前先取本次部署版本号(git HEAD short hash),
+		// 通过 --build-arg VERSION=<newHead> 注入到 panel 镜像的 ldflags,
+		// 让 app.Version 与 git HEAD 一致, CheckVersionConsistency 兜底 cron 才能正常工作。
+		// 修复 CRITICAL 2026-07-19: 旧版 Dockerfile build context 是 ./backend,
+		// 不含 .git 目录, `git rev-parse --short HEAD` 在 build 阶段必然失败 fallback 到 dev,
+		// 导致 app.Version 永远是 "dev", CheckVersionConsistency 直接跳过失效。
+		newHead := strings.TrimSpace(execCommand("git", "rev-parse", "--short", "HEAD").Output)
+		if newHead == "" {
+			logWrite("警告: 读取 git HEAD short hash 失败, 将用 dev 作为版本号")
+			newHead = "dev"
+		}
+		logWrite(">>> 5/7 构建镜像 docker compose build --build-arg VERSION=%s panel frontend", newHead)
 		logWrite("（首次构建约3-5分钟，后续有缓存会快很多）")
-		if !execCommandLogTimeout(gitRoot, "docker", 1800, "compose", "build", "panel", "frontend") {
+		// --build-arg VERSION=<newHead>: 把 git HEAD short hash 注入到 Dockerfile 的 ARG VERSION,
+		// 再由 ldflags 写入 main.Version, 容器启动后 app.Version 就是这个值,
+		// CheckVersionConsistency 据此判断是否需要兜底重建容器。
+		if !execCommandLogTimeout(gitRoot, "docker", 1800, "compose", "build",
+			"--build-arg", "VERSION="+newHead, "panel", "frontend") {
 			logWrite("镜像构建失败，请查看上方日志")
 			setPullDone(false)
 			return
@@ -1131,7 +1146,7 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		_ = execCommandLog(gitRoot, "docker", "builder", "prune", "-f")
 
 		// 写入构建标记文件, 让 GitStatus 能检测下次是否有未部署的更新
-		newHead := strings.TrimSpace(execCommand("git", "rev-parse", "--short", "HEAD").Output)
+		// (newHead 已在步骤 5 之前获取, 此处复用)
 		if newHead != "" {
 			_ = os.WriteFile(filepath.Join(gitRoot, ".last_build_version"), []byte(newHead), 0644)
 		}
