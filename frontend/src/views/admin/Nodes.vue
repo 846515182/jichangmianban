@@ -76,7 +76,7 @@
                 {{ planName(pid) }}
               </el-tag>
             </div>
-            <span v-else style="color:#f56c6c;font-size:12px">未绑定</span>
+            <span v-else style="color:#909399;font-size:12px">未绑定</span>
           </template>
         </el-table-column>
         <el-table-column label="在线状态" width="90">
@@ -121,16 +121,25 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="340" fixed="right">
+        <el-table-column label="操作" width="120" fixed="right">
           <template #default="scope">
-            <el-button size="small" link type="warning" @click="startAutoDeploy(scope.row as NodeRow)">一键部署</el-button>
-            <el-button size="small" link type="success" @click="showDeployInfo(scope.row as NodeRow)">部署信息</el-button>
-            <el-button size="small" link @click="rotateToken(scope.row as NodeRow)">轮换Token</el-button>
-            <el-button size="small" link type="primary" @click="openDialog(scope.row as NodeRow)">编辑</el-button>
-            <el-button size="small" link type="danger" @click="handleDelete(scope.row as NodeRow)">删除</el-button>
-            <el-button size="small" link :loading="pingLoading.get(scope.row.id)||false" @click="pingNode(scope.row as NodeRow)" :title="scope.row.online?'重新确认连接':'检测是否恢复'">
-              <el-icon style="margin-right:2px"><Connection /></el-icon>检测
-            </el-button>
+            <div class="row-actions">
+              <el-button size="small" link type="primary" @click="openDialog(scope.row as NodeRow)">编辑</el-button>
+              <el-dropdown trigger="click" @command="(cmd: string) => handleRowAction(cmd, scope.row as NodeRow)">
+                <el-button size="small" link>更多<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="deploy">一键部署</el-dropdown-item>
+                    <el-dropdown-item command="deployInfo">部署信息</el-dropdown-item>
+                    <el-dropdown-item command="rotateToken">轮换Token</el-dropdown-item>
+                    <el-dropdown-item command="ping" :disabled="pingLoading.get(scope.row.id)||false">
+                      {{ pingLoading.get(scope.row.id) ? '检测中...' : (scope.row.online ? '重新检测' : '检测连接') }}
+                    </el-dropdown-item>
+                    <el-dropdown-item command="delete" divided>删除</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -162,7 +171,7 @@
             <div v-if="row.plan_ids && row.plan_ids.length" class="nc-tags">
               <el-tag v-for="pid in row.plan_ids" :key="pid" size="small" effect="plain" type="success">{{ planName(pid) }}</el-tag>
             </div>
-            <span v-else class="nc-value nc-warn">未绑定</span>
+            <span v-else class="nc-value nc-muted">未绑定</span>
           </div>
           <div class="nc-load" v-if="row.runtime && row.runtime.updated_at > 0">
             <div class="nc-row">
@@ -191,12 +200,21 @@
             <span class="nc-value nc-muted">无数据</span>
           </div>
           <div class="nc-actions">
-            <el-button size="small" type="warning" plain @click="startAutoDeploy(row)">一键部署</el-button>
-            <el-button size="small" type="success" plain @click="showDeployInfo(row)">部署信息</el-button>
-            <el-button size="small" plain @click="rotateToken(row)">轮换Token</el-button>
             <el-button size="small" type="primary" plain @click="openDialog(row)">编辑</el-button>
-            <el-button size="small" type="danger" plain @click="handleDelete(row)">删除</el-button>
-            <el-button size="small" plain :loading="pingLoading.get(row.id)||false" @click="pingNode(row)" :title="row.online?'重新确认连接':'检测是否恢复'">检测</el-button>
+            <el-dropdown trigger="click" @command="(cmd: string) => handleRowAction(cmd, row)">
+              <el-button size="small" plain>更多<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="deploy">一键部署</el-dropdown-item>
+                  <el-dropdown-item command="deployInfo">部署信息</el-dropdown-item>
+                  <el-dropdown-item command="rotateToken">轮换Token</el-dropdown-item>
+                  <el-dropdown-item command="ping" :disabled="pingLoading.get(row.id)||false">
+                    {{ pingLoading.get(row.id) ? '检测中...' : (row.online ? '重新检测' : '检测连接') }}
+                  </el-dropdown-item>
+                  <el-dropdown-item command="delete" divided>删除</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </div>
         </div>
         <el-empty v-if="!loading && !filteredList.length" description="暂无节点" />
@@ -398,7 +416,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted, h, defineComponent } from 'vue'
 import { ElMessage, ElMessageBox, ElIcon, type FormInstance, type FormRules } from 'element-plus'
-import { Search, Plus, CopyDocument, Connection } from '@element-plus/icons-vue'
+import { Search, Plus, CopyDocument, ArrowDown } from '@element-plus/icons-vue'
 import WebTerminal from '@/components/WebTerminal.vue'
 import DeployProgress from '@/components/DeployProgress.vue'
 import CleanupProgress from '@/components/CleanupProgress.vue'
@@ -972,6 +990,17 @@ const pingNode = async (row: NodeRow) => {
   }
 }
 
+// 操作列 dropdown 命令分发
+const handleRowAction = (cmd: string, row: NodeRow) => {
+  switch (cmd) {
+    case 'deploy': startAutoDeploy(row); break
+    case 'deployInfo': showDeployInfo(row); break
+    case 'rotateToken': rotateToken(row); break
+    case 'ping': pingNode(row); break
+    case 'delete': handleDelete(row); break
+  }
+}
+
 // 获取套餐列表(用于节点绑定时选择)
 const fetchPlans = async () => {
   try {
@@ -1116,13 +1145,16 @@ onUnmounted(() => {
 .nc-label { color: var(--np-text-muted, #909399); min-width: 40px; flex-shrink: 0; }
 .nc-value { color: var(--np-text, #303133); word-break: break-all; }
 .nc-mono { font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px; }
-.nc-warn { color: #f56c6c; font-size: 12px; }
 .nc-muted { color: #909399; font-size: 12px; }
 .nc-plans { align-items: flex-start; }
 .nc-tags { display: flex; flex-wrap: wrap; gap: 4px; }
 .nc-load { margin-top: 4px; padding-top: 8px; border-top: 1px dashed var(--np-border, #ebeef5); }
 .nc-load .rt-bar { flex: 1; min-width: 60px; }
 .nc-load-empty { color: #909399; }
+/* PC 端操作列: 编辑 + 更多下拉, 紧凑排列 */
+.row-actions { display: inline-flex; align-items: center; gap: 4px; }
+.row-actions .el-button { margin-left: 0; }
+
 .nc-actions {
   display: flex; gap: 6px; flex-wrap: wrap;
   margin-top: 10px; padding-top: 10px;
