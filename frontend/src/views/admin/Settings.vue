@@ -222,11 +222,11 @@
                 >
                   <el-icon><Download /></el-icon><span>在线更新</span>
                 </el-button>
-                <el-button type="warning" @click="systemRestart" :loading="restarting">
-                  <el-icon><RefreshRight /></el-icon><span>重启面板</span>
-                </el-button>
                 <el-button type="info" @click="() => loadGitStatus()" :loading="loadingGitStatus">
                   <el-icon><Refresh /></el-icon><span>刷新状态</span>
+                </el-button>
+                <el-button type="warning" @click="systemRestart" :loading="restarting">
+                  <el-icon><RefreshRight /></el-icon><span>重启面板</span>
                 </el-button>
               </div>
               <div v-if="pullResult" class="cmd-output">
@@ -840,7 +840,7 @@ onUnmounted(() => {
 .git-commit-hash { font-family: 'JetBrains Mono', monospace; font-size: 12px; padding: 2px 6px; background: var(--np-bg-soft); border-radius: 3px; color: var(--np-text-secondary); }
 .git-commit-new { color: var(--np-primary); border: 1px dashed var(--np-primary-dim); }
 .git-arrow { color: var(--np-text-muted); font-size: 12px; }
-.git-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.git-actions { display: flex; gap: 8px; flex-wrap: nowrap; }
 .git-actions .el-button { margin-left: 0 !important; }
 .git-actions .el-button span { margin-left: 4px; }
 .disk-actions { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
