@@ -21,6 +21,7 @@ type Plan struct {
 	DeviceLimit        int       `gorm:"type:int;default:3" json:"device_limit"`            // 设备数限制, 0=不限
 	SortOrder          int       `gorm:"type:int;default:0" json:"sort_order"`              // 排序
 	IsEnabled          bool      `gorm:"column:is_enabled;default:true" json:"is_enabled"`
+	IsTrial            bool      `gorm:"column:is_trial;default:false" json:"is_trial"`     // 是否试用套餐
 	IsDeleted          bool      `gorm:"column:is_deleted;default:false" json:"-"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`

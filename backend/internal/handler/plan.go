@@ -47,6 +47,7 @@ func (h *PlanHandler) AdminPlanList(c *gin.Context) {
 			"device_limit":        p.DeviceLimit,
 			"sort_order":          p.SortOrder,
 			"is_enabled":          p.IsEnabled,
+			"is_trial":            p.IsTrial,
 			"node_count":          count,
 		})
 	}
@@ -127,6 +128,7 @@ func (h *PlanHandler) UserPlanList(c *gin.Context) {
 			"device_limit":        p.DeviceLimit,
 			"sort_order":          p.SortOrder,
 			"is_enabled":          p.IsEnabled,
+			"is_trial":            p.IsTrial,
 			"node_count":          count,
 		})
 	}

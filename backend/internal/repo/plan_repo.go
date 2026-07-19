@@ -41,20 +41,20 @@ func (r *PlanRepo) List(page, size int, keyword string) ([]model.Plan, int64, er
 	return list, total, nil
 }
 
-// ListEnabled 查询所有启用的套餐(按 sort_order 排序)
+// ListEnabled 查询所有可购买的套餐(按 sort_order 排序, 排除试用套餐)
 func (r *PlanRepo) ListEnabled() ([]model.Plan, error) {
 	var list []model.Plan
-	if err := r.db.Where("is_deleted = false AND is_enabled = true").
+	if err := r.db.Where("is_deleted = false AND is_enabled = true AND is_trial = false").
 		Order("sort_order ASC, created_at DESC").Find(&list).Error; err != nil {
 		return nil, err
 	}
 	return list, nil
 }
 
-// GetTrialPlan 查找试用套餐 (name 含"试用"且启用), 用于注册自动发放
+// GetTrialPlan 查找试用套餐 (is_trial=true 且启用), 用于注册自动发放
 func (r *PlanRepo) GetTrialPlan() (*model.Plan, error) {
 	var p model.Plan
-	if err := r.db.Where("is_deleted = false AND is_enabled = true AND name LIKE ?", "%试用%").
+	if err := r.db.Where("is_deleted = false AND is_enabled = true AND is_trial = true").
 		Order("sort_order ASC, created_at DESC").First(&p).Error; err != nil {
 		return nil, err
 	}

@@ -56,6 +56,9 @@ func (s *OrderService) CreateOrder(in *CreateOrderInput) (*model.Order, error) {
 	if !plan.IsEnabled {
 		return nil, errors.New("套餐已下架")
 	}
+	if plan.IsTrial {
+		return nil, errors.New("试用套餐无法购买")
+	}
 	now := time.Now()
 	amount := plan.PriceCents
 	// 优惠券折扣计算
@@ -483,9 +486,8 @@ func (s *OrderService) AdminCancelOrder(orderID, reason string) error {
 }
 
 // setUserPlan 内部开通套餐逻辑:
-// - 无论是新购、续费还是升降级，均重置流量为套餐额度(行业主流做法)
-// - 续费同套餐: 流量重置为套餐额度 + 延长到期时间(不叠加历史剩余)
-// - 升级/降级/新购: 重置流量 + 设置新配额
+// - 首次购买/升级/降级/套餐已过期: 重置流量为套餐额度
+// - 续费同套餐: 保留剩余流量, 流量限额 = 剩余流量 + 新套餐额度, 有效期叠加
 // - expired_at 在未过期基础上叠加 duration_days; 已过期则从 now 起算
 // 修复 F-11: 新增 tx 参数, tx 非空时用 tx.Save 而非 userRepo.Update,
 // 保证与订单状态变更在同一事务内, 避免"退款不退套餐"
@@ -495,16 +497,27 @@ func (s *OrderService) setUserPlan(tx *gorm.DB, userID string, plan *model.Plan,
 		return err
 	}
 
+	isRenewSamePlan := u.PlanID != nil && *u.PlanID == plan.ID &&
+		u.ExpiredAt != nil && u.ExpiredAt.After(now) &&
+		u.Status == "active"
+
 	planID := plan.ID
 	u.PlanID = &planID
 
-	// 统一重置流量为套餐额度(续费不叠加历史剩余)
-	u.TrafficUsed = 0
-	u.UploadBytes = 0
-	u.DownloadBytes = 0
-	u.TrafficLimit = plan.TrafficLimit
+	if isRenewSamePlan {
+		remaining := u.TrafficLimit - u.TrafficUsed
+		if remaining > 0 {
+			u.TrafficLimit = remaining + plan.TrafficLimit
+		} else {
+			u.TrafficLimit = plan.TrafficLimit
+		}
+	} else {
+		u.TrafficUsed = 0
+		u.UploadBytes = 0
+		u.DownloadBytes = 0
+		u.TrafficLimit = plan.TrafficLimit
+	}
 
-	// 计算到期时间
 	if plan.DurationDays > 0 {
 		base := now
 		if u.ExpiredAt != nil && u.ExpiredAt.After(now) {
@@ -519,7 +532,6 @@ func (s *OrderService) setUserPlan(tx *gorm.DB, userID string, plan *model.Plan,
 	if u.Status != "disabled" {
 		u.Status = "active"
 	}
-	// 事务内用 tx.Save, 非事务用 userRepo.Update
 	if tx != nil {
 		return tx.Save(u).Error
 	}

@@ -34,6 +34,7 @@ type CreatePlanInput struct {
 	DeviceLimit        int    `json:"device_limit"`
 	SortOrder          int    `json:"sort_order"`
 	IsEnabled          bool   `json:"is_enabled"`
+	IsTrial            bool   `json:"is_trial"`
 }
 
 // UpdatePlanInput 更新套餐入参(指针字段可部分更新)
@@ -49,6 +50,7 @@ type UpdatePlanInput struct {
 	DeviceLimit        *int    `json:"device_limit"`
 	SortOrder          *int    `json:"sort_order"`
 	IsEnabled          *bool   `json:"is_enabled"`
+	IsTrial            *bool   `json:"is_trial"`
 }
 
 // CreatePlan 创建套餐
@@ -71,6 +73,7 @@ func (s *PlanService) CreatePlan(in *CreatePlanInput) (*model.Plan, error) {
 		DeviceLimit:        in.DeviceLimit,
 		SortOrder:          in.SortOrder,
 		IsEnabled:          in.IsEnabled,
+		IsTrial:            in.IsTrial,
 	}
 	if err := s.repo.Create(p); err != nil {
 		return nil, err
@@ -120,6 +123,9 @@ func (s *PlanService) UpdatePlan(id string, in *UpdatePlanInput) (*model.Plan, e
 	}
 	if in.IsEnabled != nil {
 		p.IsEnabled = *in.IsEnabled
+	}
+	if in.IsTrial != nil {
+		p.IsTrial = *in.IsTrial
 	}
 
 	// 事务: 更新套餐 + 同步已购该套餐的用户(仅同步 traffic_limit)
