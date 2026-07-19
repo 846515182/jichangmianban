@@ -81,7 +81,11 @@ func (h *AuthRegisterHandler) Register(c *gin.Context) {
 	u, err := h.registerWithTx(c, db, &req, ip)
 	if err != nil {
 		if errors.Is(err, service.ErrDuplicate) {
-			response.Fail(c, response.CodeDuplicate)
+			response.FailMsg(c, response.CodeDuplicate, "用户名已被使用, 请更换")
+			return
+		}
+		if errors.Is(err, service.ErrDuplicateEmail) {
+			response.FailMsg(c, response.CodeDuplicate, "该邮箱已被注册, 请更换或联系管理员清理旧账号")
 			return
 		}
 		response.FailMsg(c, response.CodeServerError, err.Error())

@@ -168,6 +168,19 @@ func (s *UserService) DeleteUser(id string) error {
         return s.repo.SoftDelete(id)
 }
 
+// HardDeleteUser 硬删除用户(物理删除, 用于测试数据彻底清理)
+// 与 DeleteUser 不同: 不留 is_deleted=true 痕迹, 释放所有唯一索引,
+// 重新注册同 username/email 不会冲突。
+// 级联清理: traffic_logs, user_nodes, subscriptions, orders(软删保留)
+func (s *UserService) HardDeleteUser(id string) error {
+        // 允许硬删已软删的用户(用 Unscoped 查询)
+        var u model.User
+        if err := s.repo.GetDB().Unscoped().Where("id = ?", id).First(&u).Error; err != nil {
+                return err
+        }
+        return s.repo.HardDelete(id)
+}
+
 // ResetTraffic 重置用户流量
 func (s *UserService) ResetTraffic(id string) error {
         if _, err := s.repo.GetByID(id); err != nil {
@@ -197,5 +210,8 @@ func (s *UserService) VerifyPassword(u *model.User, password string) error {
         return bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password))
 }
 
-// ErrDuplicate 重复错误
+// ErrDuplicate 重复错误(用户名)
 var ErrDuplicate = errors.New("duplicate")
+
+// ErrDuplicateEmail 邮箱已注册
+var ErrDuplicateEmail = errors.New("email already registered")

@@ -219,6 +219,8 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 		admin.POST("/users", middleware.AuditAction("user.create"), adminUserH.UserCreate)
 		admin.PUT("/users/:id", middleware.AuditAction("user.update"), adminUserH.UserUpdate)
 		admin.DELETE("/users/:id", middleware.AuditAction("user.delete"), adminUserH.UserDelete)
+		// 物理删除(彻底清理测试数据, 释放 username/email 唯一索引, 重新注册不冲突)
+		admin.DELETE("/users/:id/hard", middleware.AuditAction("user.hard_delete"), adminUserH.UserHardDelete)
 		admin.POST("/users/import", middleware.AuditAction("user.import"), adminUserH.UserImport)
 		admin.POST("/users/:id/reset-traffic", middleware.AuditAction("user.reset_traffic"), adminUserH.UserResetTraffic)
 		admin.GET("/subscriptions", NewAdminSubscriptionHandler(deps.SubRepo, deps.SubSvc).List)

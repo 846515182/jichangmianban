@@ -52,7 +52,7 @@
             <span v-else style="color:#909399;font-size:12px">无订阅</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="340" fixed="right">
+        <el-table-column label="操作" width="420" fixed="right">
           <template #default="{ row }">
             <el-button size="small" link type="primary" @click="openDialog(row)">编辑</el-button>
             <el-button size="small" link type="success" @click="openActivateDialog(row)">开通套餐</el-button>
@@ -61,6 +61,7 @@
               {{ row.status === 'active' ? '禁用' : '启用' }}
             </el-button>
             <el-button size="small" link type="danger" @click="handleDelete(row)">删除</el-button>
+            <el-button size="small" link type="danger" @click="handleHardDelete(row)">彻底删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -210,8 +211,29 @@ const handleSave = async () => {
 }
 
 const handleDelete = (row: any) => {
-  ElMessageBox.confirm("确定删除用户「" + row.username + "」吗？", "提示", { type: "warning" }).then(async () => {
+  ElMessageBox.confirm("确定删除用户「" + row.username + "」吗？(软删除, 数据保留可审计)", "提示", { type: "warning" }).then(async () => {
     try { await request.delete("/api/v1/admin/users/" + row.id); ElMessage.success("用户已删除"); await fetchList() } catch { /* */ }
+  }).catch(() => {})
+}
+
+// 彻底删除(物理删除, 释放 username/email 唯一索引, 重新注册不冲突)
+// 仅用于测试数据清理, 数据不可恢复
+const handleHardDelete = (row: any) => {
+  ElMessageBox.confirm(
+    "确定【彻底删除】用户「" + row.username + "」吗？\n\n" +
+    "彻底删除会从数据库物理移除该用户及其关联数据(订阅/流量日志/user_nodes),\n" +
+    "释放 username 和 email 唯一索引, 之后可用相同用户名/邮箱重新注册。\n\n" +
+    "⚠️ 此操作不可恢复, 仅建议用于测试账号清理。",
+    "彻底删除确认",
+    { type: "error", confirmButtonText: "确认彻底删除", cancelButtonText: "取消" }
+  ).then(async () => {
+    try {
+      await request.delete("/api/v1/admin/users/" + row.id + "/hard")
+      ElMessage.success("已彻底删除, 该账号的 username/email 已释放可重新注册")
+      await fetchList()
+    } catch (e: any) {
+      ElMessage.error(e?.response?.data?.msg || "彻底删除失败")
+    }
   }).catch(() => {})
 }
 

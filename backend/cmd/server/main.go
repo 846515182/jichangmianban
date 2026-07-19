@@ -544,6 +544,8 @@ func runSQLMigrations(db *gorm.DB, logger *zap.Logger) error {
 		// 旧版未注册, 导致存量试用套餐 is_trial 始终为 false, 出现在购买列表中
 		// 此迁移会 UPDATE plans SET is_trial=true WHERE name LIKE '%试用%'
 		{"2026_07_19_add_plan_is_trial", "migrations/2026_07_19_add_plan_is_trial.sql"},
+		// 修复历史软删用户 email 唯一索引占用问题
+		{"2026_07_19_fix_soft_deleted_emails", "migrations/2026_07_19_fix_soft_deleted_emails.sql"},
 	}
 
 	for _, m := range migrations {

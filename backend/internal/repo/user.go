@@ -80,14 +80,50 @@ func (r *UserRepo) Update(u *model.User) error {
 }
 
 // SoftDelete 软删除
+// 修复 CRITICAL 2026-07-19: 旧版只对 username 加 _del_ 后缀释放唯一索引,
+// 但 email 字段没改, users.email 唯一索引(uq_users_email_lower)仍被占用,
+// 导致用同 email 重新注册时 INSERT 触发唯一约束冲突, 报"重复"。
+// 现在同步给 email 加 _del_时间戳 后缀, 释放 email 唯一索引。
+// 同时 status=disabled 阻止订阅拉取。
 func (r *UserRepo) SoftDelete(id string) error {
-	// 用户名追加时间戳后缀以释放唯一索引，同时 status=disabled 阻止订阅拉取
 	return r.db.Model(&model.User{}).Where("id = ? AND is_deleted = false", id).
 		Updates(map[string]interface{}{
 			"is_deleted": true,
 			"status":     "disabled",
 			"username":   gorm.Expr("username || '_del_' || to_char(now(), 'YYYYMMDDHH24MISS')"),
+			"email":      gorm.Expr("email || '_del_' || to_char(now(), 'YYYYMMDDHH24MISS')"),
 		}).Error
+}
+
+// HardDelete 硬删除(物理删除, 仅用于测试数据彻底清理)
+// 与 SoftDelete 不同: 物理从数据库删除, 不留任何痕迹, 释放所有索引。
+// 注意: 此操作不可逆, 仅建议用于测试账号清理。
+// 级联清理: traffic_logs, user_nodes, subscriptions, orders (避免外键残留)
+func (r *UserRepo) HardDelete(id string) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		// 1. 物理删除关联流量日志
+		if err := tx.Where("user_id = ?", id).Delete(&model.TrafficLog{}).Error; err != nil {
+			return err
+		}
+		// 2. 物理删除 user_nodes 关联(已软删的也清)
+		if err := tx.Unscoped().Where("user_id = ?", id).Delete(&model.UserNode{}).Error; err != nil {
+			return err
+		}
+		// 3. 物理删除 subscriptions
+		if err := tx.Unscoped().Where("user_id = ?", id).Delete(&model.Subscription{}).Error; err != nil {
+			return err
+		}
+		// 4. 软删除 orders(订单保留, 用于财务审计)
+		if err := tx.Model(&model.Order{}).Where("user_id = ? AND is_deleted = false", id).
+			Update("is_deleted", true).Error; err != nil {
+			return err
+		}
+		// 5. 物理删除用户(用 Unscoped 跳过 is_deleted 过滤)
+		if err := tx.Unscoped().Where("id = ?", id).Delete(&model.User{}).Error; err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 // ResetTraffic 重置流量

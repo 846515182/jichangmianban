@@ -62,6 +62,12 @@ func (s *UserRegisterService) Register(in *RegisterInput) (*model.User, error) {
 	if existing, err := s.userRepo.GetByUsername(in.Username); err == nil && existing != nil {
 		return nil, ErrDuplicate
 	}
+	// 修复 CRITICAL 2026-07-19: 旧版只查 username 重复, 不查 email。
+	// 历史软删用户 email 仍占唯一索引, INSERT 时直接撞约束, 报"重复"但前端看不出原因。
+	// 现在显式查 email(带 is_deleted=false 过滤), 命中则返回明确的"邮箱已注册"错误。
+	if existing, err := s.userRepo.GetByEmail(in.Email); err == nil && existing != nil {
+		return nil, ErrDuplicateEmail
+	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(in.Password), bcryptCost)
 	if err != nil {
 		return nil, err
