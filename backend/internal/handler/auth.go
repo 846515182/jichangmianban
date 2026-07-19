@@ -76,17 +76,29 @@ func (h *AuthHandler) Login(c *gin.Context) {
 }
 
 // adminLogin 管理员登录
+//
+// 修复 CRITICAL 2026-07-19: 账号锁定计数与 user 隔离
+// 事故: 前端 loginAuto 会先试 admin 再试 user, 单次登录操作产生 2 次失败计数
+// (admin 失败 + user 失败), 都计入同一个 loginfail:acc:{username} key,
+// 导致用户试 2-3 次密码就被锁(loginlock:acc:{username}), 永远登不上。
+//
+// 修复: admin 登录的失败计数 key 用 "admin:{username}", 与 user 的 "{username}"
+// 完全隔离。admin 尝试失败(loginAuto 的预期行为)不消耗 user 账号的失败次数。
+// IP 维度仍共享(防爆破), 但账号维度独立。
 func (h *AuthHandler) adminLogin(c *gin.Context, ctx context.Context, req *loginRequest, ip, ua string) {
+	// admin 账号维度的 key 加 "admin:" 前缀, 与 user 账号隔离
+	adminAccKey := "admin:" + req.Username
+
 	admin, err := h.adminRepo.GetByUsername(req.Username)
 	if err != nil {
-		// 记录失败
-		middleware.RecordLoginFail(ctx, ip, req.Username)
+		// 记录失败(用 admin: 前缀的 key, 不影响 user 账号)
+		middleware.RecordLoginFail(ctx, ip, adminAccKey)
 		h.recordAudit(ctx, "admin", "", ip, ua, false)
 		response.Fail(c, response.CodeAccountPwdError)
 		return
 	}
-	// 检查账号锁定
-	if locked, _ := middleware.CheckAccountLocked(ctx, req.Username); locked {
+	// 检查账号锁定(admin 账号维度)
+	if locked, _ := middleware.CheckAccountLocked(ctx, adminAccKey); locked {
 		response.Fail(c, response.CodeAccountLocked)
 		return
 	}
@@ -96,7 +108,7 @@ func (h *AuthHandler) adminLogin(c *gin.Context, ctx context.Context, req *login
 	}
 	// 校验密码
 	if err := bcrypt.CompareHashAndPassword([]byte(admin.PasswordHash), []byte(req.Password)); err != nil {
-		_, locked := middleware.RecordLoginFail(ctx, ip, req.Username)
+		_, locked := middleware.RecordLoginFail(ctx, ip, adminAccKey)
 		h.recordAudit(ctx, "admin", admin.ID, ip, ua, false)
 		if locked {
 			response.Fail(c, response.CodeAccountLocked)
@@ -106,7 +118,7 @@ func (h *AuthHandler) adminLogin(c *gin.Context, ctx context.Context, req *login
 		return
 	}
 	// 登录成功
-	middleware.RecordLoginSuccess(ctx, ip, req.Username)
+	middleware.RecordLoginSuccess(ctx, ip, adminAccKey)
 	now := time.Now()
 	_ = h.adminRepo.UpdateLastLogin(admin.ID, ip, now)
 	h.recordAudit(ctx, "admin", admin.ID, ip, ua, true)
