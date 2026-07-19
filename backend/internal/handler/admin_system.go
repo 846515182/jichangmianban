@@ -1161,44 +1161,80 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		}
 
 		logWrite(">>> 7/7 重建 panel 容器, 让新二进制立即生效")
-		// 修复 CRITICAL 2026-07-19: 旧版用 systemctl restart nexus-panel 重启,
-		// 但服务器上根本没有 nexus-panel.service systemd unit 文件(仓库里搜不到,
-		// 用户也从未创建过)。panel 是 docker compose 启动的容器, systemctl 命令
-		// 静默失败但代码丢弃错误照样 setPullDone(true), 导致每次"更新成功"但实际
-		// 容器还在跑旧二进制, 用户反馈的"试用套餐还在显示/订单仍报错/资源不存在"
-		// 全是这个根因。
-		//
-		// 正确做法: docker compose up -d --no-deps panel 让 panel 容器用新镜像重建。
-		// Docker 看到镜像 hash 变了会自动 recreate 容器, 新二进制就是镜像里的,
-		// 不可能跑错。这是 Docker 标准用法, 不需要 systemctl、不需要 docker cp、
-		// 不需要从镜像里抠二进制。
-		//
-		// 关键顺序: setPullDone(true) 必须在 docker compose up -d panel 之前调用!
-		// 因为 up -d 会杀掉当前 panel 进程(也就是 gitPull 自己所在的 goroutine 所在进程),
-		// 必须先把"成功"状态持久化到文件, 新容器启动后前端轮询才能读到"成功"。
-		logWrite(">>> 预期: 运行版本 %s → %s (更新前 → 更新后)", oldVersion, newHead)
-		logWrite("在线更新完成！panel 容器即将用新镜像重建, 新版本立即生效")
-		logWrite(">>> 验证: 请刷新页面, 查看 GitHub 同步卡片的「运行版本」号是否已变化")
+	// 修复 CRITICAL 2026-07-19: 旧版用 systemctl restart nexus-panel 重启,
+	// 但服务器上根本没有 nexus-panel.service systemd unit 文件(仓库里搜不到,
+	// 用户也从未创建过)。panel 是 docker compose 启动的容器, systemctl 命令
+	// 静默失败但代码丢弃错误照样 setPullDone(true), 导致每次"更新成功"但实际
+	// 容器还在跑旧二进制, 用户反馈的"试用套餐还在显示/订单仍报错/资源不存在"
+	// 全是这个根因。
+	//
+	// 正确做法: docker compose up -d --no-deps panel 让 panel 容器用新镜像重建。
+	// Docker 看到镜像 hash 变了会自动 recreate 容器, 新二进制就是镜像里的,
+	// 不可能跑错。这是 Docker 标准用法, 不需要 systemctl、不需要 docker cp、
+	// 不需要从镜像里抠二进制。
+	//
+	// 关键顺序: setPullDone(true) 必须在 docker compose up -d panel 之前调用!
+	// 因为 up -d 会杀掉当前 panel 进程(也就是 gitPull 自己所在的 goroutine 所在进程),
+	// 必须先把"成功"状态持久化到文件, 新容器启动后前端轮询才能读到"成功"。
+	logWrite(">>> 预期: 运行版本 %s → %s (更新前 → 更新后)", oldVersion, newHead)
+	logWrite("在线更新完成！panel 容器即将用新镜像重建, 新版本立即生效")
+	logWrite(">>> 验证: 请刷新页面, 查看 GitHub 同步卡片的「运行版本」号是否已变化")
 
-		// 先把成功状态持久化(必须! 否则进程被杀后没机会写)
-		setPullDone(true)
+	// 先把成功状态持久化(必须! 否则进程被杀后没机会写)
+	setPullDone(true)
 
-		// 留 2 秒让日志和状态文件写盘
-		time.Sleep(2 * time.Second)
+	// 留 2 秒让日志和状态文件写盘
+	time.Sleep(2 * time.Second)
 
-		// 最后执行: 重建 panel 容器(这一步会杀掉当前进程)
-		// 用 docker compose up -d --no-deps panel 而非 systemctl restart
-		// --no-deps: 不动 postgres/redis 依赖(它们没变化)
-		// -d: 后台运行
-		// 如果这条命令失败, 当前进程已经被杀, 没机会写"失败"状态,
-		// 但 docker compose 失败时容器不会重建, 老容器还在跑, 老代码还在跑,
-		// 用户会看到"运行版本号没变"从而知道更新没生效(方案 B 的价值)
-		//
-		// 注意: 版本一致性 cron 已改为保守模式(只告警不自动重建), 不再兜底修复。
-		// 若本步骤失败, 需人工 SSH 执行: docker compose up -d --no-deps panel
-		logWrite(">>> 重建 panel 容器(若失败需人工 SSH 修复, cron 不再自动重建)")
+	// 最后执行: 重建 panel 容器(这一步会杀掉当前进程)
+	//
+	// 修复 CRITICAL 2026-07-19 (事故 v3): 直接 exec docker compose up -d panel
+	// 会出现"只 Create 不 Start"。根因: docker compose CLI 是 panel 容器内进程,
+	// 通过 docker.sock 调用宿主机 dockerd。dockerd stop 旧 panel 容器时 SIGKILL
+	// 所有进程, 包括 docker compose CLI 自己。CLI 还没发完 stop/remove/create/start
+	// 全部 API 请求就被杀, dockerd 只收到部分请求(create 完成, start 没发), 结果
+	// 新容器 Created 但没 Started, panel 502 不恢复。
+	//
+	// 解法: 通过 helper 容器执行 docker compose up。
+	// helper 容器独立于 panel, panel 被 stop 不影响 helper, CLI 能完整发送所有
+	// API 请求给 dockerd, 容器能正常 recreate + start。
+	// helper 完成后自己 docker rm 自己, 不留痕迹。
+	//
+	// 命令分解:
+	//   docker run -d --name nexus-panel-restarter
+	//     -v /var/run/docker.sock:/var/run/docker.sock  # helper 也要调宿主机 docker
+	//     -v /root/nexus-panel:/repo                     # 仓库挂载, docker compose 需要
+	//     alpine:latest
+	//     sh -c 'sleep 3 &&                              # 等 panel 当前请求返回
+	//            cd /repo &&
+	//            docker compose up -d --no-deps panel && # 重建 panel 容器
+	//            docker rm -f nexus-panel-restarter'     # 清理自己
+	//
+	// 前置: 先清理可能存在的同名 helper 容器(上次失败残留)
+	logWrite(">>> 重建 panel 容器(通过 helper 容器, 避免自杀时序问题)")
+	_ = exec.Command("docker", "rm", "-f", "nexus-panel-restarter").Run()
+	helperCmd := exec.Command("docker", "run", "-d",
+		"--name", "nexus-panel-restarter",
+		"-v", "/var/run/docker.sock:/var/run/docker.sock",
+		"-v", "/root/nexus-panel:/repo",
+		"alpine:latest",
+		"sh", "-c",
+		"apk add --no-cache docker-cli docker-cli-compose >/dev/null 2>&1 && "+
+			"sleep 3 && "+
+			"cd /repo && "+
+			"docker compose up -d --no-deps panel && "+
+			"docker rm -f nexus-panel-restarter",
+	)
+	helperCmd.Dir = gitRoot
+	if out, err := helperCmd.CombinedOutput(); err != nil {
+		logWrite(">>> 警告: helper 容器启动失败, 回退到直接执行 docker compose up: %v", err)
+		logWrite(">>> 输出: %s", string(out))
+		// 回退: 直接执行(可能再现"只 Create 不 Start", 但至少尝试)
 		execCommandLog(gitRoot, "docker", "compose", "up", "-d", "--no-deps", "panel")
-	}()
+	} else {
+		logWrite(">>> helper 容器已启动, 3 秒后将重建 panel 容器并自动清理")
+	}
+}()
 
 
 	response.OK(c, gin.H{"success": true, "msg": "更新已开始，请在日志面板查看实时进度"})

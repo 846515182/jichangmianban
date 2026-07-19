@@ -2,7 +2,8 @@
 # Nexus-Panel Docker Compose 编排（低内存服务器优化版）
 # 服务: postgres + redis + panel + frontend
 # node-agent 已移除（部署在独立节点服务器）
-# 所有容器 restart: no + 内存限制，防止 OOM 循环导致 SSH 失联
+# panel/frontend: restart: unless-stopped, 挂了自动重启, 防止 502 不恢复
+# postgres/redis: restart: "no", 避免数据损坏(由 panel 启动顺序保证)
 # 使用: docker compose --env-file .env up -d
 # ============================================================
 version: "3.9"
@@ -97,7 +98,7 @@ services:
       dockerfile: Dockerfile
     image: nexus-panel:latest
     container_name: nexus-panel
-    restart: "no"
+    restart: unless-stopped
     # !! [安全警告] root+ docker.sock = 容器可控制宿主机, 生产环境考虑移除 docker.sock 挂载改用远程 Docker API+TLS
     user: "0:0"  # 以 root 运行，确保能访问 docker.sock 调用宿主机 docker(用于预编译 node-agent)
     env_file:
@@ -156,7 +157,7 @@ services:
       dockerfile: Dockerfile
     image: nexus-frontend:latest
     container_name: nexus-frontend
-    restart: "no"
+    restart: unless-stopped
     ports:
       - "80:80"
       - "443:443"
