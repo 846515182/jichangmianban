@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -104,6 +105,157 @@ func getPanelIP() string {
 		return u.Hostname()
 	}
 	return strings.TrimPrefix(strings.TrimPrefix(domain, "http://"), "https://")
+}
+
+// panelGrpcAddrInfo 描述节点连接面板 gRPC 的地址决策
+//
+// 修复 START_FAIL-CDN (P0): 面板用公信 CA 证书(如 Let's Encrypt 签的 bbcdtv.top)时,
+// 证书 SAN 只有域名没有 IP。如果 .env.node 的 PANEL_GRPC_ADDR 写成 IP:50051,
+// agent TLS 握手时 ServerName 校验会失败("x509: cannot validate certificate for IP
+// because it doesn't contain any IP SANs"), 节点永久掉线。
+// 同时 bbcdtv.top 走 Cloudflare CDN, DNS 解析到 CF IP 无法直达 50051 端口。
+//
+// 决策:
+//   - Addr:       写入 .env.node 的 PANEL_GRPC_ADDR 的 host 部分(域名或 IP)
+//   - RealIP:     面板服务器真实 IP(PANEL_GRPC_HOST 或域名解析)
+//   - UseDomain:  true 表示 Addr 是域名, 需要在节点 /etc/hosts 写 RealIP→Addr 映射
+//                 (绕过 CDN 直达面板服务器, 同时让 TLS ServerName 匹配证书 SAN)
+//   - IsCDN:      true 表示域名走 CDN(RealIP 与域名 DNS 解析不同)
+type panelGrpcAddrInfo struct {
+	Addr      string // 写入 .env.node 的 PANEL_GRPC_ADDR host(可能是域名或 IP)
+	RealIP    string // 面板服务器真实 IP(用于 /etc/hosts 映射)
+	UseDomain bool   // true=Addr 是域名, 需写 /etc/hosts 绕过 CDN
+}
+
+// resolvePanelGrpcAddr 决策节点连接面板 gRPC 的地址
+// 优先级:
+//  1. 面板启用 TLS + PanelDomain 是域名 → 用域名(让 TLS ServerName 匹配证书 SAN)
+//     同时若 PANEL_GRPC_HOST 已配置(说明 CDN 场景), 通过 /etc/hosts 绕过 CDN
+//  2. 其他场景 → 用 PANEL_GRPC_HOST 或 PanelDomain 解析结果(IP 或域名)
+func resolvePanelGrpcAddr() panelGrpcAddrInfo {
+	domain := app.Get().Cfg.PanelDomain
+	grpcHost := os.Getenv("PANEL_GRPC_HOST")
+
+	// 提取 PanelDomain 中的域名部分(去掉 https:// 前缀)
+	domainHost := ""
+	if domain != "" {
+		if u, err := url.Parse(domain); err == nil && u.Host != "" {
+			domainHost = u.Hostname()
+		} else {
+			domainHost = strings.TrimPrefix(strings.TrimPrefix(domain, "http://"), "https://")
+		}
+	}
+
+	// 检查 domainHost 是不是 IP(若是 IP 则不进入 CDN 处理)
+	isIP := net.ParseIP(domainHost) != nil
+
+	// 面板启用 TLS + PanelDomain 是域名(非 IP) → 必须用域名让 TLS ServerName 匹配证书 SAN
+	// 修复 START_FAIL-CDN: 旧版用 PANEL_GRPC_HOST(IP) 让 agent 连, 但公信 CA 证书 SAN 无 IP,
+	// TLS 校验失败 → START_FAIL
+	if app.Get().Cfg.GRPCTLSEnabled() && domainHost != "" && !isIP {
+		info := panelGrpcAddrInfo{
+			Addr:      domainHost,
+			RealIP:    grpcHost,
+			UseDomain: true,
+		}
+		// 如果没配 PANEL_GRPC_HOST, RealIP 留空, 由节点 DNS 直接解析(可能命中 CDN)
+		if grpcHost == "" {
+			info.UseDomain = false // 没有 RealIP 就不需要写 /etc/hosts
+		}
+		return info
+	}
+
+	// 非 TLS 场景或 PanelDomain 是 IP: 直接用 PANEL_GRPC_HOST(若配置), 否则用域名
+	if grpcHost != "" {
+		return panelGrpcAddrInfo{Addr: grpcHost, RealIP: grpcHost, UseDomain: false}
+	}
+	return panelGrpcAddrInfo{Addr: domainHost, RealIP: domainHost, UseDomain: false}
+}
+
+// ensureHostsMapping 在节点 /etc/hosts 添加 panelRealIP → domain 映射, 绕过 CDN
+// 幂等: 已存在映射则跳过
+// 修复 START_FAIL-CDN: bbcdtv.top 走 CF CDN, 节点 DNS 解析到 CF IP 无法直达 50051 端口
+// 通过 /etc/hosts 把域名映射到面板真实 IP, 既绕过 CDN 又让 TLS ServerName 匹配证书 SAN
+func ensureHostsMapping(client *ssh.Client, panelRealIP, domain string) (string, error) {
+	if panelRealIP == "" || domain == "" {
+		return "(skip: 空参数)", nil
+	}
+	// 幂等: 先检查是否已存在映射
+	checkCmd := fmt.Sprintf("grep -c '^%s[[:space:]]\\+%s\\b' /etc/hosts 2>/dev/null || echo 0",
+		panelRealIP, domain)
+	out, err := sshRun(client, checkCmd)
+	if err == nil && strings.TrimSpace(out) != "0" {
+		return fmt.Sprintf("(已存在映射: %s → %s)", panelRealIP, domain), nil
+	}
+	// 追加映射(用 >> 避免覆盖)
+	addCmd := fmt.Sprintf("echo '%s %s  # nexus-panel grpc bypass CDN' >> /etc/hosts && echo OK",
+		panelRealIP, domain)
+	out, err = sshRun(client, addCmd)
+	if err != nil {
+		return out, fmt.Errorf("写 /etc/hosts 失败: %w", err)
+	}
+	return fmt.Sprintf("(已添加映射: %s → %s)", panelRealIP, domain), nil
+}
+
+// precheckGRPCTLS 部署前在节点服务器上预检面板 gRPC TLS 连通性
+// 通过 openssl s_client 测试握手, 区分 mTLS/证书无效/端口不通等错误
+// 返回 (诊断信息, 错误码), errCode 为空表示通过
+//
+// 修复 START_FAIL-MTLS (P0): 旧版没有预检, 容器启动后才发现 mTLS 错误(tls: certificate required),
+// agent 重试 30 次失败 → START_FAIL → 重试 3 次部署全失败。
+// 现在在 Phase 3 阶段就预检, 失败直接报错避免无效部署。
+func precheckGRPCTLS(client *ssh.Client, panelAddr string, tlsEnabled bool) (diag string, errCode string) {
+	host, port, err := net.SplitHostPort(panelAddr)
+	if err != nil {
+		return fmt.Sprintf("PANEL_GRPC_ADDR 格式错误: %s (%v)", panelAddr, err), DeployErrUnknown
+	}
+
+	if !tlsEnabled {
+		// 面板没启用 TLS, 测试 TCP 连通即可
+		out, _ := sshRun(client, fmt.Sprintf(
+			"timeout 5 bash -c 'cat < /dev/null > /dev/tcp/%s/%s' 2>&1 && echo TCP_OK || echo TCP_FAIL",
+			host, port))
+		if !strings.Contains(out, "TCP_OK") {
+			return fmt.Sprintf("面板 gRPC 端口 %s 不可达(TCP 测试失败): %s", panelAddr, out), DeployErrSSHConnect
+		}
+		return "", ""
+	}
+
+	// TLS 模式: 用 openssl s_client 测试握手
+	// -connect: 目标地址  -servername: SNI(让服务端返回正确证书)
+	// -brief: 简洁输出(包含 Verify return code)
+	cmd := fmt.Sprintf(
+		"echo | timeout 8 openssl s_client -connect %s -servername %s -brief 2>&1 | head -30 || true",
+		panelAddr, host)
+	out, _ := sshRun(client, cmd)
+
+	switch {
+	case strings.Contains(out, "certificate required"):
+		return fmt.Sprintf(
+			"面板启用了 mTLS(双向 TLS), 要求客户端证书, 但 agent 没配置客户端证书。\n"+
+				"解决:\n"+
+				"  1) 面板 .env 注释掉 GRPC_TLS_CA 改用单向 TLS, 然后 `docker compose up -d panel` 重建面板\n"+
+				"  2) 或给 agent 配置 GRPC_TLS_CERT/GRPC_TLS_KEY 客户端证书\n"+
+				"openssl 输出:\n%s", out), DeployErrStart
+	case strings.Contains(out, "verify error") || strings.Contains(out, "verification failed") || strings.Contains(out, "self-signed"):
+		return fmt.Sprintf(
+			"面板 TLS 证书校验失败, agent 无法验证面板证书。\n"+
+				"解决:\n"+
+				"  1) 检查 .env.node 的 GRPC_TLS_CA 路径是否正确\n"+
+				"  2) 自签 CA: 确认 grpc-ca.crt 已推送到节点\n"+
+				"  3) 公信 CA(Let's Encrypt): GRPC_TLS_CA=/etc/ssl/certs/ca-certificates.crt\n"+
+				"openssl 输出:\n%s", out), DeployErrStart
+	case strings.Contains(out, "Connection refused") || strings.Contains(out, "No route") ||
+		strings.Contains(out, "Connection timed out") || strings.Contains(out, "connect:"):
+		return fmt.Sprintf("面板 gRPC 端口 %s 不可达: %s", panelAddr, out), DeployErrSSHConnect
+	case strings.Contains(out, "Verification: OK") || strings.Contains(out, "Verify return code: 0"):
+		return "", "" // 握手成功
+	}
+
+	// 兜底: 输出可疑但仍可能成功, 不阻断但记录日志
+	app.Get().Logger.Warn("gRPC TLS 预检输出未匹配已知模式, 继续部署",
+		zap.String("addr", panelAddr), zap.String("openssl_out", out))
+	return "", ""
 }
 
 // hostKeyCallback SSH 主机密钥验证（信任首次连接，后续验证指纹一致性）
@@ -503,8 +655,37 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	}
 
 	// 3.4 创建 .env.node (兜底: 写入失败重试 2 次)
+	// 修复 START_FAIL-CDN (P0): 旧版用 panelIP(IP) 写 PANEL_GRPC_ADDR, 但面板用公信 CA 证书
+	// (如 Let's Encrypt 签的 bbcdtv.top)时证书 SAN 无 IP, agent TLS 握手失败。
+	// 现在用 resolvePanelGrpcAddr 决策:
+	//   - 面板启用 TLS + PanelDomain 是域名 → 用域名(让 TLS ServerName 匹配证书 SAN)
+	//     同时若 PANEL_GRPC_HOST 已配置(CDN 场景), 通过 /etc/hosts 绕过 CDN 直达面板 IP
+	//   - 其他场景 → 用 PANEL_GRPC_HOST 或 PanelDomain
+	panelAddrInfo := resolvePanelGrpcAddr()
+	grpcAddrHost := panelAddrInfo.Addr
+	// 兜底: Addr 为空时回退到 panelIP(保持旧行为)
+	if grpcAddrHost == "" {
+		grpcAddrHost = panelIP
+	}
 	envContent := fmt.Sprintf("CONTAINER_NAME=%s\nPANEL_GRPC_ADDR=%s:%s\nNODE_TOKEN=%s\nLISTEN_PORT=%d\nHEALTH_PORT=%d\nXRAY_VERSION=v26.6.1",
-		containerName, panelIP, grpcPortStr, node.NodeToken, listenPort, healthPort)
+		containerName, grpcAddrHost, grpcPortStr, node.NodeToken, listenPort, healthPort)
+
+	// 修复 START_FAIL-CDN (P0): 域名走 CDN 时, 在节点 /etc/hosts 添加 panelRealIP → domain 映射
+	// 这样 agent 用域名连 gRPC 时 DNS 解析到面板真实 IP(绕过 CDN),
+	// 同时 TLS ServerName=domain 能匹配证书 SAN(如 bbcdtv.top)
+	if panelAddrInfo.UseDomain && panelAddrInfo.RealIP != "" {
+		sse.event(PhasePrepare, "running",
+			fmt.Sprintf("面板域名走 CDN, 写 /etc/hosts 映射 %s → %s 绕过 CDN...",
+				panelAddrInfo.RealIP, panelAddrInfo.Addr), "")
+		hostsOut, hostsErr := ensureHostsMapping(client, panelAddrInfo.RealIP, panelAddrInfo.Addr)
+		if hostsErr != nil {
+			sse.eventWithCode(PhasePrepare, "error",
+				"写 /etc/hosts 失败: "+hostsErr.Error()+"\n输出: "+hostsOut, "", DeployErrUnknown)
+			return false, DeployErrUnknown, "写 /etc/hosts 失败: " + hostsErr.Error()
+		}
+		sse.event(PhasePrepare, "log", "", "hosts 映射: "+hostsOut)
+	}
+
 	// 修复 NODE-TLS-03 (P0): 面板启用 gRPC TLS 时, 主动给 agent 设置 GRPC_TLS_CA,
 	// 避免 agent 用明文连 TLS 端口导致 "error reading server preface: EOF" 节点永久离线。
 	// - 公信 CA(Let's Encrypt 等): agent 镜像内自带系统 CA bundle, 直接指向即可
@@ -568,6 +749,25 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 		sse.eventWithCode(PhasePrepare, "error", "配置文件写入后验证失败, 文件为空", "", DeployErrUnknown)
 		return false, DeployErrUnknown, "配置文件验证失败"
 	}
+
+	// 3.5 gRPC 连通性预检(避免容器启动后才发现 mTLS/证书错, 减少 START_FAIL)
+	// 修复 START_FAIL-MTLS (P0): 旧版没有预检, 容器启动后才发现 mTLS 错(tls: certificate required),
+	// agent 重试 30 次失败 → START_FAIL → 重试 3 次部署全失败。
+	// 现在部署前在节点上用 openssl s_client 测握手, 失败立即报错, 给出明确修复建议。
+	grpcAddr := fmt.Sprintf("%s:%s", grpcAddrHost, grpcPortStr)
+	sse.event(PhasePrepare, "running",
+		fmt.Sprintf("预检面板 gRPC 连通性 (%s, TLS=%v)...", grpcAddr, app.Get().Cfg.GRPCTLSEnabled()), "")
+	preDiag, preErrCode := precheckGRPCTLS(client, grpcAddr, app.Get().Cfg.GRPCTLSEnabled())
+	if preErrCode != "" {
+		sse.eventWithCode(PhasePrepare, "error",
+			"gRPC 连通性预检失败, 部署中止(避免容器启动后再失败):\n\n"+preDiag+
+				"\n\n修复建议: "+fixSuggestion(preErrCode), "", preErrCode)
+		return false, preErrCode, "gRPC 预检失败: " + preDiag
+	}
+	if preDiag != "" {
+		sse.event(PhasePrepare, "log", "", "gRPC 预检提示: "+preDiag)
+	}
+	sse.event(PhasePrepare, "log", "", "gRPC 连通性预检通过 ✓")
 
 	sse.event(PhasePrepare, "done", "部署环境就绪", "目录/文件/Docker/配置 全部就绪")
 
