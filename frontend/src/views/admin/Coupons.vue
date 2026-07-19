@@ -172,20 +172,20 @@ const filteredList = computed(() => {
   return list.value.filter((c) => c.code.toLowerCase().includes(k))
 })
 
-const usagePercent = (row: Coupon): number => {
+const usagePercent = (row: any): number => {
   if (!row.max_uses || row.max_uses === 0) {
     return row.used_count > 0 ? 100 : 0
   }
   return Math.min(100, Math.round((row.used_count / row.max_uses) * 100))
 }
-const usageColor = (row: Coupon): string => {
+const usageColor = (row: any): string => {
   const p = usagePercent(row)
   if (p >= 100) return '#ff006e'
   if (p >= 80) return '#ffbe0b'
   return '#00f5d4'
 }
 
-const isExpired = (row: Coupon): boolean => {
+const isExpired = (row: any): boolean => {
   if (!row.expire_at) return false
   return new Date(row.expire_at).getTime() < Date.now()
 }
@@ -281,7 +281,7 @@ const toggleStatus = async (row: Coupon, value: boolean | string | number) => {
 }
 
 // 删除
-const handleDelete = (row: Coupon) => {
+const handleDelete = (row: any) => {
   ElMessageBox.confirm(`确定删除优惠码「${row.code}」吗？`, '提示', {
     type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消',
   }).then(async () => {
@@ -294,7 +294,7 @@ const handleDelete = (row: Coupon) => {
 }
 
 // 复制优惠码
-const copyCode = async (row: Coupon) => {
+const copyCode = async (row: any) => {
   const text = row.code
   try {
     if (navigator.clipboard && window.isSecureContext) {
