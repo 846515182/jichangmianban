@@ -886,4 +886,17 @@ onUnmounted(() => {
 .cmd-output .output-title-text { flex: 1; min-width: 0; }
 .cmd-output .output-title-actions { display: flex; gap: 8px; flex-shrink: 0; }
 
+/* 移动端适配 - 对齐项目惯例(AdminLayout/style.css 都用 768px 断点) */
+@media (max-width: 768px) {
+  /* 按钮组放开换行, 避免窄屏溢出 */
+  .git-actions { flex-wrap: wrap; }
+  /* 运行版本行: 标签和值垂直堆叠, 避免 tag 被挤到下一行丢失关联 */
+  .git-version-row { flex-direction: column; align-items: flex-start; gap: 4px; }
+  .git-version-row .el-tag { margin-left: 0; }
+  /* 日志框放大高度, 减少移动端滚动疲劳 */
+  .git-log { max-height: 200px; }
+  /* 标签允许收缩, 避免长标签独占一行 */
+  .git-label { flex-shrink: 1; }
+}
+
 </style>
