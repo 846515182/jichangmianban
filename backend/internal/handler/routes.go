@@ -255,6 +255,12 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 		admin.GET("/system/disk-usage", middleware.RBAC(middleware.PermBackup), systemH.DiskUsage)
 		admin.POST("/system/disk-cleanup", middleware.RBAC(middleware.PermBackup), middleware.AuditAction("system.disk_cleanup"), systemH.DiskCleanup)
 
+		// 服务日志监控(容器列表 + 历史日志 + SSE 实时流)
+		// 用于在仪表盘内嵌日志监控卡片, 半小时轮询拉取最近日志, 报错高亮
+		admin.GET("/system/containers", middleware.RBAC(middleware.PermBackup), systemH.ContainerList)
+		admin.GET("/system/containers/:name/logs", middleware.RBAC(middleware.PermBackup), systemH.ContainerLogs)
+		admin.GET("/system/containers/:name/logs/stream", middleware.RBAC(middleware.PermBackup), systemH.ContainerLogStream)
+
 		// 通知配置
 		admin.GET("/system/notify-config", systemH.GetNotifyConfig)
 		admin.PUT("/system/notify-config", middleware.AuditAction("system.notify_config"), systemH.UpdateNotifyConfig)

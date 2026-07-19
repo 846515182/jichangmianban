@@ -115,17 +115,77 @@
         </div>
       </el-col>
     </el-row>
+
+    <!-- 服务日志监控: 容器列表 + 报错日志(每 30 分钟轮询一次) -->
+    <el-row :gutter="20" class="chart-row">
+      <el-col :span="24">
+        <div class="chart-card np-card">
+          <div class="chart-header">
+            <span class="chart-title">服务日志监控</span>
+            <el-tag v-if="logMonitor.available" size="small" type="success" effect="dark">
+              ERROR {{ logStats.error_count }} · WARN {{ logStats.warn_count }} · 共 {{ logStats.total_lines }} 行
+            </el-tag>
+            <el-tag v-else size="small" type="info" effect="plain">docker 不可用</el-tag>
+          </div>
+          <div class="log-toolbar">
+            <el-select v-model="logMonitor.selectedContainer" placeholder="选择容器" size="small" style="width: 240px" @change="onContainerChange">
+              <el-option
+                v-for="c in logMonitor.containers"
+                :key="c.name"
+                :label="`${c.name}  [${c.state}]`"
+                :value="c.name"
+              />
+            </el-select>
+            <el-radio-group v-model="logMonitor.level" size="small" @change="onFilterChange">
+              <el-radio-button label="all">全部</el-radio-button>
+              <el-radio-button label="error">仅报错</el-radio-button>
+              <el-radio-button label="warn">警告+</el-radio-button>
+            </el-radio-group>
+            <el-select v-model="logMonitor.since" placeholder="时间窗口" size="small" style="width: 120px" @change="onFilterChange">
+              <el-option label="最近 30 分钟" value="30m" />
+              <el-option label="最近 1 小时" value="1h" />
+              <el-option label="最近 6 小时" value="6h" />
+              <el-option label="最近 24 小时" value="24h" />
+            </el-select>
+            <el-input-number v-model="logMonitor.tail" :min="50" :max="2000" :step="100" size="small" style="width: 130px" @change="onFilterChange" />
+            <span class="log-tail-label">行数</span>
+            <div class="log-toolbar-spacer"></div>
+            <el-button size="small" type="primary" @click="fetchContainerLogs" :loading="logMonitor.loading">
+              <el-icon><Refresh /></el-icon><span>刷新</span>
+            </el-button>
+            <el-button size="small" :type="logMonitor.autoRefresh ? 'success' : 'info'" @click="toggleAutoRefresh">
+              <el-icon><Timer /></el-icon><span>{{ logMonitor.autoRefresh ? `自动(${logMonitor.intervalLabel})` : '自动刷新' }}</span>
+            </el-button>
+            <el-button size="small" @click="copyLogs">
+              <el-icon><CopyDocument /></el-icon><span>复制</span>
+            </el-button>
+          </div>
+          <div class="log-stats-bar" v-if="logMonitor.lastFetch">
+            <span class="log-stats-text">
+              最后拉取: {{ formatTime(logMonitor.lastFetch) }}
+              <span v-if="logStats.cached" class="log-stats-cached">(命中缓存)</span>
+            </span>
+            <span class="log-stats-text" v-if="logStats.failed" style="color: var(--np-danger)">
+              ⚠ 拉取失败(容器可能已停止或 docker 不可用)
+            </span>
+          </div>
+          <pre class="log-view" ref="logViewRef">{{ logMonitor.filteredLogs || '请选择容器查看日志…' }}</pre>
+        </div>
+      </el-col>
+    </el-row>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from "vue"
+import { ref, computed, reactive, onMounted, onBeforeUnmount } from "vue"
 import VChart from "vue-echarts"
 import "@/utils/echarts"
 import request from "@/utils/request"
 import { formatTraffic, formatTime, formatSpeed, formatDuration } from "@/utils/format"
 import { chartColors } from "@/utils/echarts"
 import { mockDashboardStats } from "@/mock/data"
+import { ElMessage } from "element-plus"
+import { Refresh, Timer, CopyDocument } from "@element-plus/icons-vue"
 
 interface NodeRow {
   id: string; name: string; protocol: string; server_address: string; port: number
@@ -158,6 +218,186 @@ const sysStats = ref<SysStats>({
 })
 
 let sysTimer: number | null = null
+
+// ============================================================
+// 服务日志监控(容器列表 + 报错日志 + 30 分钟轮询)
+// ============================================================
+interface ContainerInfo {
+  id: string; name: string; image: string
+  status: string; state: string; ports: string; created: string
+}
+
+const logMonitor = reactive({
+  containers: [] as ContainerInfo[],
+  selectedContainer: '',
+  available: true,
+  // 等级筛选: all / error / warn
+  level: 'all' as 'all' | 'error' | 'warn',
+  // 时间窗口(对应 docker logs --since)
+  since: '30m',
+  // 拉取行数(对应 docker logs --tail)
+  tail: 500,
+  // 原始日志文本
+  rawLogs: '',
+  // 当前过滤后展示的日志
+  filteredLogs: '',
+  loading: false,
+  // 自动刷新(默认开启, 30 分钟轮询)
+  autoRefresh: true,
+  intervalLabel: '30min',
+  lastFetch: 0 as number | 0,
+})
+
+const logStats = reactive({
+  error_count: 0,
+  warn_count: 0,
+  total_lines: 0,
+  cached: false,
+  failed: false,
+})
+
+const logViewRef = ref<HTMLElement | null>(null)
+let logTimer: number | null = null
+
+// 报错/警告正则(与后端 analyzeContainerLogs 保持一致)
+const LOG_ERROR_RE = /\b(error|err\b|fatal|panic|exception|failed|failure|nil pointer|undefined|out of memory|oom-killer|segmentation fault|segfault)\b/i
+const LOG_WARN_RE = /\b(warn(ing)?|deprecat(ed|ion)|slow query|retry|backoff)\b/i
+
+// 拉取容器列表
+const fetchContainers = async () => {
+  try {
+    const res: any = await request.get('/api/v1/admin/system/containers')
+    const d = res?.data || res
+    logMonitor.available = d?.available !== false
+    logMonitor.containers = d?.containers || []
+    // 默认选中第一个 running 的容器(优先 nexus-panel 本身)
+    if (!logMonitor.selectedContainer && logMonitor.containers.length) {
+      const np = logMonitor.containers.find(c => c.name === 'nexus-panel' || c.name.includes('panel'))
+      logMonitor.selectedContainer = (np || logMonitor.containers[0]).name
+    }
+  } catch { /* 拦截器处理 */ }
+}
+
+// 拉取选中容器的日志
+const fetchContainerLogs = async () => {
+  if (!logMonitor.selectedContainer) {
+    ElMessage.warning('请先选择容器')
+    return
+  }
+  logMonitor.loading = true
+  try {
+    const res: any = await request.get(
+      `/api/v1/admin/system/containers/${encodeURIComponent(logMonitor.selectedContainer)}/logs`,
+      { params: { tail: logMonitor.tail, since: logMonitor.since }, silent: true }
+    )
+    const d = res?.data || res
+    if (d) {
+      logMonitor.rawLogs = d.logs || ''
+      logStats.error_count = d.error_count || 0
+      logStats.warn_count = d.warn_count || 0
+      logStats.total_lines = d.total_lines || 0
+      logStats.cached = !!d.cached
+      logStats.failed = !!d.failed
+      logMonitor.lastFetch = Date.now()
+      applyLogFilter()
+    }
+  } catch { /* silent */ } finally {
+    logMonitor.loading = false
+  }
+}
+
+// 根据等级筛选过滤日志
+const applyLogFilter = () => {
+  if (!logMonitor.rawLogs) {
+    logMonitor.filteredLogs = ''
+    return
+  }
+  if (logMonitor.level === 'all') {
+    logMonitor.filteredLogs = logMonitor.rawLogs
+    return
+  }
+  const lines = logMonitor.rawLogs.split('\n')
+  const filtered = lines.filter(line => {
+    if (logMonitor.level === 'error') return LOG_ERROR_RE.test(line)
+    if (logMonitor.level === 'warn') return LOG_ERROR_RE.test(line) || LOG_WARN_RE.test(line)
+    return true
+  })
+  logMonitor.filteredLogs = filtered.length ? filtered.join('\n') : '(当前等级无匹配日志)'
+}
+
+const onContainerChange = () => {
+  fetchContainerLogs()
+}
+
+const onFilterChange = () => {
+  // 等级筛选纯前端过滤(不需要重新请求)
+  applyLogFilter()
+  // 但 tail/since 变化需要重新拉取
+  fetchContainerLogs()
+}
+
+const toggleAutoRefresh = () => {
+  logMonitor.autoRefresh = !logMonitor.autoRefresh
+  if (logMonitor.autoRefresh) {
+    startLogTimer()
+    ElMessage.success('已开启自动刷新(每 30 分钟)')
+  } else {
+    stopLogTimer()
+    ElMessage.info('已关闭自动刷新')
+  }
+}
+
+const startLogTimer = () => {
+  stopLogTimer()
+  // 30 分钟轮询一次(用户要求"每隔半个小时查询一次")
+  logTimer = window.setInterval(fetchContainerLogs, 30 * 60 * 1000)
+}
+
+const stopLogTimer = () => {
+  if (logTimer !== null) {
+    clearInterval(logTimer)
+    logTimer = null
+  }
+}
+
+// 复制日志到剪贴板(三层兜底: clipboard API → execCommand → 选中)
+const copyLogs = async () => {
+  const text = logMonitor.filteredLogs || logMonitor.rawLogs
+  if (!text) {
+    ElMessage.warning('暂无日志可复制')
+    return
+  }
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text)
+      ElMessage.success(`已复制 ${text.length} 字符`)
+      return
+    }
+  } catch { /* fall through */ }
+  try {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(ta)
+    if (ok) {
+      ElMessage.success(`已复制 ${text.length} 字符`)
+      return
+    }
+  } catch { /* fall through */ }
+  // 最后兜底: 选中日志框让用户 Ctrl+C
+  if (logViewRef.value) {
+    const range = document.createRange()
+    range.selectNodeContents(logViewRef.value)
+    const sel = window.getSelection()
+    sel?.removeAllRanges()
+    sel?.addRange(range)
+    ElMessage.info('已选中日志, 请按 Ctrl+C 复制')
+  }
+}
 
 const statCards = computed(() => [
   {
@@ -253,6 +493,15 @@ onMounted(async () => {
   // 立即拉一次系统状态，然后每 3s 刷新
   fetchSysStats()
   sysTimer = window.setInterval(fetchSysStats, 3000)
+
+  // 服务日志监控: 先拉容器列表, 再拉选中容器的日志, 然后每 30 分钟轮询
+  await fetchContainers()
+  if (logMonitor.selectedContainer) {
+    fetchContainerLogs()
+  }
+  if (logMonitor.autoRefresh) {
+    startLogTimer()
+  }
 })
 
 onBeforeUnmount(() => {
@@ -260,6 +509,7 @@ onBeforeUnmount(() => {
     clearInterval(sysTimer)
     sysTimer = null
   }
+  stopLogTimer()
 })
 </script>
 
@@ -288,4 +538,41 @@ onBeforeUnmount(() => {
 .net-inline.down { color: var(--np-primary); }
 .net-sep { color: var(--np-text-muted); margin: 0 4px; }
 .sys-sub { font-size: 12px; color: var(--np-text-muted); margin-top: 4px; }
+
+/* 服务日志监控卡片 */
+.log-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.log-toolbar-spacer { flex: 1; }
+.log-tail-label { font-size: 12px; color: var(--np-text-muted); }
+.log-stats-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0 8px;
+  font-size: 12px;
+  color: var(--np-text-muted);
+}
+.log-stats-text { font-family: monospace; }
+.log-stats-cached { color: var(--np-primary); margin-left: 4px; }
+.log-view {
+  margin: 0;
+  padding: 12px;
+  background: var(--np-bg-soft);
+  border-radius: 6px;
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--np-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  /* 固定大小, 日志在框内滚动(与磁盘管理/一键更新日志框一致) */
+  height: 360px;
+  overflow-y: auto;
+  border: 1px solid var(--np-border);
+}
 </style>
