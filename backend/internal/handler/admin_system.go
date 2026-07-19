@@ -1194,10 +1194,9 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		// 但 docker compose 失败时容器不会重建, 老容器还在跑, 老代码还在跑,
 		// 用户会看到"运行版本号没变"从而知道更新没生效(方案 B 的价值)
 		//
-		// 兜底保障: 即便这一步因任何原因没真正重建容器(命令成功但 Docker 异常等),
-		// CheckVersionConsistency cron 每 5 分钟会检测版本不一致并自动重建,
-		// 最迟 10 分钟内新版本必然生效。
-		logWrite(">>> 兜底保障: 即使本步骤异常, 5 分钟内版本一致性 cron 会自动修复")
+		// 注意: 版本一致性 cron 已改为保守模式(只告警不自动重建), 不再兜底修复。
+		// 若本步骤失败, 需人工 SSH 执行: docker compose up -d --no-deps panel
+		logWrite(">>> 重建 panel 容器(若失败需人工 SSH 修复, cron 不再自动重建)")
 		execCommandLog(gitRoot, "docker", "compose", "up", "-d", "--no-deps", "panel")
 	}()
 

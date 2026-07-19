@@ -345,38 +345,31 @@ const gitRepoPath = "/root/nexus-panel"
 //       {"done":true,"success":true} 表示更新完成
 const gitPullStateFile = "/root/nexus-panel/.update-state/git-pull.state"
 
-// CheckVersionConsistency 版本一致性兜底巡检
+// CheckVersionConsistency 版本一致性巡检(保守模式 - 只告警不重建)
 //
-// 修复 CRITICAL 2026-07-19: 历史上多次出现"在线更新显示成功但跑旧二进制"问题
-// (systemctl 静默失败、docker cp 时序错乱、镜像 build 了但容器没用等),
-// 根因都是更新流程某一步失效但代码不报错。靠人工 SSH 修复不可靠。
+// 设计原则: cron 绝不主动杀 panel 进程, 绝不主动重建容器。
+// 历史教训:
+//   - v1 (86a408e): cron 检测到不一致就 docker compose up -d panel, 但与一键更新
+//     流程冲突, 在 build 还没完成时杀掉 panel, 导致 502 (事故 2026-07-19 20:15)
+//   - v2 (83dfa1a): 加了 isGitPullInProgress 检测, 但仍自动重建。结果在 gitPull
+//     done=true 后 cron 又触发重建, 此时新容器还没起来, 双杀 (事故 2026-07-19 21:06)
+//   - v3 (本版本): 完全放弃自动重建, 只告警。让人来决定是否修复。
 //
 // 本方法每 5 分钟跑一次, 对比:
 //   - 代码版本: /root/nexus-panel/.git/HEAD 解析出的 git HEAD short hash
 //   - 运行版本: app.Version (编译时 ldflags 注入的 git HEAD short hash)
 //
 // 不一致时:
-//   1. ERROR 日志告警(便于排查)
-//   2. 自动执行 docker compose up -d --no-deps panel 重建容器
-//      (代码已经在 git pull 阶段验证过, 镜像也 build 过了,
-//       重建容器风险极低, 是修复"跑旧二进制"的标准操作)
-//   3. 重建后不立即重检(给容器 30s 启动时间), 下次 cron 自然验证
+//   1. ERROR 日志告警(每次都打, 便于从 docker logs 看到问题)
+//   2. 写告警文件到 /root/nexus-panel/.update-state/version-mismatch.flag
+//      (前端 GitStatus 接口可读取此文件, 在面板显示"版本不一致, 请手动修复"提示)
+//   3. 绝不执行 docker compose up -d panel, 绝不杀 panel 进程
 //
 // 安全保障:
 //   - 用 Redis 分布式锁, 多副本/重启安全
 //   - 启动 3 分钟后才巡检(等首次更新流程可能完成)
-//   - 仅当代码版本 > 运行版本(即代码更新了但容器没跟上)才自动重建
-//     反向情况(运行版本 > 代码版本, 比如回滚)只告警不重建
-//
-// 修复 CRITICAL 2026-07-19 (v2): 防止与一键更新流程冲突
-//   事故: 用户点了"在线更新", gitPull 流程开始 git pull + docker build (耗时 3-5 分钟),
-//   期间 cron 检测到 code_version 已变(git pull 已完成)但 image 还没 build 好,
-//   cron 执行 docker compose up -d panel 用旧镜像重建容器, 杀掉了正在跑的 panel 进程,
-//   导致 gitPull 流程被杀, state 文件永远停在 done=false, panel 容器 502。
-//   修复: cron 先检查 gitPullStateFile, 若 done=false 且 mtime < 10 分钟, 说明更新中, 跳过。
-//   若 done=false 但 mtime > 10 分钟, 说明 gitPull 流程已死(被杀/崩溃), cron 接管修复。
+//   - 若检测到 gitPull 进行中, 跳过本次巡检(避免误报)
 func (s *CronService) CheckVersionConsistency() {
-	// 启动 3 分钟内不巡检, 给一键更新流程留时间
 	if app.Get() == nil || app.Get().RDB == nil {
 		return
 	}
@@ -400,50 +393,43 @@ func (s *CronService) CheckVersionConsistency() {
 		return
 	}
 
-	// 3. 一致就 return
+	// 3. 一致就清理告警标记, return
 	if runningVersion == codeVersion {
+		// 版本一致, 清理历史告警标记文件(如果存在)
+		os.Remove(versionMismatchFlagFile)
 		return
 	}
 
-	// 4. 检查是否正在一键更新中, 防止与 gitPull 流程冲突
-	//    若 state 文件存在且 done=false 且 mtime < 10 分钟, 说明更新进行中, 跳过
+	// 4. 检查是否正在一键更新中, 进行中则跳过(避免误报)
 	if isGitPullInProgress() {
-		s.logger.Info("[版本一致性兜底] 检测到一键更新进行中, 跳过本次巡检(避免冲突)",
-			zap.String("running_version", runningVersion),
-			zap.String("code_version", codeVersion))
 		return
 	}
 
-	// 5. 不一致, 告警
-	s.logger.Error("[版本一致性兜底] 检测到运行版本与代码版本不一致, 将自动重建 panel 容器",
+	// 5. 不一致, 只告警, 不重建
+	//    写告警标记文件, 内容是 running→code, 前端可读取展示提示
+	flagContent := fmt.Sprintf("running=%s\ncode=%s\ndetected_at=%s\n",
+		runningVersion, codeVersion, time.Now().Format(time.RFC3339))
+	_ = os.WriteFile(versionMismatchFlagFile, []byte(flagContent), 0644)
+
+	s.logger.Error("[版本一致性巡检] 检测到运行版本与代码版本不一致(只告警不自动修复)",
 		zap.String("running_version", runningVersion),
 		zap.String("code_version", codeVersion),
 		zap.String("repo", gitRepoPath),
-		zap.String("action", "docker compose up -d --no-deps panel"))
-
-	// 6. 自动重建 panel 容器
-	// 这一步会让 panel 用最新镜像重建, 新二进制生效。
-	// 当前进程会被杀掉(因为 panel 容器就是当前进程所在), 但重建是异步的,
-	// 当前请求能正常返回, 重建后新容器启动自然就是新版本。
-	cmd := exec.Command("docker", "compose", "up", "-d", "--no-deps", "panel")
-	cmd.Dir = gitRepoPath
-	if out, err := cmd.CombinedOutput(); err != nil {
-		s.logger.Error("[版本一致性兜底] 自动重建 panel 容器失败, 需人工介入",
-			zap.Error(err),
-			zap.String("output", string(out)))
-		// 失败不重试, 等下次 cron 再试
-		return
-	}
-	s.logger.Info("[版本一致性兜底] 已触发 panel 容器重建, 30 秒后新版本将生效",
-		zap.String("old_version", runningVersion),
-		zap.String("new_version", codeVersion))
+		zap.String("flag_file", versionMismatchFlagFile),
+		zap.String("manual_fix", "cd /root/nexus-panel && docker compose build --build-arg VERSION=$(git rev-parse --short HEAD) panel && docker compose up -d --no-deps panel"),
+		zap.String("note", "保守模式: cron 不自动重建容器, 需人工确认后手动执行上述命令"))
 }
+
+// versionMismatchFlagFile 版本不一致告警标记文件
+// 存在 = 当前有版本不一致问题, 前端可读取展示提示
+// 内容: running=<hash>\ncode=<hash>\ndetected_at=<time>
+const versionMismatchFlagFile = "/root/nexus-panel/.update-state/version-mismatch.flag"
 
 // isGitPullInProgress 检查一键更新是否正在进行中
 // 判断依据: gitPullStateFile 存在 + 内容 done=false + mtime 距今 < 10 分钟
 //   - done=false 且 mtime 近期: 更新进行中, cron 应跳过
-//   - done=false 但 mtime > 10 分钟: gitPull 流程已死(被杀/崩溃), cron 可接管
-//   - done=true 或文件不存在: 无更新任务, 正常巡检
+//   - done=false 但 mtime > 10 分钟: gitPull 流程已死(被杀/崩溃)
+//   - done=true 或文件不存在: 无更新任务
 func isGitPullInProgress() bool {
 	info, err := os.Stat(gitPullStateFile)
 	if err != nil {
