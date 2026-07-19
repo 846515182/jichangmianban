@@ -20,6 +20,10 @@ _out/
 backend/_out/
 .last_build_version
 
+# 一键更新运行时状态目录(挂载到宿主机, 不入库)
+# 包含 git-pull.log / git-pull.state 等, 更新时会被 stash 误判为本地变更导致冲突
+.update-state/
+
 # Trae agent 本地辅助脚本 (沙箱内调试用, 不入库)
 deploy_and_verify.py
 http_tunnel_exec.py

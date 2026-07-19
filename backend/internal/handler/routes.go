@@ -247,6 +247,7 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 		admin.GET("/system/git-status", middleware.RBAC(middleware.PermBackup), systemH.GitStatus)
 		admin.POST("/system/git-pull", middleware.RBAC(middleware.PermBackup), middleware.AuditAction("system.git_pull"), systemH.GitPull)
 		admin.GET("/system/git-pull-log", middleware.RBAC(middleware.PermBackup), systemH.GitPullLog)
+		admin.DELETE("/system/git-pull-log", middleware.RBAC(middleware.PermBackup), middleware.AuditAction("system.git_pull_log_clear"), systemH.GitPullClearLog)
 		admin.POST("/system/git-push", middleware.RBAC(middleware.PermBackup), middleware.AuditAction("system.git_push"), systemH.GitPush)
 		admin.POST("/system/restart", middleware.RBAC(middleware.PermBackup), middleware.AuditAction("system.restart"), systemH.SystemRestart)
 

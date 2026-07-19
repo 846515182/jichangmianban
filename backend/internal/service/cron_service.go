@@ -235,6 +235,10 @@ func (s *CronService) CleanOrphanData() {
 	// 这比 DELETE 高效且彻底, 因为旧月份数据已无业务价值(趋势图最多展示 1 年,
 	// 但分区级 DROP 后, 趋势图查询旧月会返回空, 可接受)。
 	s.dropOldTrafficPartitions(db)
+
+	// [fix 2026-07-19] 兜底清理一键更新产生的 git-pull.log 残留
+	// 与 backupDir 一样路径挂载到宿主机, 容器重启后仍可清理
+	s.CleanUpdateLogs()
 }
 
 // dropOldTrafficPartitions DROP 超过 2 个月的 traffic_logs 旧分区
@@ -287,6 +291,49 @@ func (s *CronService) dropOldTrafficPartitions(db *gorm.DB) {
 	if dropped > 0 {
 		s.logger.Info("旧流量日志分区清理完成", zap.Int("dropped", dropped))
 	}
+}
+
+// CleanUpdateLogs 兜底清理一键更新产生的日志残留
+// 问题: /root/nexus-panel/.update-state/git-pull.log 每次更新都会追加写,
+// 长期累积会膨胀到几十 MB. 后端虽有 GitPullClearLog API 供管理员手动清理,
+// 但用户经常忘记, 这里做兜底: 文件超过 7 天未修改 或 超过 5MB 时自动清空.
+// 与 backupDir 一样, 路径对齐 docker-compose 挂载点, 容器重启后仍可清理.
+//
+// 清理策略(满足条件之一即清空):
+//   1. 文件 mtime 距今 > 7 天(更新日志已无参考价值)
+//   2. 文件 > 5MB(异常膨胀, 防磁盘吃满)
+//
+// 清理时机: 在 CleanOrphanData 的 cron(每 6 小时)中调用
+const (
+	updateStateDir  = "/root/nexus-panel/.update-state"
+	updateLogFile   = "/root/nexus-panel/.update-state/git-pull.log"
+	updateStateFile = "/root/nexus-panel/.update-state/git-pull.state"
+)
+
+func (s *CronService) CleanUpdateLogs() {
+	info, err := os.Stat(updateLogFile)
+	if err != nil {
+		return // 文件不存在, 无需清理
+	}
+	// 条件 1: 超过 7 天未修改
+	old := time.Since(info.ModTime()) > 7*24*time.Hour
+	// 条件 2: 文件超过 5MB
+	big := info.Size() > 5*1024*1024
+	if !old && !big {
+		return
+	}
+	if err := os.Remove(updateLogFile); err != nil {
+		s.logger.Warn("清理更新日志文件失败", zap.String("file", updateLogFile), zap.Error(err))
+		return
+	}
+	// 顺便清理状态文件, 避免下次启动 init 读到旧 done 状态
+	_ = os.Remove(updateStateFile)
+	s.logger.Info("已兜底清理过期的更新日志",
+		zap.String("file", updateLogFile),
+		zap.Int64("size_bytes", info.Size()),
+		zap.Time("mtime", info.ModTime()),
+		zap.Bool("too_old", old),
+		zap.Bool("too_big", big))
 }
 
 

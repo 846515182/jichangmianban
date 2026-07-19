@@ -229,17 +229,31 @@
               </div>
               <div v-if="pullResult" class="cmd-output">
                 <div class="output-title" :class="pullDone ? (pullSuccess ? 'text-success' : 'text-danger') : 'text-pending'">
-                  {{ pullDone ? (pullSuccess ? '更新成功 — 面板已自动重启, 请稍后刷新页面查看新版本' : '更新失败') : '更新中...' }}
-                  <el-button
-                    size="small"
-                    link
-                    type="primary"
-                    class="copy-log-btn"
-                    :loading="copyingLog"
-                    @click="copyPullLog"
-                  >
-                    <el-icon><CopyDocument /></el-icon><span>复制日志</span>
-                  </el-button>
+                  <span class="output-title-text">
+                    {{ pullDone ? (pullSuccess ? '更新成功 — 面板已自动重启, 请稍后刷新页面查看新版本' : '更新失败') : '更新中...' }}
+                  </span>
+                  <span class="output-title-actions">
+                    <el-button
+                      size="small"
+                      link
+                      type="primary"
+                      :loading="copyingLog"
+                      @click="copyPullLog"
+                    >
+                      <el-icon><CopyDocument /></el-icon><span>复制日志</span>
+                    </el-button>
+                    <el-button
+                      size="small"
+                      link
+                      type="danger"
+                      :loading="clearingLog"
+                      :disabled="pulling"
+                      @click="clearPullLog"
+                      title="更新进行中时不可清理"
+                    >
+                      <el-icon><Delete /></el-icon><span>清理日志</span>
+                    </el-button>
+                  </span>
                 </div>
                 <pre class="pull-log" ref="pullLogRef">{{ pullResult }}</pre>
               </div>
@@ -294,9 +308,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
-import { CopyDocument } from '@element-plus/icons-vue'
+import { CopyDocument, Delete } from '@element-plus/icons-vue'
 import request from '@/utils/request'
 import { formatTime } from '@/utils/format'
 
@@ -531,8 +545,19 @@ const pullResult = ref('')
 const pullSuccess = ref(false)
 const pullDone = ref(false)
 const copyingLog = ref(false)
+const clearingLog = ref(false)
 const pullLogRef = ref<HTMLElement | null>(null)
 let pollTimer: any = null
+
+// 自动滚动日志到底部: 每次 pullResult 变化时, 把 .pull-log 滚动条拉到底
+// 这样日志框是固定大小(不变大), 日志在里面滚动, 用户始终能看到最新进度
+watch(pullResult, () => {
+  nextTick(() => {
+    if (pullLogRef.value) {
+      pullLogRef.value.scrollTop = pullLogRef.value.scrollHeight
+    }
+  })
+})
 
 // 一键复制更新日志: 优先 navigator.clipboard, 失败回退到 textarea + execCommand
 // (兼容 HTTP 站点 / 旧浏览器 / iframe 限制等 clipboard API 不可用场景)
@@ -586,6 +611,34 @@ const copyPullLog = async () => {
     ElMessage.warning('复制失败, 已选中日志, 请按 Ctrl+C 手动复制')
   } finally {
     copyingLog.value = false
+  }
+}
+
+// 一键清理更新日志: 调用后端 DELETE /api/v1/admin/system/git-pull-log
+// 清空内存 + 删除持久化日志文件, 后端用 TryLock 抢锁, 更新中拒绝清理。
+// 后端另有 cron 兜底: 文件 > 7天未修改 或 > 5MB 时自动清理, 用户即使忘记也不会爆盘。
+const clearPullLog = async () => {
+  try {
+    await ElMessageBox.confirm(
+      '将清空当前显示的更新日志及持久化日志文件, 确定继续吗? (后端仍有 cron 自动清理兜底)',
+      '清理更新日志',
+      { type: 'warning', confirmButtonText: '确认清理', cancelButtonText: '取消' }
+    )
+  } catch { return }
+  clearingLog.value = true
+  try {
+    await request.delete('/api/v1/admin/system/git-pull-log')
+    pullResult.value = ''
+    pullDone.value = false
+    pullSuccess.value = false
+    // 停掉可能还在跑的轮询(更新早已完成但前端没清定时器的情况)
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+    pulling.value = false
+    ElMessage.success('日志已清理')
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.msg || e?.message || '清理失败')
+  } finally {
+    clearingLog.value = false
   }
 }
 
@@ -798,11 +851,15 @@ onUnmounted(() => {
 .cmd-output pre { margin: 0; font-size: 12px; color: var(--np-text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }
 
 
-/* 在线更新日志 — 终端风格固定高度日志框, 对齐磁盘管理 */
+/* 在线更新日志 — 终端风格固定高度日志框, 对齐磁盘管理(.disk-output pre 也是 max-height: 200px) */
+/* 日志在固定大小框内滚动, 框本身不变大, 用户始终能通过 watch 自动滚动到底部看到最新进度 */
 .pull-log {
   margin: 0; font-size: 12px; color: var(--np-text-secondary); white-space: pre-wrap;
-  word-break: break-all; max-height: 300px; overflow-y: auto;
+  word-break: break-all; height: 200px; min-height: 200px; max-height: 200px; overflow-y: auto;
   font-family: 'JetBrains Mono', 'Consolas', monospace;
 }
+/* output-title 让标题文本左对齐, 复制/清理按钮组右对齐 */
+.cmd-output .output-title-text { flex: 1; min-width: 0; }
+.cmd-output .output-title-actions { display: flex; gap: 8px; flex-shrink: 0; }
 
 </style>

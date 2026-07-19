@@ -984,12 +984,28 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		branch := getCurrentBranch()
 
 		logWrite(">>> 1/6 预检工作树")
-		statusResult := execCommand("git", "status", "--short")
+		// [fix 2026-07-19] 用 git status --porcelain=2 拿到结构化输出, 过滤掉未跟踪文件(?? 前缀),
+		// 只对已跟踪文件的修改做 stash, 避免对 .update-state/ 等运行时目录做无意义的 stash
+		// 导致后续 git stash pop 失败的问题。
+		statusResult := execCommand("git", "status", "--porcelain")
 		stashed := false
+		hasTrackedChanges := false
 		if statusResult.Output != "" {
-			// 工作树有未提交修改：自动 stash 保留(仅已跟踪文件)，更新后 pop 恢复。
-			// 未跟踪文件(如运行时二进制/备份)不影响 git reset --hard，无需处理。
-			logWrite("工作树有未提交的修改，自动 stash 保留:\n%s", statusResult.Output)
+			// 只关心已跟踪文件的修改(M / M_ / D / R / C 等), 跳过未跟踪文件(??)
+			for _, line := range strings.Split(statusResult.Output, "\n") {
+				if len(line) < 2 {
+					continue
+				}
+				// porcelain 格式: XY filename, X=staged状态 Y=工作区状态
+				// "XY" 前两字符中只要不是 "??" 就是已跟踪文件的修改
+				if !strings.HasPrefix(line, "??") {
+					hasTrackedChanges = true
+					break
+				}
+			}
+		}
+		if hasTrackedChanges {
+			logWrite("工作树有已跟踪文件的修改，自动 stash 保留:\n%s", statusResult.Output)
 			stashResult := execCommand("git", "stash", "push", "-m", "nexus-panel-auto-stash-before-pull")
 			if !stashResult.Success {
 				logWrite("git stash 失败: %s", stashResult.Error)
@@ -1000,7 +1016,7 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 			stashed = true
 			logWrite("本地修改已 stash 保存，更新完成后将自动恢复")
 		} else {
-			logWrite("工作树干净")
+			logWrite("工作树干净(仅有未跟踪文件, 不影响 git reset)")
 		}
 
 		logWrite(">>> 2/6 拉取代码 git fetch origin (branch=%s)", branch)
@@ -1125,6 +1141,27 @@ func (h *AdminSystemHandler) GitPullLog(c *gin.Context) {
 		"done":    gitPullDone,
 		"success": gitPullOK,
 	})
+}
+
+// GitPullClearLog DELETE /api/v1/admin/system/git-pull-log
+// 清理在线更新日志: 清空内存 + 删除持久化日志文件 + 重置状态
+// 用于管理员手动清理更新日志, 避免长期累积占用磁盘。
+// 注意: 用 TryLock 抢锁, 更新进行中时拒绝清理, 防止清掉正在写入的日志。
+func (h *AdminSystemHandler) GitPullClearLog(c *gin.Context) {
+	if !gitPullMu.TryLock() {
+		response.FailMsg(c, response.CodeServerError, "更新进行中, 无法清理日志")
+		return
+	}
+	defer gitPullMu.Unlock()
+	// 清空内存日志
+	gitPullLog.Reset()
+	// 删除持久化日志文件
+	_ = os.Remove(gitPullLogFile)
+	// 重置状态文件
+	_ = os.Remove(gitPullStateFile)
+	gitPullDone = false
+	gitPullOK = false
+	response.OKMsg(c, "日志已清理")
 }
 
 // SystemRestart POST /api/v1/admin/system/restart
