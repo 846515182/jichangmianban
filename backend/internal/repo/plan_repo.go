@@ -82,6 +82,18 @@ func (r *PlanRepo) CountActiveUsersByPlanID(planID string) (int64, error) {
 	return count, nil
 }
 
+// CountPendingOrdersByPlanID 统计引用该套餐的待支付订单数(删除套餐前校验, P2)
+// 防止删除套餐后, 已下单未支付的用户付款时无法开通套餐
+func (r *PlanRepo) CountPendingOrdersByPlanID(planID string) (int64, error) {
+	var count int64
+	if err := r.db.Model(&model.Order{}).
+		Where("plan_id = ? AND is_deleted = false AND status = ?", planID, model.OrderStatusPending).
+		Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 // Create 创建套餐
 func (r *PlanRepo) Create(p *model.Plan) error {
 	return r.db.Create(p).Error

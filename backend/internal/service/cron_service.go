@@ -466,27 +466,21 @@ func (s *CronService) ReconcilePendingOrders() {
 	orders, err := s.orderSvc.ListPendingSince(since)
 	if err != nil {
 		s.logger.Error("掉单对账查询失败", zap.Error(err))
-		return
-	}
-	if len(orders) == 0 {
-		return
+		// pending 查询失败不阻断过期订单扫描
+		orders = nil
 	}
 
 	reconciled := 0
-	for _, o := range orders {
-		// 跳过已过期的(ExpireOrders cron 会处理)
-		if !o.ExpiredAt.IsZero() && o.ExpiredAt.Before(time.Now()) {
-			continue
-		}
+	reconcileOne := func(o model.Order) {
 		status, qerr := ps.QueryOrderStatus(o.OrderNo)
 		if qerr != nil {
 			// 查询失败(网关错误/订单未找到)常见, 仅 debug 记录
 			s.logger.Debug("掉单对账查询订单状态失败",
 				zap.String("order_no", o.OrderNo), zap.Error(qerr))
-			continue
+			return
 		}
 		if status.TradeStatus != "TRADE_SUCCESS" {
-			continue // 未支付, 跳过
+			return // 未支付, 跳过
 		}
 		// 金额校验, 防止 EPay 网关数据异常导致错误开通
 		if status.Money != "" {
@@ -496,20 +490,38 @@ func (s *CronService) ReconcilePendingOrders() {
 					zap.String("order_no", o.OrderNo),
 					zap.Int64("order_cents", o.AmountCents),
 					zap.Int64("epay_cents", cents))
-				continue
+				return
 			}
 		}
-		// 调 PaySuccess 兜底开通(内部 FOR UPDATE 幂等, 重复回调安全)
+		// 调 PaySuccess 兜底开通(内部 FOR UPDATE 幂等, 重复回调安全; 且已支持过期订单履约)
 		if err := s.orderSvc.PaySuccess(o.OrderNo, status.TradeNo); err != nil {
 			s.logger.Error("掉单对账兜底开通失败",
 				zap.String("order_no", o.OrderNo), zap.Error(err))
-			continue
+			return
 		}
 		reconciled++
 		s.logger.Info("掉单对账成功,已兜底开通套餐",
 			zap.String("order_no", o.OrderNo),
 			zap.String("trade_no", status.TradeNo))
 	}
+
+	// 1) 扫描仍为 pending 的订单(含已过 ExpiredAt 但尚未被 cron 标记的)
+	for _, o := range orders {
+		reconcileOne(o)
+	}
+
+	// 2) 扫描近期已过期的订单(用户可能已付款但回调丢失/延迟到达, P1 资金损失修复):
+	//    PaySuccess 已支持过期订单履约, 此处主动查询 EPay 真实状态兜底开通
+	expSince := time.Now().Add(-30 * time.Minute)
+	expOrders, err := s.orderSvc.ListExpiredSince(expSince)
+	if err != nil {
+		s.logger.Warn("掉单对账扫描过期订单失败", zap.Error(err))
+	} else {
+		for _, o := range expOrders {
+			reconcileOne(o)
+		}
+	}
+
 	if reconciled > 0 {
 		s.logger.Info("掉单对账批次完成", zap.Int("reconciled", reconciled),
 			zap.Int("scanned", len(orders)))

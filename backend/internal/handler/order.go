@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -116,6 +117,11 @@ func (h *OrderHandler) PayOrder(c *gin.Context) {
 	}
 	if order.Status != "pending" {
 		response.FailMsg(c, response.CodeServerError, "订单状态不允许支付")
+		return
+	}
+	// 拒绝已过期订单生成支付链接(即使状态仍为 pending 但已过 ExpiredAt, P2)
+	if !order.ExpiredAt.IsZero() && order.ExpiredAt.Before(time.Now()) {
+		response.FailMsg(c, response.CodeServerError, "订单已过期，请重新下单")
 		return
 	}
 	base := getRequestBaseURL(c)

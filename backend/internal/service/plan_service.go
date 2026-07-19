@@ -151,6 +151,9 @@ func (s *PlanService) DeletePlan(id string) error {
 	if count, err := s.repo.CountActiveUsersByPlanID(id); err == nil && count > 0 {
 		return fmt.Errorf("该套餐仍有 %d 个用户在用，请先迁移用户或禁用套餐而非删除", count)
 	}
+	if pending, err := s.repo.CountPendingOrdersByPlanID(id); err == nil && pending > 0 {
+		return fmt.Errorf("该套餐仍有 %d 笔待支付订单，请先处理订单后再删除", pending)
+	}
 	return s.repo.SoftDelete(id)
 }
 

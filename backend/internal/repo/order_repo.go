@@ -141,3 +141,15 @@ func (r *OrderRepo) CountPaidByUserExcluding(userID, excludeOrderID string) (int
 	}
 	return n, nil
 }
+
+// ListExpiredSince 列出已过期(status=expired)且 expired_at >= since 的订单(掉单对账用)
+// 用于对账 cron 扫描"已过期但用户可能已付款"的订单, 兜底开通, 避免资金损失
+func (r *OrderRepo) ListExpiredSince(since time.Time) ([]model.Order, error) {
+	var list []model.Order
+	if err := r.db.Where("is_deleted = false AND status = ? AND expired_at >= ?",
+		model.OrderStatusExpired, since).
+		Find(&list).Error; err != nil {
+		return nil, err
+	}
+	return list, nil
+}

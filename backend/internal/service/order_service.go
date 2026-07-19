@@ -42,6 +42,10 @@ func (s *OrderService) CreateOrder(in *CreateOrderInput) (*model.Order, error) {
 	if in.UserID == "" || in.PlanID == "" || in.PaymentMethod == "" {
 		return nil, errors.New("缺少必填字段")
 	}
+	// 校验支付方式白名单(避免订单建了却无法支付, P3)
+	if paymentMethodToEPayType(in.PaymentMethod) == "" {
+		return nil, errors.New("不支持的支付方式")
+	}
 	plan, err := s.planRepo.GetByID(in.PlanID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -133,6 +137,12 @@ func (s *OrderService) HasActiveOrders(userID string) (bool, error) {
 // 修复 PAY-RECON-01 (P0): 供 CronService.ReconcilePendingOrders 调用。
 func (s *OrderService) ListPendingSince(since time.Time) ([]model.Order, error) {
 	return s.orderRepo.ListPendingSince(since)
+}
+
+// ListExpiredSince 列出已过期(status=expired)且 expired_at >= since 的订单(掉单对账用)
+// 用于对账 cron 扫描"已过期但用户可能已付款"的订单, 兜底开通, 避免资金损失(P1)
+func (s *OrderService) ListExpiredSince(since time.Time) ([]model.Order, error) {
+	return s.orderRepo.ListExpiredSince(since)
 }
 
 // ListUserOrders 用户订单列表
@@ -242,7 +252,10 @@ func (s *OrderService) PaySuccess(orderNo, tradeNo string) error {
 	if o.Status == model.OrderStatusPaid {
 		return nil
 	}
-	if o.Status != model.OrderStatusPending {
+	// 允许 pending 与 expired: 用户已向支付平台付款后, 即使订单已被过期 cron 标记,
+	// 仍应履约(收到真钱即开通), 避免资金损失。expired 订单的优惠券已被 ExpireOrders 回退,
+	// 履约时需重新消费以保持计数准确。
+	if o.Status != model.OrderStatusPending && o.Status != model.OrderStatusExpired {
 		return errors.New("订单状态不允许支付")
 	}
 	now := time.Now()
@@ -257,9 +270,11 @@ func (s *OrderService) PaySuccess(orderNo, tradeNo string) error {
 		if locked.Status == model.OrderStatusPaid {
 			return nil
 		}
-		if locked.Status != model.OrderStatusPending {
+		if locked.Status != model.OrderStatusPending && locked.Status != model.OrderStatusExpired {
 			return errors.New("订单状态不允许支付")
 		}
+		// 记录是否为过期订单履约(其优惠券已被 ExpireOrders 回退, 需重新消费)
+		wasExpired := locked.Status == model.OrderStatusExpired
 		locked.Status = model.OrderStatusPaid
 		locked.TradeNo = tradeNo
 		locked.PaidAt = &now
@@ -269,6 +284,15 @@ func (s *OrderService) PaySuccess(orderNo, tradeNo string) error {
 		plan, err := s.planRepo.GetByID(locked.PlanID)
 		if err != nil {
 			return fmt.Errorf("订单已支付但套餐不存在: %w", err)
+		}
+		// 过期订单履约: 重新消费优惠券(抵消 ExpireOrders 的回退), 保持计数准确
+		if wasExpired && locked.CouponID != "" {
+			if err := s.couponRepo.IncrUsedSafeTx(tx, locked.CouponID, now); err != nil {
+				if logger := app.Get().Logger; logger != nil {
+					logger.Warn("过期订单履约时重新消费优惠券失败(非致命, 套餐仍开通)",
+						zap.String("coupon_id", locked.CouponID), zap.Error(err))
+				}
+			}
 		}
 		// 关键: 传入 tx, 使 setUserPlan 在同一事务内执行
 		return s.setUserPlan(tx, locked.UserID, plan, now)
