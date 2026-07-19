@@ -400,11 +400,25 @@ func ensureSuperAdmin(db *gorm.DB, cfg *config.Config, logger *zap.Logger) {
 
 // ensureTrialPlan 确保存在试用套餐(注册自动发放)
 // 5GB 流量 / 30 天 / 0 元 / 设备数 2
+//
+// 修复 CRITICAL 2026-07-19: 旧版漏设 IsTrial: true, 导致试用套餐的 is_trial=false,
+// ListEnabled 的 WHERE is_trial=false 过滤失效, 试用套餐出现在用户购买列表中,
+// 用户点击购买会触发"试用套餐无法购买"或订单创建失败。
+// 现在显式设置 IsTrial: true, 并对已存在的旧记录做幂等修正(UPDATE is_trial=true)。
 func ensureTrialPlan(db *gorm.DB, logger *zap.Logger) {
 	var existing model.Plan
 	err := db.Where("is_deleted = false AND name LIKE ?", "%试用%").First(&existing).Error
 	if err == nil {
-		return // 已存在试用套餐
+		// 已存在试用套餐, 但旧版创建的可能 is_trial=false, 顺手修正
+		if !existing.IsTrial {
+			if err := db.Model(&model.Plan{}).Where("id = ?", existing.ID).
+				Update("is_trial", true).Error; err != nil {
+				logger.Warn("修正试用套餐 is_trial 字段失败", zap.String("id", existing.ID), zap.Error(err))
+			} else {
+				logger.Info("已修正旧试用套餐的 is_trial 字段为 true", zap.String("id", existing.ID))
+			}
+		}
+		return
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		logger.Warn("查询试用套餐失败", zap.Error(err))
@@ -419,7 +433,8 @@ func ensureTrialPlan(db *gorm.DB, logger *zap.Logger) {
 		OriginalPriceCents:  0,
 		DeviceLimit:         2,
 		IsEnabled:           true,
-		SortOrder:           0, // 排在最前
+		IsTrial:             true, // 试用套餐标记, ListEnabled 会过滤掉
+		SortOrder:           0,    // 排在最前
 	}
 	if err := db.Create(trial).Error; err != nil {
 		logger.Warn("创建试用套餐失败", zap.Error(err))
@@ -475,6 +490,10 @@ func runSQLMigrations(db *gorm.DB, logger *zap.Logger) error {
 		{"2026_07_16_drop_node_level_add_coupon", "migrations/2026_07_16_drop_node_level_add_coupon.sql"},
 		{"2026_07_17_perf_indexes", "migrations/2026_07_17_perf_indexes.sql"},
 		{"2026_07_19_drop_invite_codes", "migrations/2026_07_19_drop_invite_codes.sql"},
+		// 修复 CRITICAL 2026-07-19: 注册试用套餐标记迁移
+		// 旧版未注册, 导致存量试用套餐 is_trial 始终为 false, 出现在购买列表中
+		// 此迁移会 UPDATE plans SET is_trial=true WHERE name LIKE '%试用%'
+		{"2026_07_19_add_plan_is_trial", "migrations/2026_07_19_add_plan_is_trial.sql"},
 	}
 
 	for _, m := range migrations {
