@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -40,6 +41,12 @@ func JWTAuth(allowedRoles ...string) gin.HandlerFunc {
 		claims, err := mgr.ValidateAccess(token)
 		if err != nil {
 			response.Fail(c, response.CodeTokenInvalid)
+			c.Abort()
+			return
+		}
+		// Redis 不可用时, 对敏感管理接口采取 fail-closed: 避免黑名单/Token版本校验失效后被吊销的 token 仍可用
+		if app.Get().RDB == nil && strings.HasPrefix(c.Request.URL.Path, "/api/v1/admin/") {
+			response.FailWithHTTP(c, http.StatusServiceUnavailable, response.CodeTokenInvalid)
 			c.Abort()
 			return
 		}

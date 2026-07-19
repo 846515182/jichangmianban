@@ -1,16 +1,17 @@
 package middleware
 
 import (
-        "bytes"
-        "encoding/json"
-        "io"
-        "strings"
+	"bytes"
+	"encoding/json"
+	"io"
+	"strings"
+	"time"
 
-        "github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin"
 
-        "nexus-panel/internal/app"
-        "nexus-panel/internal/model"
-        "nexus-panel/internal/repo"
+	"nexus-panel/internal/app"
+	"nexus-panel/internal/model"
+	"nexus-panel/internal/repo"
 )
 
 // AuditAction 记录管理员操作审计日志中间件
@@ -54,11 +55,16 @@ func AuditAction(action string) gin.HandlerFunc {
                         IP:         c.ClientIP(),
                 }
 
-                // 异步写入，不阻塞响应
-                go func(a *model.AdminAction) {
-                        repo := repo.NewAdminActionRepo(app.Get().DB)
-                        _ = repo.Create(a)
-                }(audit)
+			// 异步写入，不阻塞响应; 失败时短暂重试, 避免审计日志丢失
+			go func(a *model.AdminAction) {
+				r := repo.NewAdminActionRepo(app.Get().DB)
+				for i := 0; i < 3; i++ {
+					if err := r.Create(a); err == nil {
+						return
+					}
+					time.Sleep(time.Duration(i+1) * time.Second)
+				}
+			}(audit)
         }
 }
 

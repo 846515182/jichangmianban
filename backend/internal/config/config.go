@@ -175,8 +175,18 @@ func (c *Config) LoadGRPCTLSConfig() (*tls.Config, error) {
 		MinVersion:   tls.VersionTLS12,
 	}
 	if c.GRPCTLSCA != "" {
-		// mTLS mode - would need client CA verification
-		// For now, just server-side TLS
+		// mTLS: 加载客户端 CA 并强制校验客户端证书(仅当配置了 CA 时启用)
+		// 节点须持有由该 CA 签发的有效客户端证书方可连接, 防止未授权节点接入
+		caPEM, err := os.ReadFile(c.GRPCTLSCA)
+		if err != nil {
+			return nil, fmt.Errorf("加载 gRPC 客户端 CA 失败: %w", err)
+		}
+		clientCAs := x509.NewCertPool()
+		if !clientCAs.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("gRPC 客户端 CA 证书解析失败")
+		}
+		tlsCfg.ClientCAs = clientCAs
+		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
 	}
 	return tlsCfg, nil
 }

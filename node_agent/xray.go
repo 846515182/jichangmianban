@@ -181,7 +181,7 @@ func (m *XrayManager) WriteConfig(cfgJSON string) error {
 	if err := os.MkdirAll(filepath.Dir(m.configPath), 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(m.configPath, []byte(cfgJSON), 0644)
+	return os.WriteFile(m.configPath, []byte(cfgJSON), 0600)
 }
 
 // IsRunning 返回 Xray 进程是否在运行

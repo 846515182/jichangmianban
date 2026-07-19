@@ -102,6 +102,10 @@ func EncryptSecret(masterKey, plaintext string) string {
 // DecryptSecret 解密敏感字段, 兼容明文历史数据:
 // 解密失败时认为旧数据是明文, 原样返回(平滑迁移, 不阻断业务)。
 // 这样旧明文配置在升级后仍可读取, 下次 SaveConfig 时会被加密。
+//
+// [安全说明] 此处保留"解密失败返回原文"的迁移行为, 以兼容尚未加密的旧明文配置
+// (旧明文可能是任意字符串, 包括恰好合法 base64 的随机串, 无法与"被篡改密文"可靠区分)。
+// 完整 fail-closed 需先执行一次性迁移脚本将全量明文加密, 再切换为严格模式(待后续配合迁移工具实现)。
 func DecryptSecret(masterKey, stored string) string {
 	if stored == "" {
 		return ""
@@ -112,7 +116,7 @@ func DecryptSecret(masterKey, stored string) string {
 	}
 	plain, err := m.DecryptString(stored)
 	if err != nil {
-		return stored // 解密失败 = 旧明文数据, 原样返回
+		return stored // 解密失败 = 旧明文数据, 原样返回(平滑迁移)
 	}
 	return plain
 }

@@ -63,10 +63,9 @@ func readNetDevTotal() (rx, tx int64) {
 	return rx, tx
 }
 
-// Delta 返回自上次调用以来的上传(rx 增量)和下载(tx 增量)字节数
-// 从服务器视角: rx=网卡接收=用户上传, tx=网卡发送=用户下载
-// 首次调用返回 0,0 并记录基线
-func (t *TrafficCounter) Delta() (upload, download int64) {
+// Peek 返回自上次提交以来的上传/下载增量, 但不消费基线(不更新 prev)
+// 用于"上报成功才消费增量"的语义, 避免上报失败导致增量数据永久丢失(P1-B4)
+func (t *TrafficCounter) Peek() (upload, download int64) {
 	rx, tx := readNetDevTotal()
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -84,10 +83,26 @@ func (t *TrafficCounter) Delta() (upload, download int64) {
 	if download < 0 {
 		download = 0
 	}
+	return upload, download
+}
+
+// Commit 确认增量已成功上报, 更新基线并累加总量(仅在上报成功后调用)
+func (t *TrafficCounter) Commit(upload, download int64) {
+	rx, tx := readNetDevTotal()
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.prevRx = rx
 	t.prevTx = tx
+	t.hasPrev = true
 	t.totalRx += upload
 	t.totalTx += download
+}
+
+// Delta 返回并消费增量(等价于 Peek + Commit, 兼容旧用法)
+// 从服务器视角: rx=网卡接收=用户上传, tx=网卡发送=用户下载
+func (t *TrafficCounter) Delta() (upload, download int64) {
+	upload, download = t.Peek()
+	t.Commit(upload, download)
 	return upload, download
 }
 

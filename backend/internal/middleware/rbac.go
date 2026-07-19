@@ -18,6 +18,7 @@ const (
 	PermBackup       = "backup"        // 备份
 	PermGlobalSec    = "global_sec"    // 全局安全配置
 	PermNodeManage   = "node_manage"   // 节点管理(创建/编辑/删除节点、一键部署)
+	PermFundManage   = "fund_manage"   // 资金管理(退款/标记支付, 影响用户访问权与资金)
 )
 
 // 需要在所有 admin 中受限的敏感权限
@@ -28,6 +29,7 @@ var sensitivePerms = map[string]bool{
 	PermBackup:     true,
 	PermGlobalSec:  true,
 	PermNodeManage: true, // 一键部署涉及远程 root 权限与 SSH 密码传输, 仅 super_admin 可执行
+	PermFundManage: true, // 退款/标记支付影响资金与访问权, 仅 super_admin 可执行
 }
 
 // RBAC 权限校验中间件

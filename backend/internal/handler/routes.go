@@ -265,8 +265,8 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 		admin.DELETE("/plans/:id", middleware.AuditAction("plan.delete"), planH.AdminPlanDelete)
 
 		admin.GET("/orders", orderH.AdminOrderList)
-		admin.POST("/orders/:id/mark-paid", middleware.AuditAction("order.mark_paid"), orderH.AdminMarkPaid)
-		admin.POST("/orders/:id/refund", middleware.AuditAction("order.refund"), orderH.AdminRefund)
+		admin.POST("/orders/:id/mark-paid", middleware.RBAC(middleware.PermFundManage), middleware.AuditAction("order.mark_paid"), orderH.AdminMarkPaid)
+		admin.POST("/orders/:id/refund", middleware.RBAC(middleware.PermFundManage), middleware.AuditAction("order.refund"), orderH.AdminRefund)
 		admin.POST("/orders/:id/cancel", middleware.AuditAction("order.cancel"), orderH.AdminCancelOrder)
 
 		admin.GET("/coupons", couponH.AdminCouponList)

@@ -525,7 +525,7 @@ func (a *Agent) trafficLoop(ctx context.Context) {
 }
 
 func (a *Agent) doTrafficReport() {
-	upload, download := a.traffic.Delta()
+	upload, download := a.traffic.Peek()
 	if upload == 0 && download == 0 {
 		return // 无流量变化不上报
 	}
@@ -548,6 +548,7 @@ func (a *Agent) doTrafficReport() {
 			a.handleFatalShutdown(fmt.Sprintf("流量上报时节点已被删除/token失效: %v", err))
 			return
 		}
+		// 普通失败: 不消费增量, 下次周期重试(累加未上报的增量, 避免永久丢失)
 		log.Printf("流量上报失败: %v", err)
 		return
 	}
@@ -557,8 +558,12 @@ func (a *Agent) doTrafficReport() {
 			a.handleFatalShutdown(fmt.Sprintf("流量上报被拒: %s", msg))
 			return
 		}
+		// 被拒非致命: 不消费增量, 下次重试
 		log.Printf("流量上报被拒: code=%d msg=%s", resp.GetResp().GetCode(), msg)
+		return
 	}
+	// 上报成功, 消费增量(更新基线)
+	a.traffic.Commit(upload, download)
 }
 
 // getNodeID / getConfigVer 并发安全读取

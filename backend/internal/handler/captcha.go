@@ -2,6 +2,7 @@ package handler
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
 	"math/big"
@@ -179,7 +180,7 @@ func VerifyCaptcha(c *gin.Context, captchaID, captchaCode string) bool {
 			captchaMu.Unlock()
 			return false
 		}
-		if entry.code == captchaCode {
+		if subtle.ConstantTimeCompare([]byte(entry.code), []byte(captchaCode)) == 1 {
 			captchaMu.Lock()
 			delete(captchaStore, captchaID)
 			captchaMu.Unlock()
