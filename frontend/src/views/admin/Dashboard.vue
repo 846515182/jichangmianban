@@ -116,7 +116,7 @@
       </el-col>
     </el-row>
 
-    <!-- 服务日志监控: 容器列表 + 报错日志(每 30 分钟轮询一次) -->
+    <!-- 服务日志监控: 容器列表 + 报错日志(每 30 秒轮询一次) -->
     <el-row :gutter="20" class="chart-row">
       <el-col :span="24">
         <div class="chart-card np-card">
@@ -220,7 +220,7 @@ const sysStats = ref<SysStats>({
 let sysTimer: number | null = null
 
 // ============================================================
-// 服务日志监控(容器列表 + 报错日志 + 30 分钟轮询)
+// 服务日志监控(容器列表 + 报错日志 + 30 秒轮询)
 // ============================================================
 interface ContainerInfo {
   id: string; name: string; image: string
@@ -242,9 +242,9 @@ const logMonitor = reactive({
   // 当前过滤后展示的日志
   filteredLogs: '',
   loading: false,
-  // 自动刷新(默认开启, 30 分钟轮询)
+  // 自动刷新(默认开启, 30 秒轮询)
   autoRefresh: true,
-  intervalLabel: '30min',
+  intervalLabel: '30s',
   lastFetch: 0 as number | 0,
 })
 
@@ -285,9 +285,10 @@ const fetchContainers = async () => {
 }
 
 // 拉取选中容器的日志
-const fetchContainerLogs = async () => {
+// silent: true - 定时器触发时静默, 避免因 selectedContainer 为空而每 30 秒弹一次"请先选择容器"toast
+const fetchContainerLogs = async (silent = false) => {
   if (!logMonitor.selectedContainer) {
-    ElMessage.warning('请先选择容器')
+    if (!silent) ElMessage.warning('请先选择容器')
     return
   }
   logMonitor.loading = true
@@ -346,7 +347,7 @@ const toggleAutoRefresh = () => {
   logMonitor.autoRefresh = !logMonitor.autoRefresh
   if (logMonitor.autoRefresh) {
     startLogTimer()
-    ElMessage.success('已开启自动刷新(每 30 分钟)')
+    ElMessage.success('已开启自动刷新(每 30 秒)')
   } else {
     stopLogTimer()
     ElMessage.info('已关闭自动刷新')
@@ -355,8 +356,8 @@ const toggleAutoRefresh = () => {
 
 const startLogTimer = () => {
   stopLogTimer()
-  // 30 分钟轮询一次(用户要求"每隔半个小时查询一次")
-  logTimer = window.setInterval(fetchContainerLogs, 30 * 60 * 1000)
+  // 30 秒轮询一次(监控日志需要近实时感知)
+  logTimer = window.setInterval(() => fetchContainerLogs(true), 30 * 1000)
 }
 
 const stopLogTimer = () => {
@@ -500,7 +501,7 @@ onMounted(async () => {
   fetchSysStats()
   sysTimer = window.setInterval(fetchSysStats, 3000)
 
-  // 服务日志监控: 先拉容器列表, 再拉选中容器的日志, 然后每 30 分钟轮询
+  // 服务日志监控: 先拉容器列表, 再拉选中容器的日志, 然后每 30 秒轮询
   await fetchContainers()
   if (logMonitor.selectedContainer) {
     fetchContainerLogs()
