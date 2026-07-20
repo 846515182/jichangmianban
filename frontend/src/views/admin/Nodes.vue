@@ -838,8 +838,27 @@ const rotateToken = (row: NodeRow) => {
       const res = await request.post<ApiResponse<{ node_token: string }>>(`/api/v1/admin/nodes/${row.id}/rotate-token`)
       if (res && res.code === 0 && res.data) {
         ElMessage.success('Token 已轮换')
-        showDeployInfo({ ...row, node_token: res.data.node_token })
         await fetchList()
+        // 修复 P1: 轮换后旧 agent 仍用旧 token, 会注册失败 30 次 -> log.Fatalf -> docker restart 死循环
+        // 必须重新部署 agent 更新配置文件的 NODE_TOKEN, 强制弹窗让用户选择部署方式
+        ElMessageBox.confirm(
+          `⚠️ 节点「${row.name}」的 Token 已轮换\n\n节点服务器上的旧 agent 仍在使用旧 Token，将持续注册失败并死循环重启。\n\n必须立即重新部署 node-agent 以更新配置文件中的 NODE_TOKEN。`,
+          '必须重新部署 node-agent',
+          {
+            type: 'error',
+            confirmButtonText: '一键重新部署',
+            cancelButtonText: '查看手动命令',
+            distinguishCancelAndClose: true,
+          },
+        ).then(() => {
+          // 一键重新部署: 走 auto-deploy 流程(会弹窗收集 SSH 密码)
+          startAutoDeploy({ ...row, node_token: res.data.node_token })
+        }).catch((action: string) => {
+          if (action === 'cancel') {
+            // 查看手动部署命令
+            showDeployInfo({ ...row, node_token: res.data.node_token })
+          }
+        })
       }
     } catch { /* */ }
   }).catch(() => {})
@@ -878,7 +897,11 @@ const parseRealityInfo = (node: NodeRow): { public_key: string; short_id: string
   }
 }
 
-const showDeployInfo = (node: NodeRow) => {
+// 部署信息加载状态(列表点击时需调 NodeDetail 获取 node_token)
+const deployLoading = ref(false)
+
+// 渲染部署信息到对话框(从节点对象填充 deployData)
+const renderDeployInfo = (node: NodeRow) => {
   const { public_key, short_id } = parseRealityInfo(node)
   deployData.id = node.id
   deployData.name = node.name
@@ -894,6 +917,33 @@ const showDeployInfo = (node: NodeRow) => {
   })
   deployTab.value = 'steps'
   deployVisible.value = true
+}
+
+// 显示部署信息
+// 修复 P1: NodeList 已隐藏 node_token 防泄露, 列表点击时 row 无 node_token,
+// 需调 NodeDetail 获取完整信息。否则部署步骤里 NODE_TOKEN=undefined,
+// agent 启动后注册失败 30 次 -> log.Fatalf -> docker restart 死循环刷日志
+const showDeployInfo = async (node: NodeRow) => {
+  // 已有 node_token(创建后/轮换后调用), 直接渲染
+  if (node.node_token) {
+    renderDeployInfo(node)
+    return
+  }
+  // 列表点击: node_token 为空, 调 NodeDetail 获取
+  if (deployLoading.value) return
+  deployLoading.value = true
+  try {
+    const res = await request.get<ApiResponse<NodeRow>>(`/api/v1/admin/nodes/${node.id}`)
+    if (res && res.code === 0 && res.data) {
+      renderDeployInfo(res.data)
+    } else {
+      ElMessage.error('获取节点详情失败')
+    }
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.msg || '获取节点详情失败')
+  } finally {
+    deployLoading.value = false
+  }
 }
 
 // 一键复制全部命令

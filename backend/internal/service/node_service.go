@@ -379,6 +379,9 @@ func (s *NodeService) DeleteNode(id string) error {
 }
 
 // RotateToken 轮换节点通信 token
+// 修复 P1: 轮换后清 Redis 缓存, 让 agent 下次心跳拉新配置
+// 注意: agent 配置文件里的旧 token 仍会导致注册失败, 必须重新部署 agent
+// (用旧 token 注册失败 30 次 -> log.Fatalf -> docker restart 死循环刷日志)
 func (s *NodeService) RotateToken(id string) (string, error) {
 	if _, err := s.repo.GetByID(id); err != nil {
 		return "", err
@@ -389,6 +392,13 @@ func (s *NodeService) RotateToken(id string) (string, error) {
 	}
 	if err := s.repo.UpdateToken(id, tok); err != nil {
 		return "", err
+	}
+	// 清 Redis 配置缓存, 让 agent 下次心跳时重新拉取配置(含新 token)
+	// 若 agent 不支持热更新 token, 此操作无害, 仍需重新部署 agent 更新配置文件
+	if rdb := app.Get().RDB; rdb != nil {
+		ctx := context.Background()
+		rdb.Del(ctx, "node:configver:"+id)
+		rdb.Del(ctx, "node:usershash:"+id)
 	}
 	return tok, nil
 }
