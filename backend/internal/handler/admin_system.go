@@ -625,18 +625,17 @@ func (h *AdminSystemHandler) UpdateNotifyConfig(c *gin.Context) {
 // AdminAuditLog [GET] /api/v1/admin/audit
 // 管理员操作审计日志（仅超级管理员可查看）
 func (h *AdminSystemHandler) AdminAuditLog(c *gin.Context) {
-        page, size := parsePage(c)
-        action := c.Query("action")
-        adminID := c.Query("admin_id")
-        auditRepo := repo.NewAdminActionRepo(app.Get().DB)
-        list, total, err := auditRepo.List(page, size, action, adminID)
-        if err != nil {
-                response.Fail(c, response.CodeDBError)
-                return
-        }
-        response.OK(c, gin.H{"list": list, "total": total})
+	page, size := parsePage(c)
+	action := c.Query("action")
+	adminID := c.Query("admin_id")
+	auditRepo := repo.NewAdminActionRepo(app.Get().DB)
+	list, total, err := auditRepo.List(page, size, action, adminID)
+	if err != nil {
+		response.Fail(c, response.CodeDBError)
+		return
+	}
+	response.OK(c, gin.H{"list": list, "total": total})
 }
-
 
 // TestNotifyConfig POST /api/v1/admin/system/notify-config/test
 // 测试邮件配置是否正确（支持 TLS，兼容 Mailtrap 等现代 SMTP 服务）
@@ -822,14 +821,22 @@ func getGitRoot() string {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
 	output, err := cmd.Output()
-	if err != nil {
-		// 回退到环境变量或默认路径
-		if root := os.Getenv("PROJECT_ROOT"); root != "" {
-			return root
-		}
-		return "/root/nexus-panel"
+	if err == nil {
+		return strings.TrimSpace(string(output))
 	}
-	return strings.TrimSpace(string(output))
+	// 回退顺序: 环境变量 PROJECT_ROOT → 当前工作目录 → 历史默认路径
+	if root := os.Getenv("PROJECT_ROOT"); root != "" {
+		return root
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		// 当前工作目录可能就是项目根(容器内 /app, 宿主机 /opt/nexus-panel)
+		// 检测是否含 docker-compose.yml, 是则认为是项目根
+		if _, err := os.Stat(filepath.Join(cwd, "docker-compose.yml")); err == nil {
+			return cwd
+		}
+	}
+	// 最终回退: 兼容历史部署路径
+	return "/root/nexus-panel"
 }
 
 // getCurrentBranch 获取当前分支名
@@ -854,29 +861,39 @@ func execCommand(name string, args ...string) systemActionResult {
 // ============================================================
 
 var (
-	gitPullMu    sync.Mutex
-	gitPullLog   strings.Builder
-	gitPullDone  bool
-	gitPullOK    bool
+	gitPullMu   sync.Mutex
+	gitPullLog  strings.Builder
+	gitPullDone bool
+	gitPullOK   bool
 )
 
-// gitPullLogFile 持久化更新日志的文件路径。
+// gitPullLogDir/File/StateFile 持久化更新日志与完成状态的路径。
 // 修复 UI-LOG-01 (P1): 旧版日志只存内存(strings.Builder), syscall.Exec 原地
 // 重启后新进程的 gitPullLog/gitPullDone 被重置为空/false, 前端轮询拿到空日志
 // + done=false, 误以为新一轮更新开始却没日志, 显示"更新中"卡住。
 // 改为同时写文件, 新进程启动时 init 恢复上次状态, 前端能正确看到"已完成"。
 //
-// [fix 2026-07-18] 路径从 /tmp 改到 /root/nexus-panel/.update-state/
+// [fix 2026-07-18] 路径从 /tmp 改到项目根/.update-state/
 // 原因: docker compose up -d 重启容器时, /tmp 不持久化, 状态文件丢失,
-// 又触发同样的"更新中卡住"问题。改用挂载到宿主机的 /root/nexus-panel 目录,
+// 又触发同样的"更新中卡住"问题。改用挂载到宿主机的项目目录,
 // 容器重启后状态文件仍存在, init 能正确恢复 done/success。
-const gitPullLogDir  = "/root/nexus-panel/.update-state"
-const gitPullLogFile = "/root/nexus-panel/.update-state/git-pull.log"
-
-// gitPullStateFile 持久化完成状态(done/success), 供新进程启动时恢复
-const gitPullStateFile = "/root/nexus-panel/.update-state/git-pull.state"
+//
+// [fix 2026-07-20] 从 const 改为 var, 路径基于 getGitRoot() 动态计算
+// 原因: 项目从 /root/nexus-panel 迁移到 /opt/nexus-panel 后, 硬编码路径导致
+// 状态文件读写失败, 一键更新卡住。改为 init 时基于实际 git 根目录计算。
+var (
+	gitPullLogDir    string
+	gitPullLogFile   string
+	gitPullStateFile string
+)
 
 func init() {
+	// 计算项目根目录(支持容器内 /app, 宿主机 /opt/nexus-panel, /root/nexus-panel 等)
+	root := getGitRoot()
+	gitPullLogDir = filepath.Join(root, ".update-state")
+	gitPullLogFile = filepath.Join(gitPullLogDir, "git-pull.log")
+	gitPullStateFile = filepath.Join(gitPullLogDir, "git-pull.state")
+
 	// 启动时恢复上次更新状态(syscall.Exec 重启后生效)
 	if data, err := os.ReadFile(gitPullStateFile); err == nil {
 		var st struct {
@@ -1207,84 +1224,85 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		}
 
 		logWrite(">>> 7/7 重建 panel 容器, 让新二进制立即生效")
-	// 修复 CRITICAL 2026-07-19: 旧版用 systemctl restart nexus-panel 重启,
-	// 但服务器上根本没有 nexus-panel.service systemd unit 文件(仓库里搜不到,
-	// 用户也从未创建过)。panel 是 docker compose 启动的容器, systemctl 命令
-	// 静默失败但代码丢弃错误照样 setPullDone(true), 导致每次"更新成功"但实际
-	// 容器还在跑旧二进制, 用户反馈的"试用套餐还在显示/订单仍报错/资源不存在"
-	// 全是这个根因。
-	//
-	// 正确做法: docker compose up -d --no-deps panel 让 panel 容器用新镜像重建。
-	// Docker 看到镜像 hash 变了会自动 recreate 容器, 新二进制就是镜像里的,
-	// 不可能跑错。这是 Docker 标准用法, 不需要 systemctl、不需要 docker cp、
-	// 不需要从镜像里抠二进制。
-	//
-	// 关键顺序: setPullDone(true) 必须在 docker compose up -d panel 之前调用!
-	// 因为 up -d 会杀掉当前 panel 进程(也就是 gitPull 自己所在的 goroutine 所在进程),
-	// 必须先把"成功"状态持久化到文件, 新容器启动后前端轮询才能读到"成功"。
-	logWrite(">>> 预期: 运行版本 %s → %s (更新前 → 更新后)", oldVersion, newHead)
-	logWrite("在线更新完成！panel 容器即将用新镜像重建, 新版本立即生效")
-	logWrite(">>> 验证: 请刷新页面, 查看 GitHub 同步卡片的「运行版本」号是否已变化")
+		// 修复 CRITICAL 2026-07-19: 旧版用 systemctl restart nexus-panel 重启,
+		// 但服务器上根本没有 nexus-panel.service systemd unit 文件(仓库里搜不到,
+		// 用户也从未创建过)。panel 是 docker compose 启动的容器, systemctl 命令
+		// 静默失败但代码丢弃错误照样 setPullDone(true), 导致每次"更新成功"但实际
+		// 容器还在跑旧二进制, 用户反馈的"试用套餐还在显示/订单仍报错/资源不存在"
+		// 全是这个根因。
+		//
+		// 正确做法: docker compose up -d --no-deps panel 让 panel 容器用新镜像重建。
+		// Docker 看到镜像 hash 变了会自动 recreate 容器, 新二进制就是镜像里的,
+		// 不可能跑错。这是 Docker 标准用法, 不需要 systemctl、不需要 docker cp、
+		// 不需要从镜像里抠二进制。
+		//
+		// 关键顺序: setPullDone(true) 必须在 docker compose up -d panel 之前调用!
+		// 因为 up -d 会杀掉当前 panel 进程(也就是 gitPull 自己所在的 goroutine 所在进程),
+		// 必须先把"成功"状态持久化到文件, 新容器启动后前端轮询才能读到"成功"。
+		logWrite(">>> 预期: 运行版本 %s → %s (更新前 → 更新后)", oldVersion, newHead)
+		logWrite("在线更新完成！panel 容器即将用新镜像重建, 新版本立即生效")
+		logWrite(">>> 验证: 请刷新页面, 查看 GitHub 同步卡片的「运行版本」号是否已变化")
 
-	// 先把成功状态持久化(必须! 否则进程被杀后没机会写)
-	setPullDone(true)
+		// 先把成功状态持久化(必须! 否则进程被杀后没机会写)
+		setPullDone(true)
 
-	// 留 2 秒让日志和状态文件写盘
-	time.Sleep(2 * time.Second)
+		// 留 2 秒让日志和状态文件写盘
+		time.Sleep(2 * time.Second)
 
-	// 最后执行: 重建 panel 容器(这一步会杀掉当前进程)
-	//
-	// 修复 CRITICAL 2026-07-19 (事故 v3): 直接 exec docker compose up -d panel
-	// 会出现"只 Create 不 Start"。根因: docker compose CLI 是 panel 容器内进程,
-	// 通过 docker.sock 调用宿主机 dockerd。dockerd stop 旧 panel 容器时 SIGKILL
-	// 所有进程, 包括 docker compose CLI 自己。CLI 还没发完 stop/remove/create/start
-	// 全部 API 请求就被杀, dockerd 只收到部分请求(create 完成, start 没发), 结果
-	// 新容器 Created 但没 Started, panel 502 不恢复。
-	//
-	// 解法: 通过 helper 容器执行 docker compose up。
-	// helper 容器独立于 panel, panel 被 stop 不影响 helper, CLI 能完整发送所有
-	// API 请求给 dockerd, 容器能正常 recreate + start。
-	// helper 完成后自己 docker rm 自己, 不留痕迹。
-	//
-	// 命令分解:
-	//   docker run -d --name nexus-panel-restarter
-	//     -v /var/run/docker.sock:/var/run/docker.sock  # helper 也要调宿主机 docker
-	//     -v /root/nexus-panel:/repo                     # 仓库挂载, docker compose 需要
-	//     alpine:latest
-	//     sh -c 'sleep 3 &&                              # 等 panel 当前请求返回
-	//            cd /repo &&
-	//            docker compose up -d --no-deps panel && # 重建 panel 容器
-	//            docker rm -f nexus-panel-restarter'     # 清理自己
-	//
-	// 前置: 先清理可能存在的同名 helper 容器(上次失败残留)
-	logWrite(">>> 重建 panel 容器(通过 helper 容器, 避免自杀时序问题)")
-	_ = exec.Command("docker", "rm", "-f", "nexus-panel-restarter").Run()
-	// 关键: 仓库必须挂载到 /root/nexus-panel (与原项目目录一致),
-	// 否则 docker compose 项目名会变成挂载目录名(如 repo), 与原项目(nexus-panel)
-	// 不一致, 导致 docker compose 试图创建同名新容器, 报 "container name already in use"
-	helperCmd := exec.Command("docker", "run", "-d",
-		"--name", "nexus-panel-restarter",
-		"-v", "/var/run/docker.sock:/var/run/docker.sock",
-		"-v", "/root/nexus-panel:/root/nexus-panel",
-		"-w", "/root/nexus-panel",
-		"alpine:latest",
-		"sh", "-c",
-		"apk add --no-cache docker-cli docker-cli-compose >/dev/null 2>&1 && "+
-			"sleep 3 && "+
-			"docker compose up -d --no-deps panel && "+
-			"docker rm -f nexus-panel-restarter",
-	)
-	helperCmd.Dir = gitRoot
-	if out, err := helperCmd.CombinedOutput(); err != nil {
-		logWrite(">>> 警告: helper 容器启动失败, 回退到直接执行 docker compose up: %v", err)
-		logWrite(">>> 输出: %s", string(out))
-		// 回退: 直接执行(可能再现"只 Create 不 Start", 但至少尝试)
-		execCommandLog(gitRoot, "docker", "compose", "up", "-d", "--no-deps", "panel")
-	} else {
-		logWrite(">>> helper 容器已启动, 3 秒后将重建 panel 容器并自动清理")
-	}
-}()
-
+		// 最后执行: 重建 panel 容器(这一步会杀掉当前进程)
+		//
+		// 修复 CRITICAL 2026-07-19 (事故 v3): 直接 exec docker compose up -d panel
+		// 会出现"只 Create 不 Start"。根因: docker compose CLI 是 panel 容器内进程,
+		// 通过 docker.sock 调用宿主机 dockerd。dockerd stop 旧 panel 容器时 SIGKILL
+		// 所有进程, 包括 docker compose CLI 自己。CLI 还没发完 stop/remove/create/start
+		// 全部 API 请求就被杀, dockerd 只收到部分请求(create 完成, start 没发), 结果
+		// 新容器 Created 但没 Started, panel 502 不恢复。
+		//
+		// 解法: 通过 helper 容器执行 docker compose up。
+		// helper 容器独立于 panel, panel 被 stop 不影响 helper, CLI 能完整发送所有
+		// API 请求给 dockerd, 容器能正常 recreate + start。
+		// helper 完成后自己 docker rm 自己, 不留痕迹。
+		//
+		// 命令分解:
+		//   docker run -d --name nexus-panel-restarter
+		//     -v /var/run/docker.sock:/var/run/docker.sock  # helper 也要调宿主机 docker
+		//     -v /root/nexus-panel:/repo                     # 仓库挂载, docker compose 需要
+		//     alpine:latest
+		//     sh -c 'sleep 3 &&                              # 等 panel 当前请求返回
+		//            cd /repo &&
+		//            docker compose up -d --no-deps panel && # 重建 panel 容器
+		//            docker rm -f nexus-panel-restarter'     # 清理自己
+		//
+		// 前置: 先清理可能存在的同名 helper 容器(上次失败残留)
+		logWrite(">>> 重建 panel 容器(通过 helper 容器, 避免自杀时序问题)")
+		_ = exec.Command("docker", "rm", "-f", "nexus-panel-restarter").Run()
+		// 关键: 仓库必须挂载到与 panel 容器内一致的路径(即 gitRoot 原样映射),
+		// 否则 docker compose 项目名会变成挂载目录名(如 repo), 与原项目(nexus-panel)
+		// 不一致, 导致 docker compose 试图创建同名新容器, 报 "container name already in use"
+		// [fix 2026-07-20] 路径从硬编码 /root/nexus-panel 改为 gitRoot 动态获取,
+		// 支持项目迁移到 /opt/nexus-panel 等任意目录
+		helperCmd := exec.Command("docker", "run", "-d",
+			"--name", "nexus-panel-restarter",
+			"-v", "/var/run/docker.sock:/var/run/docker.sock",
+			"-v", gitRoot+":"+gitRoot,
+			"-w", gitRoot,
+			"alpine:latest",
+			"sh", "-c",
+			"apk add --no-cache docker-cli docker-cli-compose >/dev/null 2>&1 && "+
+				"sleep 3 && "+
+				"docker compose up -d --no-deps panel && "+
+				"docker rm -f nexus-panel-restarter",
+		)
+		helperCmd.Dir = gitRoot
+		if out, err := helperCmd.CombinedOutput(); err != nil {
+			logWrite(">>> 警告: helper 容器启动失败, 回退到直接执行 docker compose up: %v", err)
+			logWrite(">>> 输出: %s", string(out))
+			// 回退: 直接执行(可能再现"只 Create 不 Start", 但至少尝试)
+			execCommandLog(gitRoot, "docker", "compose", "up", "-d", "--no-deps", "panel")
+		} else {
+			logWrite(">>> helper 容器已启动, 3 秒后将重建 panel 容器并自动清理")
+		}
+	}()
 
 	response.OK(c, gin.H{"success": true, "msg": "更新已开始，请在日志面板查看实时进度"})
 }
@@ -1493,11 +1511,11 @@ func (h *AdminSystemHandler) DiskUsage(c *gin.Context) {
 // DiskCleanup POST /api/v1/admin/system/disk-cleanup
 // 清理无用文件: Docker 悬空镜像/容器、系统日志、临时文件、旧备份
 // 修复 STORAGE-CLEANUP-01/02/03 (P0):
-//   1. 旧版只清 .json 不清 .sql.gz, 导致数据库备份无限累积(真正的存储杀手)
-//   2. 旧版 docker system prune --volumes 会误删 pg-data/redis-data 等业务卷
-//   3. 旧版 keep_backup_count 默认 5 违反"自动备份仅保留最新一份"需求, 改为 1
-//   4. 新增 PostgreSQL VACUUM ANALYZE 回收死元组(traffic_logs 高频删除后膨胀)
-//   5. 新增 Docker build cache 清理(builder 缓存长期累积可达数 GB)
+//  1. 旧版只清 .json 不清 .sql.gz, 导致数据库备份无限累积(真正的存储杀手)
+//  2. 旧版 docker system prune --volumes 会误删 pg-data/redis-data 等业务卷
+//  3. 旧版 keep_backup_count 默认 5 违反"自动备份仅保留最新一份"需求, 改为 1
+//  4. 新增 PostgreSQL VACUUM ANALYZE 回收死元组(traffic_logs 高频删除后膨胀)
+//  5. 新增 Docker build cache 清理(builder 缓存长期累积可达数 GB)
 func (h *AdminSystemHandler) DiskCleanup(c *gin.Context) {
 	var req struct {
 		CleanDocker     bool `json:"clean_docker"`
@@ -1636,4 +1654,3 @@ func cleanupOldBackups(keep int) int {
 	}
 	return deleted
 }
-
