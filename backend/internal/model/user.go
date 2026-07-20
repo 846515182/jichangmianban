@@ -21,6 +21,7 @@ type User struct {
 	Status        string     `gorm:"type:varchar(16);default:'active';not null" json:"status"` // active / disabled / expired
 	LockUntil     *time.Time `gorm:"column:lock_until" json:"lock_until,omitempty"`
 	PlanID        *string    `gorm:"type:uuid" json:"plan_id,omitempty"`   // 当前套餐ID(nil=无套餐, 避免空串写入uuid列报错)
+	InviteCode    string     `gorm:"type:varchar(16)" json:"invite_code"`    // 邀请码(唯一, 永久有效, NULL=未生成)
 	Remark        string     `gorm:"type:varchar(255)" json:"remark"`
 	IsDeleted     bool       `gorm:"column:is_deleted;default:false" json:"-"`
 	CreatedAt     time.Time  `json:"created_at"`

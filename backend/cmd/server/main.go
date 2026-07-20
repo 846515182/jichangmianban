@@ -115,7 +115,9 @@ func main() {
 	nodeRepo := repo.NewNodeRepo(db)
 	// 修复 TRAFFIC-RESET-02 (P0): settingRepo 供 CronService 读取 settings.traffic.reset_day
 	settingRepo := repo.NewSettingRepo(db)
-	orderSvc := service.NewOrderService(orderRepo, planRepo, couponRepo, userRepo)
+	referralRepo := repo.NewReferralRepo(db)
+	referralSvc := service.NewReferralService(referralRepo, userRepo, settingRepo)
+	orderSvc := service.NewOrderService(orderRepo, planRepo, couponRepo, userRepo, referralSvc)
 	cronSvc := service.NewCronService(userRepo, orderSvc, nodeRepo, settingRepo, logger)
 	go func() {
 		tickerExpire := time.NewTicker(5 * time.Minute)

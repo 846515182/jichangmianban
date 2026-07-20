@@ -11,6 +11,9 @@ nexus-panel-new
 # node_agent 编译产物 (go build 输出, 不入库, 通过 Dockerfile 重建)
 node_agent/agent
 node_agent/nexus-agent
+# backend 目录下的 go build 输出
+backend/server
+backend/nexus-panel
 node_modules/
 dist/
 *.bak*

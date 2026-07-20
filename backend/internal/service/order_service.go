@@ -20,15 +20,16 @@ import (
 
 // OrderService 订单服务
 type OrderService struct {
-	orderRepo  *repo.OrderRepo
-	planRepo   *repo.PlanRepo
-	couponRepo *repo.CouponRepo
-	userRepo   *repo.UserRepo
+	orderRepo      *repo.OrderRepo
+	planRepo       *repo.PlanRepo
+	couponRepo     *repo.CouponRepo
+	userRepo       *repo.UserRepo
+	referralSvc    *ReferralService
 }
 
 // NewOrderService 创建订单服务
-func NewOrderService(o *repo.OrderRepo, p *repo.PlanRepo, c *repo.CouponRepo, u *repo.UserRepo) *OrderService {
-	return &OrderService{orderRepo: o, planRepo: p, couponRepo: c, userRepo: u}
+func NewOrderService(o *repo.OrderRepo, p *repo.PlanRepo, c *repo.CouponRepo, u *repo.UserRepo, r *ReferralService) *OrderService {
+	return &OrderService{orderRepo: o, planRepo: p, couponRepo: c, userRepo: u, referralSvc: r}
 }
 
 // CreateOrderInput 创建订单入参
@@ -372,7 +373,19 @@ func (s *OrderService) PaySuccess(orderNo, tradeNo string) error {
 			}
 		}
 		// 关键: 传入 tx, 使 setUserPlan 在同一事务内执行
-		return s.setUserPlan(tx, locked.UserID, plan, now)
+		if err := s.setUserPlan(tx, locked.UserID, plan, now); err != nil {
+			return err
+		}
+		// 邀请返利: 支付成功后在事务内发放(首单判断由 HandleOrderPaid 内部处理)
+		if s.referralSvc != nil {
+			if err := s.referralSvc.HandleOrderPaid(tx, &locked); err != nil {
+				// 返利失败不影响主流程, 记录告警, 运营后台可手动补发
+				if logger := app.Get().Logger; logger != nil {
+					logger.Warn("支付成功邀请返利失败(非致命)", zap.String("order_id", locked.ID), zap.Error(err))
+				}
+			}
+		}
+		return nil
 	})
 }
 

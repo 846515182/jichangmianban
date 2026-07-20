@@ -20,6 +20,7 @@ type Order struct {
 	TradeNo       string     `gorm:"type:varchar(128)" json:"trade_no"`                      // 第三方支付流水号
 	CouponID      *string    `gorm:"type:uuid" json:"coupon_id,omitempty"`                   // 使用的优惠券ID(审计)
 	CouponCode    string     `gorm:"type:varchar(32)" json:"coupon_code,omitempty"`          // 优惠券码快照(审计)
+	InviterID     *string    `gorm:"type:uuid" json:"inviter_id,omitempty"`                  // 邀请人ID(注册时绑定, 首单支付后发返利)
 	PaidAt        *time.Time `json:"paid_at,omitempty"`
 	ExpiredAt     time.Time  `json:"expired_at"` // 订单过期时间(15分钟)
 	IsDeleted     bool       `gorm:"column:is_deleted;default:false" json:"-"`

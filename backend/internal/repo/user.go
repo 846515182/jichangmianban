@@ -322,3 +322,19 @@ func (r *UserRepo) CreateInDB(db *gorm.DB, u *model.User) error {
 	}
 	return db.Create(u).Error
 }
+
+// GetByInviteCode 按邀请码查询用户
+func (r *UserRepo) GetByInviteCode(code string) (*model.User, error) {
+	var u model.User
+	if err := r.db.Where("invite_code = ? AND is_deleted = false", code).First(&u).Error; err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+// UpdateInviteCode 设置用户邀请码
+// 注意: 调用方需保证 code 唯一, 捕获唯一索引冲突后重试
+func (r *UserRepo) UpdateInviteCode(userID, code string) error {
+	return r.db.Model(&model.User{}).Where("id = ?", userID).
+		Update("invite_code", code).Error
+}

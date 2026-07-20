@@ -33,6 +33,7 @@ type Deps struct {
 	OrderRepo      *repo.OrderRepo
 	CouponRepo     *repo.CouponRepo
 	TicketRepo     *repo.TicketRepo
+	ReferralRepo   *repo.ReferralRepo
 
 	NodeSvc     *service.NodeService
 	UserSvc     *service.UserService
@@ -45,6 +46,7 @@ type Deps struct {
 	RegisterSvc *service.UserRegisterService
 	SysStatsSvc *service.SystemStatsService
 	TicketSvc   *service.TicketService
+	ReferralSvc *service.ReferralService
 }
 
 func NewDeps() *Deps {
@@ -63,10 +65,12 @@ func NewDeps() *Deps {
 	orderRepo := repo.NewOrderRepo(db)
 	couponRepo := repo.NewCouponRepo(db)
 	ticketRepo := repo.NewTicketRepo(db)
+	referralRepo := repo.NewReferralRepo(db)
 
 	jwtMgr := security.NewJWTManager(cfg.JWTSecret, cfg.JWTAccessTTL, cfg.JWTRefreshTTL)
 
-	orderSvc := service.NewOrderService(orderRepo, planRepo, couponRepo, userRepo)
+	referralSvc := service.NewReferralService(referralRepo, userRepo, settingRepo)
+	orderSvc := service.NewOrderService(orderRepo, planRepo, couponRepo, userRepo, referralSvc)
 	paymentSvc := service.NewPaymentService(settingRepo, orderSvc)
 	emailSvc := service.NewEmailService(settingRepo, cfg)
 
@@ -84,6 +88,7 @@ func NewDeps() *Deps {
 		OrderRepo:      orderRepo,
 		CouponRepo:     couponRepo,
 		TicketRepo:     ticketRepo,
+		ReferralRepo:   referralRepo,
 		NodeSvc:        service.NewNodeService(nodeRepo),
 		UserSvc:        service.NewUserService(userRepo),
 		SubSvc:         service.NewSubscribeService(subRepo, nodeRepo, userRepo),
@@ -95,6 +100,7 @@ func NewDeps() *Deps {
 		RegisterSvc:    service.NewUserRegisterService(userRepo, planRepo),
 		SysStatsSvc:    service.NewSystemStatsService(nodeRepo, userRepo),
 		TicketSvc:      service.NewTicketService(ticketRepo, userRepo, adminRepo),
+		ReferralSvc:    referralSvc,
 	}
 }
 
@@ -124,6 +130,8 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 	paymentH := NewPaymentHandler(deps.PaymentSvc)
 	couponH := NewCouponHandler(deps.CouponRepo, deps.OrderRepo)
 	ticketH := NewTicketHandler(deps.TicketSvc)
+	referralH := NewReferralHandler(deps.ReferralSvc)
+	adminReferralH := NewAdminReferralHandler(deps.ReferralSvc)
 
 	api := r.Group("/api/v1")
 
@@ -177,6 +185,12 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 		user.POST("/tickets", ticketH.UserCreateTicket)
 		user.POST("/tickets/:id/reply", ticketH.UserReplyTicket)
 		user.POST("/tickets/:id/close", ticketH.UserCloseTicket)
+		// 邀请返利
+		user.GET("/referral/invite-code", referralH.GetMyInviteCode)
+		user.GET("/referral/stats", referralH.GetReferralStats)
+		user.GET("/referral/invitations", referralH.ListInvitations)
+		user.GET("/referral/rewards", referralH.ListRewards)
+		user.POST("/referral/bind", referralH.BindInviteCode)
 	}
 
 	// 兼容老路径 /api/v1/tickets/* (与前端约定一致)
@@ -299,6 +313,12 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 		admin.DELETE("/coupons/:id", middleware.RBAC(middleware.PermFundManage), middleware.AuditAction("coupon.delete"), couponH.AdminCouponDelete)
 		admin.PATCH("/coupons/:id/status", middleware.RBAC(middleware.PermFundManage), middleware.AuditAction("coupon.toggle_status"), couponH.AdminCouponToggleStatus)
 
+		// 邀请返利管理
+		admin.GET("/referral/config", adminReferralH.GetReferralConfig)
+		admin.PUT("/referral/config", middleware.RBAC(middleware.PermFundManage), middleware.AuditAction("referral.config"), adminReferralH.UpdateReferralConfig)
+		admin.GET("/referrals", adminReferralH.AdminReferralList)
+		admin.GET("/referral/rewards", adminReferralH.AdminReferralRewards)
+
 		// 公告管理
 		announceAdminH := NewAdminAnnouncementHandler(deps.AnnounceRepo)
 		admin.GET("/announcements", announceAdminH.AdminListAnnouncements)
@@ -315,8 +335,8 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 		admin.GET("/tickets/:id", ticketH.AdminGetTicket)
 		admin.POST("/tickets/:id/reply", middleware.AuditAction("ticket.reply"), ticketH.AdminReplyTicket)
 		admin.POST("/tickets/:id/close", middleware.AuditAction("ticket.close"), ticketH.AdminCloseTicket)
-			// 管理员操作审计日志 (2026-07-14 新增)
-			admin.GET("/audit", middleware.RBAC(middleware.PermGlobalSec), systemH.AdminAuditLog)
+		// 管理员操作审计日志 (2026-07-14 新增)
+		admin.GET("/audit", middleware.RBAC(middleware.PermGlobalSec), systemH.AdminAuditLog)
 	}
 
 	r.NoRoute(func(c *gin.Context) {
