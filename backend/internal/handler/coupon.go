@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -78,15 +79,90 @@ func (h *CouponHandler) AdminCouponCreate(c *gin.Context) {
 	response.OK(c, coupon)
 }
 
-// AdminCouponDelete [43] DELETE /api/v1/admin/coupons/:id
-func (h *CouponHandler) AdminCouponDelete(c *gin.Context) {
+// updateCouponRequest 编辑优惠券入参(指针字段支持部分更新, 未传则保持原值)
+type updateCouponRequest struct {
+	Code           *string    `json:"code"`
+	Type           *string    `json:"type"`
+	Value          *int64     `json:"value"`
+	MinAmountCents *int64     `json:"min_amount_cents"`
+	MaxUses        *int       `json:"max_uses"`
+	ExpireAt       *time.Time `json:"expire_at"`
+	IsEnabled      *bool      `json:"is_enabled"`
+}
+
+// AdminCouponUpdate PUT /api/v1/admin/coupons/:id
+// 编辑优惠券(部分更新, 指针字段未传则保持原值)
+// 安全限制: type 字段不允许跨类型修改, 避免 value 单位混乱(percent 是 1-100 整数, fixed 是分)
+func (h *CouponHandler) AdminCouponUpdate(c *gin.Context) {
 	id := c.Param("id")
-	if _, err := h.couponRepo.GetByID(id); err != nil {
+	coupon, err := h.couponRepo.GetByID(id)
+	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			response.Fail(c, response.CodeNotFound)
 			return
 		}
 		response.Fail(c, response.CodeDBError)
+		return
+	}
+	var req updateCouponRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, response.CodeParamError)
+		return
+	}
+	// type 字段不允许跨类型修改, 防止 value 单位混乱(percent 是百分比整数, fixed 是分)
+	if req.Type != nil && *req.Type != coupon.Type {
+		response.FailMsg(c, response.CodeParamError, "不允许修改优惠券类型, 请重新创建")
+		return
+	}
+	if req.Code != nil && *req.Code != "" {
+		coupon.Code = *req.Code
+	}
+	if req.Value != nil {
+		if coupon.Type == model.CouponTypePercent && (*req.Value < 1 || *req.Value > 100) {
+			response.FailMsg(c, response.CodeParamError, "百分比折扣需在 1-100 之间")
+			return
+		}
+		if coupon.Type == model.CouponTypeFixed && *req.Value < 0 {
+			response.FailMsg(c, response.CodeParamError, "优惠金额不能为负")
+			return
+		}
+		coupon.Value = *req.Value
+	}
+	if req.MinAmountCents != nil {
+		coupon.MinAmountCents = *req.MinAmountCents
+	}
+	if req.MaxUses != nil {
+		coupon.MaxUses = *req.MaxUses
+	}
+	if req.ExpireAt != nil {
+		coupon.ExpireAt = req.ExpireAt
+	}
+	if req.IsEnabled != nil {
+		coupon.IsEnabled = *req.IsEnabled
+	}
+	if err := h.couponRepo.Update(coupon); err != nil {
+		response.Fail(c, response.CodeServerError)
+		return
+	}
+	response.OK(c, coupon)
+}
+
+// AdminCouponDelete [43] DELETE /api/v1/admin/coupons/:id
+// 安全检查(P2): 引用该优惠券的未完结订单存在时拒绝删除
+// 软删除后这些订单退款/取消时 DecrUsedSafeTx 会失败, 造成 used_count 永久虚高
+func (h *CouponHandler) AdminCouponDelete(c *gin.Context) {
+	id := c.Param("id")
+	coupon, err := h.couponRepo.GetByID(id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			response.Fail(c, response.CodeNotFound)
+			return
+		}
+		response.Fail(c, response.CodeDBError)
+		return
+	}
+	if count, err := h.orderRepo.CountActiveByCoupon(coupon.ID); err == nil && count > 0 {
+		response.FailMsg(c, response.CodeServerError, fmt.Sprintf("该优惠券仍有 %d 笔未完结订单引用，请先处理订单或禁用优惠券而非删除", count))
 		return
 	}
 	if err := h.couponRepo.SoftDelete(id); err != nil {

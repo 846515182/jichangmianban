@@ -93,6 +93,9 @@ func (s *OrderService) CreateOrder(in *CreateOrderInput) (*model.Order, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 0 元订单(100% 折扣): 直接标记已支付, 跳过支付网关
+	// 避免易支付网关拒绝 0 元订单导致用户卡死在 pending 状态
+	isFreeOrder := amount == 0
 	order := &model.Order{
 		OrderNo:       orderNo,
 		UserID:        in.UserID,
@@ -105,7 +108,12 @@ func (s *OrderService) CreateOrder(in *CreateOrderInput) (*model.Order, error) {
 		CouponCode:    couponCode,
 		ExpiredAt:     now.Add(15 * time.Minute),
 	}
-	// 事务: 订单创建 + 优惠券计数, 要么都成功要么都回滚
+	if isFreeOrder {
+		order.Status = model.OrderStatusPaid
+		order.PaidAt = &now
+		order.TradeNo = "FREE-" + orderNo
+	}
+	// 事务: 订单创建 + 优惠券计数 + (0 元订单)开通套餐, 要么都成功要么都回滚
 	db := app.Get().DB
 	err = db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(order).Error; err != nil {
@@ -114,6 +122,12 @@ func (s *OrderService) CreateOrder(in *CreateOrderInput) (*model.Order, error) {
 		if couponID != nil {
 			if err := s.couponRepo.IncrUsedSafeTx(tx, *couponID, now); err != nil {
 				return errors.New("优惠券已被抢用完, 请刷新重试")
+			}
+		}
+		// 0 元订单: 事务内直接开通套餐
+		if isFreeOrder {
+			if err := s.setUserPlan(tx, order.UserID, plan, now); err != nil {
+				return fmt.Errorf("免费订单开通套餐失败: %w", err)
 			}
 		}
 		return nil

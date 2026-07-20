@@ -92,7 +92,8 @@
           <el-input-number v-model="form.duration_days" :min="1" :max="3650" controls-position="right" style="width:100%" />
         </el-form-item>
         <el-form-item label="价格(元)" prop="price">
-          <el-input-number v-model="form.price" :min="0" :precision="2" controls-position="right" style="width:100%" />
+          <el-input-number v-model="form.price" :min="0.01" :precision="2" controls-position="right" style="width:100%" />
+          <span class="form-tip">价格需大于 0, 0 元套餐无法被用户购买</span>
         </el-form-item>
         <el-form-item label="原价(元)">
           <el-input-number v-model="form.original_price" :min="0" :precision="2" controls-position="right" style="width:100%" />
@@ -158,7 +159,7 @@ const formRef = ref<FormInstance>()
 const form = reactive({
   name: "", description: "", features: [] as string[], limitations: [] as string[],
   trafficLimitGB: 100, duration_days: 30,
-  price: 0, original_price: 0, device_limit: 3,
+  price: 0.01, original_price: 0, device_limit: 3,
   sort_order: 1, is_enabled: true,
 })
 
@@ -185,7 +186,7 @@ const openDialog = (row?: any) => {
     Object.assign(form, {
       name: "", description: "", features: [], limitations: [],
       trafficLimitGB: 100, duration_days: 30,
-      price: 0, original_price: 0, device_limit: 3,
+      price: 0.01, original_price: 0, device_limit: 3,
       sort_order: list.value.length + 1, is_enabled: true,
     })
   }

@@ -64,8 +64,9 @@
             />
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="160" fixed="right">
+        <el-table-column label="操作" width="200" fixed="right">
           <template #default="{ row }">
+            <el-button size="small" link type="primary" @click="openDialog(row)">编辑</el-button>
             <el-button size="small" link @click="copyCode(row)">复制</el-button>
             <el-button size="small" link type="danger" @click="handleDelete(row)">删除</el-button>
           </template>
@@ -73,19 +74,20 @@
       </el-table>
     </div>
 
-    <!-- 新增对话框 -->
+    <!-- 新增/编辑对话框 -->
     <el-dialog
       v-model="dialogVisible"
-      title="新增优惠券"
+      :title="editing ? '编辑优惠券' : '新增优惠券'"
       width="560px"
       destroy-on-close
     >
       <el-form ref="formRef" :model="form" :rules="rules" label-width="110px">
         <el-form-item label="优惠类型" prop="type">
-          <el-radio-group v-model="form.type">
+          <el-radio-group v-model="form.type" :disabled="!!editing">
             <el-radio value="percent">百分比折扣</el-radio>
             <el-radio value="fixed">固定金额</el-radio>
           </el-radio-group>
+          <span class="form-tip" v-if="editing">类型不可修改, 请删除后重建</span>
         </el-form-item>
         <el-form-item :label="form.type === 'percent' ? '折扣比例(%)' : '减免金额(元)'" prop="value">
           <el-input-number
@@ -127,7 +129,7 @@
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="handleSave">创建</el-button>
+        <el-button type="primary" :loading="saving" @click="handleSave">{{ editing ? '保存' : '创建' }}</el-button>
       </template>
     </el-dialog>
   </div>
@@ -193,6 +195,7 @@ const isExpired = (row: any): boolean => {
 // 对话框
 const dialogVisible = ref(false)
 const formRef = ref<FormInstance>()
+const editing = ref<Coupon | null>(null)
 const form = reactive({
   type: 'percent' as CouponType,
   value: 10,
@@ -209,20 +212,39 @@ const rules: FormRules = {
   totalCount: [{ required: true, message: '请输入发行总量', trigger: 'blur' }],
 }
 
+// 使用 Web Crypto API 生成密码学安全的随机优惠码
+// Math.random 是伪随机可预测, 攻击者可推测下一张优惠码进行薅羊毛
 const generateCode = () => {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+  const len = 8
+  const buf = new Uint32Array(len)
+  crypto.getRandomValues(buf)
   let code = ''
-  for (let i = 0; i < 8; i++) {
-    code += chars.charAt(Math.floor(Math.random() * chars.length))
+  for (let i = 0; i < len; i++) {
+    code += chars.charAt(buf[i] % chars.length)
   }
   form.code = code
 }
 
-const openDialog = () => {
-  Object.assign(form, {
-    type: 'percent', value: 10, minSpend: 0, totalCount: 100,
-    expireAt: '', isEnabled: true, code: '',
-  })
+const openDialog = (row?: Coupon) => {
+  editing.value = row || null
+  if (row) {
+    // 编辑: 从 row 加载, value/minSpend 从分转元(percent 的 value 是整数百分比, 直接用)
+    Object.assign(form, {
+      type: row.type,
+      value: row.type === 'percent' ? row.value : row.value / 100,
+      minSpend: row.min_amount_cents / 100,
+      totalCount: row.max_uses,
+      expireAt: row.expire_at || '',
+      isEnabled: row.is_enabled,
+      code: row.code,
+    })
+  } else {
+    Object.assign(form, {
+      type: 'percent', value: 10, minSpend: 0, totalCount: 100,
+      expireAt: '', isEnabled: true, code: '',
+    })
+  }
   dialogVisible.value = true
 }
 
@@ -237,7 +259,7 @@ const handleSave = async () => {
     }
     saving.value = true
     try {
-      // 修复 P1 bug: 字段名/单位对齐后端 createCouponRequest
+      // 修复 P1 bug: 字段名/单位对齐后端 createCouponRequest / updateCouponRequest
       // - fixed 类型 value 从元转分; percent 类型 value 直接为百分比整数
       // - min_amount_cents 从元转分
       // - expire_at: 后端 *time.Time 接受 RFC3339, el-date-picker value-format 已设为 RFC3339
@@ -252,12 +274,25 @@ const handleSave = async () => {
       }
       if (form.expireAt) payload.expire_at = form.expireAt
       try {
-        const res: any = await request.post('/api/v1/admin/coupons', payload)
-        const data = res?.data || res
-        if (data && data.id) {
-          list.value.unshift(data as Coupon)
-          ElMessage.success('优惠券创建成功')
-          dialogVisible.value = false
+        if (editing.value) {
+          // 编辑: PUT, 后端会忽略 type 跨类型修改
+          const res: any = await request.put(`/api/v1/admin/coupons/${editing.value.id}`, payload)
+          const data = res?.data || res
+          if (data && data.id) {
+            const idx = list.value.findIndex((c) => c.id === editing.value!.id)
+            if (idx >= 0) list.value[idx] = data as Coupon
+            ElMessage.success('优惠券已更新')
+            dialogVisible.value = false
+          }
+        } else {
+          // 创建: POST
+          const res: any = await request.post('/api/v1/admin/coupons', payload)
+          const data = res?.data || res
+          if (data && data.id) {
+            list.value.unshift(data as Coupon)
+            ElMessage.success('优惠券创建成功')
+            dialogVisible.value = false
+          }
         }
       } catch {
         // 错误提示已由 request 拦截器统一处理

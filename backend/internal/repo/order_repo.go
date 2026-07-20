@@ -142,6 +142,20 @@ func (r *OrderRepo) CountPaidByUserExcluding(userID, excludeOrderID string) (int
 	return n, nil
 }
 
+// CountActiveByCoupon 统计引用该优惠券的未完结订单数(pending/paid)
+// 用于删除优惠券前校验: 软删除后这些订单退款/取消时 DecrUsedSafeTx 会失败,
+// 造成优惠券 used_count 永久虚高, 影响后续用户使用
+func (r *OrderRepo) CountActiveByCoupon(couponID string) (int64, error) {
+	var n int64
+	if err := r.db.Model(&model.Order{}).
+		Where("coupon_id = ? AND is_deleted = false AND status IN ?",
+			couponID, []string{model.OrderStatusPending, model.OrderStatusPaid}).
+		Count(&n).Error; err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // ListExpiredSince 列出已过期(status=expired)且 expired_at >= since 的订单(掉单对账用)
 // 用于对账 cron 扫描"已过期但用户可能已付款"的订单, 兜底开通, 避免资金损失
 func (r *OrderRepo) ListExpiredSince(since time.Time) ([]model.Order, error) {

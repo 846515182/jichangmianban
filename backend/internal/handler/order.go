@@ -115,6 +115,11 @@ func (h *OrderHandler) PayOrder(c *gin.Context) {
 		response.Fail(c, response.CodeNotFound)
 		return
 	}
+	// 0 元订单(100% 折扣): 已在 CreateOrder 内直接标记 paid, 无需走支付网关
+	if order.Status == "paid" {
+		response.OK(c, gin.H{"pay_url": "", "status": "paid"})
+		return
+	}
 	if order.Status != "pending" {
 		response.FailMsg(c, response.CodeServerError, "订单状态不允许支付")
 		return

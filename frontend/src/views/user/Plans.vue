@@ -353,6 +353,13 @@ const createOrder = async () => {
       ElMessage.error('订单创建失败')
       return
     }
+    // 0 元订单(100% 折扣): 后端直接标记已支付, 跳过支付网关
+    if (data?.status === 'paid') {
+      ElMessage.success('订单已支付，套餐已激活')
+      purchaseVisible.value = false
+      router.push('/user/orders')
+      return
+    }
     ElMessage.success('订单已创建，正在生成支付链接')
     purchaseVisible.value = false
     await requestPay(orderId, orderNo)
@@ -368,6 +375,12 @@ const requestPay = async (orderId: string, orderNo: string) => {
   try {
     const res: any = await request.post(`/api/v1/user/orders/${orderId}/pay`)
     const data = res?.data || res
+    // 0 元订单(100% 折扣)已是已支付状态, 直接显示成功
+    if (data?.status === 'paid') {
+      ElMessage.success('订单已支付，套餐已激活')
+      router.push('/user/orders')
+      return
+    }
     const payUrl = data?.pay_url || ''
     lastOrderId.value = orderId
     lastOrderNo.value = orderNo

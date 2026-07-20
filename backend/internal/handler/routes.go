@@ -282,6 +282,7 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 
 		admin.GET("/coupons", couponH.AdminCouponList)
 		admin.POST("/coupons", middleware.AuditAction("coupon.create"), couponH.AdminCouponCreate)
+		admin.PUT("/coupons/:id", middleware.AuditAction("coupon.update"), couponH.AdminCouponUpdate)
 		admin.DELETE("/coupons/:id", middleware.AuditAction("coupon.delete"), couponH.AdminCouponDelete)
 		admin.PATCH("/coupons/:id/status", middleware.AuditAction("coupon.toggle_status"), couponH.AdminCouponToggleStatus)
 
