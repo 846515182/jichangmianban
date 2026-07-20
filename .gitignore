@@ -61,3 +61,6 @@ ssh_via_panel.py
 # Python 缓存
 __pycache__/
 *.pyc
+
+# 服务器特定配置(覆盖 volume 路径等), 各部署环境不同, 不纳入版本控制
+docker-compose.override.yml
