@@ -91,6 +91,26 @@ func getNodeAgentPath() string {
 	return "/app/node_agent"
 }
 
+// getHostProjectRoot 获取宿主机上的项目根目录
+// 用于通过 docker.sock 调用宿主机 docker 时的 -v 挂载源路径
+// 因为容器内路径 ≠ 宿主机路径，必须单独配置
+// 优先读 HOST_PROJECT_ROOT 环境变量，没配置则回退到容器内 getGitRoot() 的值（兼容旧部署）
+func getHostProjectRoot() string {
+	if p := os.Getenv("HOST_PROJECT_ROOT"); p != "" {
+		return p
+	}
+	return getGitRoot()
+}
+
+// getHostNodeAgentPath 获取宿主机上的 node_agent 目录路径
+// 用于在面板服务器上预编译 node-agent 二进制时的 docker run -v 挂载
+func getHostNodeAgentPath() string {
+	if p := os.Getenv("HOST_NODE_AGENT_PATH"); p != "" {
+		return p
+	}
+	return filepath.Join(getHostProjectRoot(), "node_agent")
+}
+
 // 从配置 PanelDomain 提取面板服务器公网 IP
 func getPanelIP() string {
 	// 优先用 PANEL_GRPC_HOST 环境变量(节点连面板用，避免 Cloudflare 域名无法转发 50051 端口)
@@ -796,7 +816,7 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 				time.Sleep(3 * time.Second)
 			}
 			// 优化: 使用 alpine 镜像替代 bullseye, 下载速度提升 3-5 倍, 体积缩小 70%
-			hostNodeAgentPath := "/root/nexus-panel/node_agent"
+			hostNodeAgentPath := getHostNodeAgentPath()
 			compileCmd := fmt.Sprintf(
 				"docker run --rm "+
 					"-v %s:/build -w /build "+
@@ -810,7 +830,10 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 			// 兜底: 编译失败可能是缓存问题, 清理 go mod cache 后重试
 			if retry == 1 && (strings.Contains(buildOut, "download") || strings.Contains(buildOut, "verify")) {
 				sse.event(PhaseBuild, "log", "", "检测到依赖下载问题, 清理模块缓存后重试...")
-				sshRunLocal("docker run --rm -v /root/nexus-panel/node_agent:/build -w /build golang:1.21-alpine sh -c 'go clean -modcache 2>/dev/null; true'")
+				cleanCacheCmd := fmt.Sprintf(
+					"docker run --rm -v %s:/build -w /build golang:1.21-alpine sh -c 'go clean -modcache 2>/dev/null; true'",
+					getHostNodeAgentPath())
+				sshRunLocal(cleanCacheCmd)
 			}
 		}
 		if buildErr != nil {
@@ -1535,7 +1558,7 @@ func fixSuggestion(errCode string) string {
 	case DeployErrSSHTimeout:
 		return "1) 检查网络连通性: ping <节点IP>\n2) 检查防火墙是否放行 SSH 端口\n3) 尝试 telnet <节点IP> 22"
 	case DeployErrBuild:
-		return "1) 检查 node_agent 源码是否完整\n2) 检查 Go 模块依赖: cd /root/nexus-panel/node_agent && go mod tidy\n3) 查看完整编译日志"
+		return "1) 检查 node_agent 源码是否完整\n2) 检查 Go 模块依赖: 进入面板 node_agent 目录执行 go mod tidy\n3) 查看完整编译日志"
 	case DeployErrTransfer:
 		return "1) 检查网络稳定性\n2) 确认磁盘有足够空间\n3) 重试部署"
 	case DeployErrStart:

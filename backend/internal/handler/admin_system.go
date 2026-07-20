@@ -1276,16 +1276,15 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		// 前置: 先清理可能存在的同名 helper 容器(上次失败残留)
 		logWrite(">>> 重建 panel 容器(通过 helper 容器, 避免自杀时序问题)")
 		_ = exec.Command("docker", "rm", "-f", "nexus-panel-restarter").Run()
-		// 关键: 仓库必须挂载到与 panel 容器内一致的路径(即 gitRoot 原样映射),
-		// 否则 docker compose 项目名会变成挂载目录名(如 repo), 与原项目(nexus-panel)
-		// 不一致, 导致 docker compose 试图创建同名新容器, 报 "container name already in use"
-		// [fix 2026-07-20] 路径从硬编码 /root/nexus-panel 改为 gitRoot 动态获取,
-		// 支持项目迁移到 /opt/nexus-panel 等任意目录
+		// 关键: 挂载源路径必须是宿主机路径(通过 docker.sock 调宿主机 docker),
+		// 不能用容器内路径, 否则 docker compose 找不到配置文件
+		// 用 HOST_PROJECT_ROOT 环境变量指定宿主机路径, 没配置则回退到 gitRoot
+		hostGitRoot := getHostProjectRoot()
 		helperCmd := exec.Command("docker", "run", "-d",
 			"--name", "nexus-panel-restarter",
 			"-v", "/var/run/docker.sock:/var/run/docker.sock",
-			"-v", gitRoot+":"+gitRoot,
-			"-w", gitRoot,
+			"-v", hostGitRoot+":"+hostGitRoot,
+			"-w", hostGitRoot,
 			"alpine:latest",
 			"sh", "-c",
 			"apk add --no-cache docker-cli docker-cli-compose >/dev/null 2>&1 && "+
@@ -1293,7 +1292,7 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 				"docker compose up -d --no-deps panel && "+
 				"docker rm -f nexus-panel-restarter",
 		)
-		helperCmd.Dir = gitRoot
+		helperCmd.Dir = hostGitRoot
 		if out, err := helperCmd.CombinedOutput(); err != nil {
 			logWrite(">>> 警告: helper 容器启动失败, 回退到直接执行 docker compose up: %v", err)
 			logWrite(">>> 输出: %s", string(out))

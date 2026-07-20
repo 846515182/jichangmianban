@@ -294,10 +294,31 @@ func (s *CronService) dropOldTrafficPartitions(db *gorm.DB) {
 	}
 }
 
+// getGitRoot 自动检测 git 仓库根目录(与 admin_system.go 保持一致)
+// 优先级: PROJECT_ROOT 环境变量 > 当前工作目录(含 docker-compose.yml) > /root/nexus-panel(历史兼容)
+func getGitRoot() string {
+	if root := os.Getenv("PROJECT_ROOT"); root != "" {
+		return root
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		if _, err := os.Stat(filepath.Join(cwd, "docker-compose.yml")); err == nil {
+			return cwd
+		}
+	}
+	return "/root/nexus-panel"
+}
+
+var (
+	gitRepoPath     = getGitRoot()
+	updateStateDir  = filepath.Join(getGitRoot(), ".update-state")
+	updateLogFile   = filepath.Join(getGitRoot(), ".update-state", "git-pull.log")
+	updateStateFile = filepath.Join(getGitRoot(), ".update-state", "git-pull.state")
+)
+
 // CleanUpdateLogs 兜底清理一键更新产生的日志残留
-// 问题: /root/nexus-panel/.update-state/git-pull.log 每次更新都会追加写,
-// 长期累积会膨胀到几十 MB. 后端虽有 GitPullClearLog API 供管理员手动清理,
-// 但用户经常忘记, 这里做兜底: 文件超过 7 天未修改 或 超过 5MB 时自动清空.
+// 每次更新都会追加写, 长期累积会膨胀到几十 MB.
+// 后端虽有 GitPullClearLog API 供管理员手动清理, 但用户经常忘记,
+// 这里做兜底: 文件超过 7 天未修改 或 超过 5MB 时自动清空.
 // 与 backupDir 一样, 路径对齐 docker-compose 挂载点, 容器重启后仍可清理.
 //
 // 清理策略(满足条件之一即清空):
@@ -305,11 +326,6 @@ func (s *CronService) dropOldTrafficPartitions(db *gorm.DB) {
 //   2. 文件 > 5MB(异常膨胀, 防磁盘吃满)
 //
 // 清理时机: 在 CleanOrphanData 的 cron(每 6 小时)中调用
-const (
-	updateStateDir  = "/root/nexus-panel/.update-state"
-	updateLogFile   = "/root/nexus-panel/.update-state/git-pull.log"
-	updateStateFile = "/root/nexus-panel/.update-state/git-pull.state"
-)
 
 func (s *CronService) CleanUpdateLogs() {
 	info, err := os.Stat(updateLogFile)
@@ -337,13 +353,10 @@ func (s *CronService) CleanUpdateLogs() {
 		zap.Bool("too_big", big))
 }
 
-// gitRepoPath 代码仓库路径, 容器内挂载点(与 docker-compose.yml 对齐)
-const gitRepoPath = "/root/nexus-panel"
-
 // gitPullStateFile 一键更新流程的状态文件, 与 admin_system.go 对齐
 // 内容: {"done":false,"success":false} 表示正在更新中
 //       {"done":true,"success":true} 表示更新完成
-const gitPullStateFile = "/root/nexus-panel/.update-state/git-pull.state"
+var gitPullStateFile = filepath.Join(getGitRoot(), ".update-state", "git-pull.state")
 
 // CheckVersionConsistency 版本一致性巡检(保守模式 - 只告警不重建)
 //
@@ -356,12 +369,12 @@ const gitPullStateFile = "/root/nexus-panel/.update-state/git-pull.state"
 //   - v3 (本版本): 完全放弃自动重建, 只告警。让人来决定是否修复。
 //
 // 本方法每 5 分钟跑一次, 对比:
-//   - 代码版本: /root/nexus-panel/.git/HEAD 解析出的 git HEAD short hash
+//   - 代码版本: 从 git 仓库读 HEAD short hash
 //   - 运行版本: app.Version (编译时 ldflags 注入的 git HEAD short hash)
 //
 // 不一致时:
 //   1. ERROR 日志告警(每次都打, 便于从 docker logs 看到问题)
-//   2. 写告警文件到 /root/nexus-panel/.update-state/version-mismatch.flag
+//   2. 写告警文件到 .update-state/version-mismatch.flag
 //      (前端 GitStatus 接口可读取此文件, 在面板显示"版本不一致, 请手动修复"提示)
 //   3. 绝不执行 docker compose up -d panel, 绝不杀 panel 进程
 //
@@ -411,19 +424,20 @@ func (s *CronService) CheckVersionConsistency() {
 		runningVersion, codeVersion, time.Now().Format(time.RFC3339))
 	_ = os.WriteFile(versionMismatchFlagFile, []byte(flagContent), 0644)
 
+	manualFixCmd := fmt.Sprintf("cd %s && docker compose build --build-arg VERSION=$(git rev-parse --short HEAD) panel && docker compose up -d --no-deps panel", gitRepoPath)
 	s.logger.Error("[版本一致性巡检] 检测到运行版本与代码版本不一致(只告警不自动修复)",
 		zap.String("running_version", runningVersion),
 		zap.String("code_version", codeVersion),
 		zap.String("repo", gitRepoPath),
 		zap.String("flag_file", versionMismatchFlagFile),
-		zap.String("manual_fix", "cd /root/nexus-panel && docker compose build --build-arg VERSION=$(git rev-parse --short HEAD) panel && docker compose up -d --no-deps panel"),
+		zap.String("manual_fix", manualFixCmd),
 		zap.String("note", "保守模式: cron 不自动重建容器, 需人工确认后手动执行上述命令"))
 }
 
 // versionMismatchFlagFile 版本不一致告警标记文件
 // 存在 = 当前有版本不一致问题, 前端可读取展示提示
 // 内容: running=<hash>\ncode=<hash>\ndetected_at=<time>
-const versionMismatchFlagFile = "/root/nexus-panel/.update-state/version-mismatch.flag"
+var versionMismatchFlagFile = filepath.Join(getGitRoot(), ".update-state", "version-mismatch.flag")
 
 // isGitPullInProgress 检查一键更新是否正在进行中
 // 判断依据: gitPullStateFile 存在 + 内容 done=false + mtime 距今 < 10 分钟

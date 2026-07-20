@@ -507,11 +507,11 @@ const buildDeploySteps = (node: { id?: string; server_address: string; node_toke
       title: '推送 node_agent 到节点服务器',
       host: '面板服务器',
       target: '节点服务器',
-      desc: 'node_agent 是节点代理程序源码，位于面板服务器 /root/nexus-panel/node_agent 目录。此步骤把它通过 scp 传到节点服务器，无需手动下载。',
+      desc: 'node_agent 是节点代理程序源码，位于面板服务器项目根目录的 node_agent 子目录。此步骤把它通过 scp 传到节点服务器，无需手动下载。',
       commands: [
         {
-          label: '推送 node_agent 目录到节点（会提示输入节点 root 密码）',
-          cmd: `scp -r /root/nexus-panel/node_agent root@${nodeIP}:${deployDir}`,
+          label: '推送 node_agent 目录到节点（会提示输入节点 root 密码，请替换为你的面板项目路径）',
+          cmd: `scp -r /path/to/nexus-panel/node_agent root@${nodeIP}:${deployDir}`,
         },
         {
           label: '顺便在节点服务器一键安装 Docker（若已安装可跳过）',

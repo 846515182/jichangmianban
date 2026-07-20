@@ -106,6 +106,9 @@ services:
     environment:
       DB_HOST: postgres
       REDIS_ADDR: redis:6379
+      # 告诉面板容器宿主机上的项目根目录路径
+      # helper 容器通过 docker.sock 调宿主机 docker 时需要用宿主机路径
+      HOST_PROJECT_ROOT: ${PWD:-/root/nexus-panel}
     ports:
       - "8080:8080"
       # gRPC 端口 - 节点 agent 通过此端口上报心跳和流量
@@ -115,11 +118,11 @@ services:
       - ./deployments/tls:/app/tls:ro
       - ./backups:/app/data/backup
       - ./node_agent:/app/node_agent
-      # 挂载宿主机 docker，让面板容器能调用宿主机 docker 编译 node-agent 二进制
-      # 用于一键部署时在面板服务器预编译，避免低内存节点现场编译 OOM
+      # 挂载宿主机项目目录，让面板容器能调用 docker compose 重建自己
+      # 用于一键部署时在面板服务器预编译 node-agent 二进制
       # 注意: 挂载宿主机 /usr/bin/docker 在 alpine 容器内无法运行(glibc 不兼容)
-      # 所以用静态编译的 docker CLI 放在 /root/nexus-panel/docker-cli/docker
-      - /root/nexus-panel:/root/nexus-panel:rw
+      # 所以用静态编译的 docker CLI
+      - ./:/root/nexus-panel:rw
       # !! [安全警告] docker.sock 挂载 + root 运行 = 容器可完全控制宿主机
       # 若面板被入侵，攻击者可访问宿主机所有容器和数据
       - /var/run/docker.sock:/var/run/docker.sock
