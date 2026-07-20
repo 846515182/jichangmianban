@@ -1292,7 +1292,12 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 				"docker compose up -d --no-deps panel && "+
 				"docker rm -f nexus-panel-restarter",
 		)
-		helperCmd.Dir = hostGitRoot
+		// 注意: 不能设置 helperCmd.Dir = hostGitRoot
+		// 因为 helperCmd 是在 panel 容器内执行的, hostGitRoot 是宿主机路径(如 /opt/nexus-panel),
+		// panel 容器内通常不存在该路径(挂载到 /root/nexus-panel), 会导致 Go exec 包 chdir 失败,
+		// 报 "chdir /opt/nexus-panel: no such file or directory", helper 容器启动失败,
+		// 回退到自杀式直接执行, 引发"只 Create 不 Start"+nginx 挂载路径错乱等连锁事故。
+		// docker run 命令本身不依赖执行进程的 cwd, -v/-w 参数已指定挂载和工作目录。
 		if out, err := helperCmd.CombinedOutput(); err != nil {
 			logWrite(">>> 警告: helper 容器启动失败, 回退到直接执行 docker compose up: %v", err)
 			logWrite(">>> 输出: %s", string(out))
