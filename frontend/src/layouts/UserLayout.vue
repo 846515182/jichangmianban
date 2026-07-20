@@ -94,6 +94,7 @@ const navItems = [
   { path: '/user/subscribe', title: '订阅', icon: 'Link' },
   { path: '/user/tickets', title: '工单', icon: 'ChatLineRound' },
   { path: '/user/announcements', title: '公告', icon: 'Bell' },
+  { path: '/user/referral', title: '邀请返利', icon: 'Present' },
   { path: '/user/profile', title: '个人中心', icon: 'User' },
 ]
 

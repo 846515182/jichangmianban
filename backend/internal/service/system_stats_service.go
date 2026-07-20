@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"nexus-panel/internal/repo"
@@ -309,14 +308,4 @@ func roundTo(v float64, digits int) float64 {
 	return float64(int64(v*mul+0.5)) / mul
 }
 
-// readDiskUsage 通过 statfs 读取指定路径所在文件系统的容量与剩余字节数
-func readDiskUsage(path string) (total, free uint64, err error) {
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(path, &stat); err != nil {
-		return 0, 0, err
-	}
-	// Bavail: 非超级用户可用的块数；Blocks: 总块数；Bsize: 块大小
-	total = stat.Blocks * uint64(stat.Bsize)
-	free = stat.Bavail * uint64(stat.Bsize)
-	return total, free, nil
-}
+// readDiskUsage 定义在 disk_linux.go / disk_other.go (平台特定实现)

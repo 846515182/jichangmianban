@@ -145,6 +145,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '系统公告' },
       },
       {
+        path: 'referral',
+        name: 'UserReferral',
+        component: () => import('@/views/user/Referral.vue'),
+        meta: { title: '邀请返利' },
+      },
+      {
         path: 'change-email',
         name: 'UserChangeEmail',
         component: () => import('@/views/user/ChangeEmail.vue'),

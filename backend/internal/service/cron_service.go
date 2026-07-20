@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -41,26 +40,26 @@ func NewCronService(u *repo.UserRepo, o *OrderService, n *repo.NodeRepo, sr *rep
 }
 
 func (s *CronService) ExpireOverdueUsers() {
-        now := time.Now()
-        count, err := s.userRepo.ExpireOverdueUsers(now)
-        if err != nil {
-                s.logger.Error("clean expired users failed", zap.Error(err))
-                return
-        }
-        if count > 0 {
-                s.logger.Info("cleaned expired users", zap.Int64("count", count))
-        }
+	now := time.Now()
+	count, err := s.userRepo.ExpireOverdueUsers(now)
+	if err != nil {
+		s.logger.Error("clean expired users failed", zap.Error(err))
+		return
+	}
+	if count > 0 {
+		s.logger.Info("cleaned expired users", zap.Int64("count", count))
+	}
 }
 
 func (s *CronService) ExpireOrders() {
-        count, err := s.orderSvc.ExpireOrders()
-        if err != nil {
-                s.logger.Error("clean expired orders failed", zap.Error(err))
-                return
-        }
-        if count > 0 {
-                s.logger.Info("cleaned expired orders", zap.Int("count", count))
-        }
+	count, err := s.orderSvc.ExpireOrders()
+	if err != nil {
+		s.logger.Error("clean expired orders failed", zap.Error(err))
+		return
+	}
+	if count > 0 {
+		s.logger.Info("cleaned expired orders", zap.Int("count", count))
+	}
 }
 
 // tryLock 尝试获取分布式锁，成功返回解锁函数，失败返回 nil
@@ -111,17 +110,17 @@ func (s *CronService) RunAll() {
 // 若节点 agent 上报异常/缺失,超额用户永远不会被停服("流量不停机")。
 // 每 5 分钟扫一次 users 表,凡 status='active' 且 traffic_used>=traffic_limit (>0) 全部标记。
 func (s *CronService) MarkTrafficExhausted() {
-        if s.userRepo == nil {
-                return
-        }
-        count, err := s.userRepo.MarkAllTrafficExhausted()
-        if err != nil {
-                s.logger.Error("mark traffic exhausted failed", zap.Error(err))
-                return
-        }
-        if count > 0 {
-                s.logger.Warn("已自动标记超额用户为 traffic_exhausted", zap.Int64("count", count))
-        }
+	if s.userRepo == nil {
+		return
+	}
+	count, err := s.userRepo.MarkAllTrafficExhausted()
+	if err != nil {
+		s.logger.Error("mark traffic exhausted failed", zap.Error(err))
+		return
+	}
+	if count > 0 {
+		s.logger.Warn("已自动标记超额用户为 traffic_exhausted", zap.Int64("count", count))
+	}
 }
 
 // CleanAggregateTrafficLogs 清理历史遗留的"幽灵用户"流量日志
@@ -168,18 +167,18 @@ func (s *CronService) CleanOrphanData() {
 		return
 	}
 
-        result := db.Exec(`
+	result := db.Exec(`
                 UPDATE subscriptions SET is_deleted = true, updated_at = NOW()
                 WHERE is_deleted = false
                 AND user_id NOT IN (SELECT id FROM users WHERE is_deleted = false)
         `)
-        if result.Error != nil {
-                s.logger.Error("clean orphan subscriptions failed", zap.Error(result.Error))
-        } else if result.RowsAffected > 0 {
-                s.logger.Info("cleaned orphan subscriptions", zap.Int64("count", result.RowsAffected))
-        }
+	if result.Error != nil {
+		s.logger.Error("clean orphan subscriptions failed", zap.Error(result.Error))
+	} else if result.RowsAffected > 0 {
+		s.logger.Info("cleaned orphan subscriptions", zap.Int64("count", result.RowsAffected))
+	}
 
-        result = db.Exec(`
+	result = db.Exec(`
                 UPDATE user_nodes SET is_deleted = true, updated_at = NOW()
                 WHERE is_deleted = false
                 AND (
@@ -187,30 +186,30 @@ func (s *CronService) CleanOrphanData() {
                         OR node_id NOT IN (SELECT id FROM nodes WHERE is_deleted = false)
                 )
         `)
-        if result.Error != nil {
-                s.logger.Error("clean orphan user_nodes failed", zap.Error(result.Error))
-        } else if result.RowsAffected > 0 {
-                s.logger.Info("cleaned orphan user_nodes", zap.Int64("count", result.RowsAffected))
-        }
+	if result.Error != nil {
+		s.logger.Error("clean orphan user_nodes failed", zap.Error(result.Error))
+	} else if result.RowsAffected > 0 {
+		s.logger.Info("cleaned orphan user_nodes", zap.Int64("count", result.RowsAffected))
+	}
 
-        result = db.Exec(`
+	result = db.Exec(`
                 DELETE FROM node_plan_bindings
                 WHERE node_id NOT IN (SELECT id FROM nodes WHERE is_deleted = false)
                 OR plan_id NOT IN (SELECT id FROM plans WHERE is_deleted = false)
         `)
-        if result.Error != nil {
-                s.logger.Error("clean orphan node_plan_bindings failed", zap.Error(result.Error))
-        } else if result.RowsAffected > 0 {
-                s.logger.Info("cleaned orphan node_plan_bindings", zap.Int64("count", result.RowsAffected))
-        }
+	if result.Error != nil {
+		s.logger.Error("clean orphan node_plan_bindings failed", zap.Error(result.Error))
+	} else if result.RowsAffected > 0 {
+		s.logger.Info("cleaned orphan node_plan_bindings", zap.Int64("count", result.RowsAffected))
+	}
 
-        cutOff := time.Now().AddDate(0, 0, -30)
-        result = db.Where("log_time < ?", cutOff).Delete(&model.TrafficLog{})
-        if result.Error != nil {
-                s.logger.Error("clean old traffic logs failed", zap.Error(result.Error))
-        } else if result.RowsAffected > 0 {
-                s.logger.Info("cleaned old traffic logs", zap.Int64("count", result.RowsAffected))
-        }
+	cutOff := time.Now().AddDate(0, 0, -30)
+	result = db.Where("log_time < ?", cutOff).Delete(&model.TrafficLog{})
+	if result.Error != nil {
+		s.logger.Error("clean old traffic logs failed", zap.Error(result.Error))
+	} else if result.RowsAffected > 0 {
+		s.logger.Info("cleaned old traffic logs", zap.Int64("count", result.RowsAffected))
+	}
 
 	// 修复 STORAGE-LOG-01 (P1): login_audit / admin_actions 两张审计表无任何清理,
 	// 长期运行会无限累积占用磁盘。保留 90 天, 超过则物理删除。
@@ -322,8 +321,8 @@ var (
 // 与 backupDir 一样, 路径对齐 docker-compose 挂载点, 容器重启后仍可清理.
 //
 // 清理策略(满足条件之一即清空):
-//   1. 文件 mtime 距今 > 7 天(更新日志已无参考价值)
-//   2. 文件 > 5MB(异常膨胀, 防磁盘吃满)
+//  1. 文件 mtime 距今 > 7 天(更新日志已无参考价值)
+//  2. 文件 > 5MB(异常膨胀, 防磁盘吃满)
 //
 // 清理时机: 在 CleanOrphanData 的 cron(每 6 小时)中调用
 
@@ -355,7 +354,8 @@ func (s *CronService) CleanUpdateLogs() {
 
 // gitPullStateFile 一键更新流程的状态文件, 与 admin_system.go 对齐
 // 内容: {"done":false,"success":false} 表示正在更新中
-//       {"done":true,"success":true} 表示更新完成
+//
+//	{"done":true,"success":true} 表示更新完成
 var gitPullStateFile = filepath.Join(getGitRoot(), ".update-state", "git-pull.state")
 
 // CheckVersionConsistency 版本一致性巡检(保守模式 - 只告警不重建)
@@ -373,10 +373,10 @@ var gitPullStateFile = filepath.Join(getGitRoot(), ".update-state", "git-pull.st
 //   - 运行版本: app.Version (编译时 ldflags 注入的 git HEAD short hash)
 //
 // 不一致时:
-//   1. ERROR 日志告警(每次都打, 便于从 docker logs 看到问题)
-//   2. 写告警文件到 .update-state/version-mismatch.flag
-//      (前端 GitStatus 接口可读取此文件, 在面板显示"版本不一致, 请手动修复"提示)
-//   3. 绝不执行 docker compose up -d panel, 绝不杀 panel 进程
+//  1. ERROR 日志告警(每次都打, 便于从 docker logs 看到问题)
+//  2. 写告警文件到 .update-state/version-mismatch.flag
+//     (前端 GitStatus 接口可读取此文件, 在面板显示"版本不一致, 请手动修复"提示)
+//  3. 绝不执行 docker compose up -d panel, 绝不杀 panel 进程
 //
 // 安全保障:
 //   - 用 Redis 分布式锁, 多副本/重启安全
@@ -483,8 +483,6 @@ func readGitHeadShort(repoPath string) string {
 	}
 	return ""
 }
-
-
 
 // MarkStaleNodesOffline 检测心跳超时的节点并标记为离线
 // 修复 BIZ-HEARTBEAT-01: 节点 gRPC 失联后自动标记 offline=true，
@@ -725,22 +723,15 @@ func (s *CronService) ReconcilePendingOrders() {
 
 // CheckDiskThreshold 修复 STORAGE-DISK-01 (P0): 此前没有任何磁盘阈值告警逻辑,
 // 日志/备份/缓存爆满会导致数据库写失败、服务崩溃。此方法:
-//  1. 通过 syscall.Statfs 读取根分区使用率;
+//  1. 通过 getRootDiskUsagePercent 读取根分区使用率;
 //  2. >=85% 触发 WARN 告警, >=95% 触发 ERROR 紧急告警;
 //  3. 通过 NotificationService 发邮件/Telegram(若已配置);
 //  4. Redis 1 小时冷却键防刷屏(同一告警级别 1h 内最多 1 次)。
 func (s *CronService) CheckDiskThreshold() {
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs("/", &stat); err != nil {
-		s.logger.Warn("读取磁盘使用率失败", zap.Error(err))
+	pct := getRootDiskUsagePercent()
+	if pct <= 0 {
 		return
 	}
-	total := stat.Blocks * uint64(stat.Bsize)
-	if total == 0 {
-		return
-	}
-	used := (stat.Blocks - stat.Bavail) * uint64(stat.Bsize)
-	pct := float64(used) * 100 / float64(total)
 
 	level := ""
 	if pct >= 95 {
@@ -762,8 +753,7 @@ func (s *CronService) CheckDiskThreshold() {
 		}
 	}
 
-	msg := fmt.Sprintf("磁盘告警 [%s]: 根分区使用率 %.1f%% (总计 %.1f GB, 已用 %.1f GB)",
-		level, pct, float64(total)/(1<<30), float64(used)/(1<<30))
+	msg := fmt.Sprintf("磁盘告警 [%s]: 根分区使用率 %.1f%%", level, pct)
 
 	if level == "critical" {
 		s.logger.Error(msg)
