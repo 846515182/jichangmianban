@@ -260,16 +260,14 @@ func (s *NodeServiceServer) GetConfig(ctx context.Context, req *nexuspb.GetConfi
 	}
 
 	// meta: 嵌入用户凭证列表
+	// 修复 P0-14: 旧实现下发 user_id/username/traffic_limit/traffic_used 等敏感信息,
+	// 被攻破的节点可拿这些信息冒充用户或分析业务数据。
+	// 节点 agent 只需要 UUID(Xray clients[].id)和 flow, 其余字段对节点无业务价值。
+	// 计费/到期判定均在面板侧完成, 节点侧无需感知。
 	creds := make([]map[string]interface{}, 0, len(users))
 	for _, u := range users {
 		creds = append(creds, map[string]interface{}{
-			"user_id":       u.ID,
-			"username":      u.Username,
-			"uuid":          u.ID, // users.id 即为 uuid
-			"traffic_limit": u.TrafficLimit,
-			"traffic_used":  u.TrafficUsed,
-			"status":        u.Status,
-			"expired_at":    expiredAtUnix(u.ExpiredAt),
+			"uuid": u.ID, // users.id 即为 uuid, 仅用于 Xray clients[].id
 		})
 	}
 	metaMap := map[string]interface{}{
@@ -535,14 +533,6 @@ func (s *NodeServiceServer) listActiveUsersForNode(node *model.Node) ([]model.Us
 	}
 	// 回退: 节点未配置绑定 → 返回所有活跃用户
 	return s.userRepo.ListActive()
-}
-
-// expiredAtUnix 把 *time.Time 转 unix(0=不限)
-func expiredAtUnix(t *time.Time) int64 {
-	if t == nil {
-		return 0
-	}
-	return t.Unix()
 }
 
 // hashString 计算字符串的 FNV-1a 哈希

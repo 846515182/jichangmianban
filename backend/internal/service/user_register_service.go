@@ -59,6 +59,14 @@ func (s *UserRegisterService) Register(in *RegisterInput) (*model.User, error) {
 	if !hasLetter || !hasDigit {
 		return nil, errors.New("密码必须包含字母和数字")
 	}
+	// 修复 P0-10: 旧实现先查重再 bcrypt(250ms), 放大 TOCTOU 竞态窗口。
+	// 现改为先 bcrypt 再查重, 缩短查重与创建之间的时间窗口。
+	// 最终一致性由 DB 唯一索引保证, 查重仅为给出友好提示。
+	hash, err := bcrypt.GenerateFromPassword([]byte(in.Password), bcryptCost)
+	if err != nil {
+		return nil, err
+	}
+
 	if existing, err := s.userRepo.GetByUsername(in.Username); err == nil && existing != nil {
 		return nil, ErrDuplicate
 	}
@@ -67,10 +75,6 @@ func (s *UserRegisterService) Register(in *RegisterInput) (*model.User, error) {
 	// 现在显式查 email(带 is_deleted=false 过滤), 命中则返回明确的"邮箱已注册"错误。
 	if existing, err := s.userRepo.GetByEmail(in.Email); err == nil && existing != nil {
 		return nil, ErrDuplicateEmail
-	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(in.Password), bcryptCost)
-	if err != nil {
-		return nil, err
 	}
 
 	// 默认 5GB 试用流量 (5 * 1024 * 1024 * 1024)
@@ -105,12 +109,31 @@ func (s *UserRegisterService) Register(in *RegisterInput) (*model.User, error) {
 		db = s.userRepo.GetDB() // 通过新增的方法获取默认 DB
 	}
 	if err := s.userRepo.CreateInDB(db, u); err != nil {
-		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
+		// 修复 P0-10: 用 errors.Is 判断唯一约束冲突, 替代脆弱的字符串匹配。
+		// gorm v2 支持 gorm.ErrDuplicatedKey (需配置 TranslateError)。
+		if errors.Is(err, gorm.ErrDuplicatedKey) || isDuplicateError(err) {
+			// 区分是 username 还是 email 冲���: 再查一次定位
+			if ex, e2 := s.userRepo.GetByEmail(in.Email); e2 == nil && ex != nil {
+				return nil, ErrDuplicateEmail
+			}
 			return nil, ErrDuplicate
 		}
 		return nil, err
 	}
 	return u, nil
+}
+
+// isDuplicateError 兼容老版本驱动: 判断是否为唯一约束冲突
+// gorm.ErrDuplicatedKey 需要配置 TranslateError, 未配置时回退到字符串匹配
+func isDuplicateError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "duplicate key") ||
+		strings.Contains(msg, "duplicate entry") ||
+		strings.Contains(msg, "unique constraint") ||
+		strings.Contains(msg, "23505")
 }
 
 func (s *UserRegisterService) SetUserPlan(userID string, planID string) error {

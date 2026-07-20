@@ -344,18 +344,17 @@ func parseMoneyToCents(money string) (int64, error) {
 
 // epaySign EPay 签名算法:
 // 1. 参数按 key 升序排序
-// 2. 过滤 sign 与 sign_type, 空值不参与
+// 2. 过滤 sign 与 sign_type(空值不过滤, 与 EPay 官方算法对齐)
 // 3. 拼接成 a=1&b=2 格式
 // 4. 末尾加上 key
 // 5. MD5 加密(小写 hex)
+//
+// 修复 P0-2: 旧实现过滤空值, 与 EPay 官方签名算法不一致(官方不过滤空值),
+// 存在签名绕过风险。现改为与官方对齐: 仅过滤 sign/sign_type, 保留空值参数。
 func epaySign(params map[string]string, key string) string {
 	keys := make([]string, 0, len(params))
 	for k := range params {
 		if k == "sign" || k == "sign_type" {
-			continue
-		}
-		v := params[k]
-		if v == "" {
 			continue
 		}
 		keys = append(keys, k)

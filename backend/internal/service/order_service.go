@@ -1,13 +1,17 @@
 package service
 
 import (
+	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"nexus-panel/internal/app"
 	"nexus-panel/internal/model"
@@ -96,6 +100,24 @@ func (s *OrderService) CreateOrder(in *CreateOrderInput) (*model.Order, error) {
 	// 0 元订单(100% 折扣): 直接标记已支付, 跳过支付网关
 	// 避免易支付网关拒绝 0 元订单导致用户卡死在 pending 状态
 	isFreeOrder := amount == 0
+	// 修复 P0-3: 0 元订单可被无限刷开通套餐。加每用户每日 1 次限频(Redis 计数),
+	// 防止配合 0 元券/0 元套餐批量白嫖流量和有效期。
+	// 无 Redis 时降级为不限制(与历史行为一致), 但记录告警便于排障。
+	if isFreeOrder {
+		if rdb := app.Get().RDB; rdb != nil {
+			key := fmt.Sprintf("freeorder:uid:%s:%s", in.UserID, now.Format("20060102"))
+			ctx := context.Background()
+			cnt, err := rdb.Incr(ctx, key).Result()
+			if err == nil {
+				if cnt == 1 {
+					rdb.Expire(ctx, key, 25*time.Hour)
+				}
+				if cnt > 1 {
+					return nil, errors.New("今日已领取免费套餐, 请明日再试或购买付费套餐")
+				}
+			}
+		}
+	}
 	order := &model.Order{
 		OrderNo:       orderNo,
 		UserID:        in.UserID,
@@ -117,6 +139,10 @@ func (s *OrderService) CreateOrder(in *CreateOrderInput) (*model.Order, error) {
 	db := app.Get().DB
 	err = db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(order).Error; err != nil {
+			// 修复 P0-1: 订单号碰撞(unique 冲突)转译为友好提示, 避免前端只看到"服务器错误"
+			if isUniqueViolation(err) {
+				return errors.New("订单创建繁忙, 请稍后重试")
+			}
 			return err
 		}
 		if couponID != nil {
@@ -126,7 +152,9 @@ func (s *OrderService) CreateOrder(in *CreateOrderInput) (*model.Order, error) {
 		}
 		// 0 元订单: 事务内直接开通套餐
 		if isFreeOrder {
-			if err := s.setUserPlan(tx, order.UserID, plan, now); err != nil {
+			// 修复 P0-3: 0 元订单不叠加有效期和流量, 直接覆盖,
+			// 防止反复刷 0 元订单无限累加 traffic_limit 和 expired_at
+			if err := s.setUserPlanWithMode(tx, order.UserID, plan, now, false); err != nil {
 				return fmt.Errorf("免费订单开通套餐失败: %w", err)
 			}
 		}
@@ -395,6 +423,7 @@ func (s *OrderService) AdminRefund(orderID, reason string) error {
 	if o.Status != model.OrderStatusPaid {
 		return errors.New("仅已支付订单可退款")
 	}
+	now := time.Now()
 	db := app.Get().DB
 	return db.Transaction(func(tx *gorm.DB) error {
 		var locked model.Order
@@ -404,6 +433,11 @@ func (s *OrderService) AdminRefund(orderID, reason string) error {
 		}
 		if locked.Status != model.OrderStatusPaid {
 			return errors.New("订单状态已变更, 无法退款")
+		}
+		// 修复 P0-4: 加载本订单对应的 plan, 用于回退叠加的 duration_days 和 traffic_limit
+		plan, err := s.planRepo.GetByID(locked.PlanID)
+		if err != nil {
+			return fmt.Errorf("退款加载套餐失败: %w", err)
 		}
 		if reason != "" {
 			suffix := " [refund:" + reason + "]"
@@ -425,8 +459,10 @@ func (s *OrderService) AdminRefund(orderID, reason string) error {
 		}
 		// 重置用户套餐：仅当本订单套餐 == 用户当前套餐，且无其它已支付订单时才重置，
 		// 避免退款一笔误杀用户其它有效订阅(蝴蝶效应 P0)
-		u, err := s.userRepo.GetByID(locked.UserID)
-		if err != nil {
+		// 修复 P0-4 + P1-6: 在事务内读取用户并加锁, 避免覆盖并发修改
+		var u model.User
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND is_deleted = false", locked.UserID).First(&u).Error; err != nil {
 			return fmt.Errorf("退款关联用户不存在: %w", err)
 		}
 		if u.PlanID != nil && *u.PlanID == locked.PlanID {
@@ -444,11 +480,43 @@ func (s *OrderService) AdminRefund(orderID, reason string) error {
 				u.DownloadBytes = 0
 				u.ExpiredAt = nil
 				u.Status = "expired"
-				if err := tx.Save(u).Error; err != nil {
+				if err := tx.Save(&u).Error; err != nil {
 					return fmt.Errorf("重置退款用户套餐失败: %w", err)
 				}
+			} else {
+				// 修复 P0-4: otherPaid>0 时, 退款应回退本订单叠加的权益,
+				// 而非直接保留(否则用户白嫖续费的天数和流量)。
+				// 按本订单 plan.DurationDays 和 plan.TrafficLimit 从当前额度扣减:
+				//   - expired_at 向前回退 duration_days(不早于 now)
+				//   - traffic_limit 扣减 plan.TrafficLimit(不低于 traffic_used, 保证计费一致)
+				changed := false
+				if plan.DurationDays > 0 && u.ExpiredAt != nil {
+					newExp := u.ExpiredAt.AddDate(0, 0, -plan.DurationDays)
+					if newExp.Before(now) {
+						newExp = now
+					}
+					u.ExpiredAt = &newExp
+					changed = true
+				}
+				if plan.TrafficLimit > 0 {
+					newLimit := u.TrafficLimit - plan.TrafficLimit
+					// 不低于已用量, 否则用户立即超额(保护用户)
+					if newLimit < u.TrafficUsed {
+						newLimit = u.TrafficUsed
+					}
+					if newLimit < 0 {
+						newLimit = 0
+					}
+					u.TrafficLimit = newLimit
+					changed = true
+				}
+				if changed {
+					if err := tx.Save(&u).Error; err != nil {
+						return fmt.Errorf("退款回退叠加权益失败: %w", err)
+					}
+				}
 			}
-			// otherPaid > 0: 用户仍有其它有效订阅, 保留套餐不重置(仅退款本笔金额)
+			// otherPaid > 0 之外: 用户仍有其它有效订阅, 保留套餐不重置(仅退款本笔金额)
 		}
 		// u.PlanID != locked.PlanID: 当前套餐非本订单所开, 不重置
 		return nil
@@ -518,12 +586,26 @@ func (s *OrderService) AdminCancelOrder(orderID, reason string) error {
 // 修复 F-11: 新增 tx 参数, tx 非空时用 tx.Save 而非 userRepo.Update,
 // 保证与订单状态变更在同一事务内, 避免"退款不退套餐"
 func (s *OrderService) setUserPlan(tx *gorm.DB, userID string, plan *model.Plan, now time.Time) error {
-	u, err := s.userRepo.GetByID(userID)
-	if err != nil {
+	return s.setUserPlanWithMode(tx, userID, plan, now, true)
+}
+
+// setUserPlanWithMode 修复 P0-3: allowRenew=false 时强制覆盖(不叠加),
+// 用于 0 元订单/免费套餐, 防止反复刷单无限累加流量和有效期。
+// allowRenew=true 时走原续费叠加逻辑(付费订单续费同套餐)。
+// 修复 P1-6: 在事务内读取用户(FOR UPDATE), 避免 lost update 覆盖并发修改。
+func (s *OrderService) setUserPlanWithMode(tx *gorm.DB, userID string, plan *model.Plan, now time.Time, allowRenew bool) error {
+	// 修复 P1-6: 在事务内读取并加锁, 避免 setUserPlan 读旧快照覆盖并发修改
+	var u model.User
+	queryDB := tx
+	if queryDB == nil {
+		queryDB = s.userRepo.GetDB()
+	}
+	if err := queryDB.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("id = ? AND is_deleted = false", userID).First(&u).Error; err != nil {
 		return err
 	}
 
-	isRenewSamePlan := u.PlanID != nil && *u.PlanID == plan.ID &&
+	isRenewSamePlan := allowRenew && u.PlanID != nil && *u.PlanID == plan.ID &&
 		u.ExpiredAt != nil && u.ExpiredAt.After(now) &&
 		u.Status == "active"
 
@@ -546,7 +628,7 @@ func (s *OrderService) setUserPlan(tx *gorm.DB, userID string, plan *model.Plan,
 
 	if plan.DurationDays > 0 {
 		base := now
-		if u.ExpiredAt != nil && u.ExpiredAt.After(now) {
+		if isRenewSamePlan && u.ExpiredAt != nil && u.ExpiredAt.After(now) {
 			base = *u.ExpiredAt
 		}
 		t := base.AddDate(0, 0, plan.DurationDays)
@@ -559,9 +641,9 @@ func (s *OrderService) setUserPlan(tx *gorm.DB, userID string, plan *model.Plan,
 		u.Status = "active"
 	}
 	if tx != nil {
-		return tx.Save(u).Error
+		return tx.Save(&u).Error
 	}
-	return s.userRepo.Update(u)
+	return s.userRepo.Update(&u)
 }
 
 // ApplyCoupon 校验优惠券并计算折扣金额(不持久化)
@@ -616,15 +698,30 @@ func calcCouponDiscount(c *model.Coupon, amount int64) (int64, error) {
 	}
 }
 
-// generateOrderNo 生成订单号: NP + yyyyMMddHHmmss + 6位随机数字
+// generateOrderNo 生成订单号: NP + yyyyMMddHHmmss + 8字节hex随机
+// 修复 P0-1: 旧实现 byte%10 仅用 0-9, 6 位熵仅 10^6, 同秒碰撞概率 1/10^6。
+// 改用 hex 编码 8 字节随机数(16 字符), 熵 2^64, 碰撞概率可忽略。
 func generateOrderNo() (string, error) {
-	b := make([]byte, 6)
+	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-	suffix := ""
-	for _, x := range b {
-		suffix += string(rune('0' + int(x%10)))
+	return "NP" + time.Now().Format("20060102150405") + hex.EncodeToString(b), nil
+}
+
+// isUniqueViolation 判断是否为唯一约束冲突(P0-1: 替代脆弱的字符串匹配)
+// 兼容 gorm v2 的 ErrDuplicatedKey 和 PG 的 23505 状态码
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
 	}
-	return "NP" + time.Now().Format("20060102150405") + suffix, nil
+	if errors.Is(err, gorm.ErrDuplicatedKey) {
+		return true
+	}
+	// 兼容老版本驱动: 检查 PG SQLSTATE 23505
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "duplicate key") ||
+		strings.Contains(msg, "duplicate entry") ||
+		strings.Contains(msg, "unique constraint") ||
+		strings.Contains(msg, "23505")
 }

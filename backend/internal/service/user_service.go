@@ -1,14 +1,14 @@
 package service
 
 import (
-        "errors"
-        "strings"
-        "time"
+	"errors"
+	"time"
 
-        "golang.org/x/crypto/bcrypt"
+	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 
-        "nexus-panel/internal/model"
-        "nexus-panel/internal/repo"
+	"nexus-panel/internal/model"
+	"nexus-panel/internal/repo"
 )
 
 // UserService 用户服务
@@ -61,12 +61,13 @@ func (s *UserService) CreateUser(in *CreateUserInput) (*model.User, error) {
                 u.ExpiredAt = &t
         }
         if err := s.repo.Create(u); err != nil {
-                if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
-                        return nil, ErrDuplicate
-                }
-                return nil, err
-        }
-        return u, nil
+		// 修复 P0-10: 用 errors.Is 判断唯一约束冲突, 替代脆弱的字符串匹配
+		if errors.Is(err, gorm.ErrDuplicatedKey) || isDuplicateError(err) {
+			return nil, ErrDuplicate
+		}
+		return nil, err
+	}
+	return u, nil
 }
 
 // BatchCreateUserInput 批量创建用户(导入)

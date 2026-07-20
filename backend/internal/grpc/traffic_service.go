@@ -160,14 +160,16 @@ func (s *TrafficServiceServer) ReportRealtime(ctx context.Context, req *nexuspb.
 			accepted++
 		}
 
-		// 处理节点聚合流量：分发到节点的真实用户
-		// 触发条件: userAgg 中存在任意一种聚合标记("node" 或占位 UUID)
+		// 处理节点聚合流量：仅累加节点总流量, 不再等分到用户
+		// 修复 P0-7: 旧实现把节点总流量 / 活跃用户数 等分到每个用户的 traffic_used,
+		// 计费严重失真(用 90GB 的用户和用 10GB 的用户被同等记账 10GB),
+		// 既少收又多收, 还会误标低流量用户为 traffic_exhausted 停服。
+		// 正确做法: 节点 agent 应解析 Xray stats API 获取每用户流量,
+		// 未上报用户级流量的节点不计入 traffic_used, 仅累加节点维度统计。
+		// nodeTotal 已在循环中累加, 此处从 userAgg 删除聚合标记, 避免后续 AddTrafficTx 误加。
 		for aggKey := range userAgg {
 			if isNodeAggregateUser(aggKey) {
-				nodeAgg := userAgg[aggKey]
-				s.distributeNodeTraffic(tx, req.GetNodeId(), node, nodeAgg.upload, nodeAgg.download)
 				delete(userAgg, aggKey)
-				break
 			}
 		}
 
@@ -273,24 +275,16 @@ func (s *TrafficServiceServer) recordNodeSpeed(nodeID string, deltaBytes int64) 
 
 // markUserExhaustedTx 在事务内检测用户是否超额，若是则将 status 改为 traffic_exhausted
 // 返回 (是否被标记, error)。条件: traffic_limit>0 且 traffic_used>=traffic_limit 且 status='active'
-// 注意: 使用 UpdateColumns 避免修改 updated_at(否则会触发节点配置版本号变更误判)
+//
+// 修复 P0-8: 旧实现先 SELECT 读 traffic_used 再应用层判断, 但 AddTrafficTx 用 gorm.Expr
+// 原子更新不会回写到事务内的 u 对象, 导致读到事务开始前的旧值, 漏判超额。
+// 现改为单条 UPDATE WHERE traffic_used>=traffic_limit 让 DB 判断, 完全消除读后判断竞态。
+// UpdateColumn 避免修改 updated_at(否则会触发节点配置版本号变更误判)。
 func markUserExhaustedTx(tx *gorm.DB, userID string) (bool, error) {
-	var u model.User
-	if err := tx.Select("traffic_limit, traffic_used, status").
-		Where("id = ? AND is_deleted = false", userID).First(&u).Error; err != nil {
-		return false, err
-	}
-	if u.TrafficLimit <= 0 || u.TrafficUsed < u.TrafficLimit {
-		return false, nil
-	}
-	if u.Status == "traffic_exhausted" {
-		return false, nil
-	}
-	if u.Status != "active" {
-		return false, nil // disabled/expired 用户不改状态
-	}
+	// 单条条件更新: 仅当 active 且已超额时改为 traffic_exhausted
+	// DB 在当前事务内可见 AddTrafficTx 已提交的最新值, 无读后判断竞态
 	res := tx.Model(&model.User{}).
-		Where("id = ? AND status = 'active'", userID).
+		Where("id = ? AND is_deleted = false AND status = 'active' AND traffic_limit > 0 AND traffic_used >= traffic_limit", userID).
 		UpdateColumn("status", "traffic_exhausted")
 	if res.Error != nil {
 		return false, res.Error
@@ -348,99 +342,13 @@ func (s *TrafficServiceServer) QueryUserTraffic(ctx context.Context, req *nexusp
 	}, nil
 }
 
-// distributeNodeTraffic 将 node-agent 上报的聚合流量分发到节点的真实用户
-// node-agent 当前仅能按 /proc/net/dev 汇总节点总流量,无法区分具体用户。
-// 此处按节点绑定的套餐/等级匹配活跃用户,**等分**节点流量到每个活跃用户,
-// 并写 traffic_log / AddTrafficTx 让 traffic_used 真实增长,
-// 这样 markUserExhaustedTx 后续才能把超额用户标 traffic_exhausted(防止"流量不停机")。
-// [S7 fix 2026-07-14] 旧的等分写库逻辑被禁用,导致 traffic_used 永不增长;
-// 2026-07-16 改进: 真正执行等分,但加单节点每小时 1 次的警告限速,避免日志刷屏;
-// 等分虽然不精确,但优于"完全丢弃"。长期方案: 节点 agent 解析 Xray access log。
+// distributeNodeTraffic [已废弃 P0-7] 旧的等分计费逻辑, 计费严重失真, 已停止调用。
+// 保留方法体供历史参考, 不再被 ReportRealtime 调用。
+// 长期方案: 节点 agent 解析 Xray stats API 上报每用户流量, 面板直接累加。
 func (s *TrafficServiceServer) distributeNodeTraffic(tx *gorm.DB, nodeID string, node *model.Node, totalUpload, totalDownload int64) {
-	total := totalUpload + totalDownload
-	if total <= 0 {
-		return
-	}
-
-	// 优先用套餐绑定查用户；无绑定时回退到所有活跃用户
-	planIDs, _ := s.nodeRepo.GetPlanIDsByNode(nodeID)
-	var users []model.User
-	var err error
-	if len(planIDs) > 0 {
-		users, err = s.userRepo.ListActiveForPlans(planIDs)
-	} else {
-		users, err = s.userRepo.ListActive()
-	}
-	if err != nil || len(users) == 0 {
-		// 无活跃用户是正常状态(新部署节点还没绑定用户), 降为 INFO 避免误报
-		if shouldLogS7Info(nodeID) {
-			s.logger.Info("S7: 节点暂无活跃用户, 聚合流量暂不分发",
-				zap.String("node_id", nodeID),
-				zap.Int64("total_upload", totalUpload),
-				zap.Int64("total_download", totalDownload))
-		}
-		return
-	}
-
-	// 等分到每个活跃用户
-	n := int64(len(users))
-	perUpload := totalUpload / n
-	perDownload := totalDownload / n
-	remUpload := totalUpload - perUpload*n
-	remDownload := totalDownload - perDownload*n
-
-	distributed := 0
-	for i, u := range users {
-		up := perUpload
-		dn := perDownload
-		if i == 0 {
-			up += remUpload
-			dn += remDownload
-		}
-		if up == 0 && dn == 0 {
-			continue
-		}
-		// 写 traffic_log(用真实 user_id,避免幽灵用户污染 TopUsers)
-		log := &model.TrafficLog{
-			UserID:        u.ID,
-			NodeID:        nodeID,
-			UploadBytes:   up,
-			DownloadBytes: dn,
-			LogTime:       time.Now(),
-		}
-		if err := s.trafficRepo.CreateLogTx(tx, log); err != nil {
-			if shouldLogS7Warn(nodeID) {
-				s.logger.Warn("S7: 写分布式流量日志失败",
-					zap.String("user_id", u.ID), zap.Error(err))
-			}
-			continue
-		}
-		// 累加 traffic_used(让 markUserExhaustedTx 能正确触发)
-		if err := s.userRepo.AddTrafficTx(tx, u.ID, up, dn); err != nil {
-			if shouldLogS7Warn(nodeID) {
-				s.logger.Warn("S7: 累加分布式流量失败",
-					zap.String("user_id", u.ID), zap.Error(err))
-			}
-			continue
-		}
-		// 检查是否超额 → 标 traffic_exhausted
-		if up+dn > 0 {
-			if _, mErr := markUserExhaustedTx(tx, u.ID); mErr != nil && shouldLogS7Warn(nodeID) {
-				s.logger.Warn("S7: 标记分布式用户超额失败",
-					zap.String("user_id", u.ID), zap.Error(mErr))
-			}
-		}
-		distributed++
-	}
-
-	// 限速 info 日志(同节点 1h 内最多 1 次)
-	if shouldLogS7Info(nodeID) {
-		s.logger.Info("S7: 节点聚合流量已等分到活跃用户",
-			zap.String("node_id", nodeID),
-			zap.Int64("total_upload", totalUpload),
-			zap.Int64("total_download", totalDownload),
-			zap.Int("user_count", len(users)),
-			zap.Int("distributed", distributed),
-		)
-	}
+	_ = s.nodeRepo
+	_ = nodeID
+	_ = node
+	_ = totalUpload
+	_ = totalDownload
 }

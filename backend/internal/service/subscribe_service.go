@@ -1,7 +1,10 @@
 package service
 
 import (
+	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,17 +41,22 @@ func NewSubscribeService(s *repo.SubscriptionRepo, n *repo.NodeRepo, u *repo.Use
 }
 
 // GenerateSignedURL 为用户生成带签名的订阅链接(有效期由配置决定)
-// clientIP 用于绑定签名，防止订阅链接被他人转用
+// 修复 P0-17: 签名加入 nonce 防重放, Redis 记录已用 nonce 阻断重复使用
 func (s *SubscribeService) GenerateSignedURL(userID, baseURL, clientIP string) (string, error) {
 	sub, err := s.subRepo.GetByUserID(userID)
 	if err != nil {
 		return "", err
 	}
 	hmacMgr := security.NewHMACManager(app.Get().Cfg.HMACSubSecret)
-	// 取消 IP 绑定：用户可能在不同设备/网络导入订阅，IP 绑定会导致验证失败
-	// 仅保留时间有效期（默认 5 分钟）即可保证安全性
-	sig, exp := hmacMgr.SignWithTTL(sub.SubToken, userID, app.Get().Cfg.SubSigTTL)
-	sigStr := hmacMgr.BuildSigStr(exp, sig)
+	_, exp := hmacMgr.SignWithTTL(sub.SubToken, userID, app.Get().Cfg.SubSigTTL)
+	// 修复 P0-17: 生成随机 nonce 并嵌入签名, 防止链接在 TTL 窗口内被重复使用
+	nonceBytes := make([]byte, 8)
+	if _, err := rand.Read(nonceBytes); err != nil {
+		return "", err
+	}
+	nonce := hex.EncodeToString(nonceBytes)
+	sigWithNonce := hmacMgr.SignWithNonce(sub.SubToken, userID, exp, nonce)
+	sigStr := hmacMgr.BuildSigStrWithNonce(exp, nonce, sigWithNonce)
 
 	u, err := url.Parse(strings.TrimRight(baseURL, "/") + "/api/v1/subscribe")
 	if err != nil {
@@ -72,7 +80,7 @@ type FetchResult struct {
 
 // Fetch 获取订阅内容
 // subType 为空时按 User-Agent 识别客户端
-// sig 格式: exp.signature
+// sig 格式: exp.signature (旧) 或 exp.nonce.signature (新, P0-17 防重放)
 func (s *SubscribeService) Fetch(userID, subType, sig, userAgent, clientIP string) (*FetchResult, error) {
 	// 1. 校验签名（仅校验时间有效期，不绑定 IP）
 	sub, err := s.subRepo.GetByUserID(userID)
@@ -82,6 +90,21 @@ func (s *SubscribeService) Fetch(userID, subType, sig, userAgent, clientIP strin
 	hmacMgr := security.NewHMACManager(app.Get().Cfg.HMACSubSecret)
 	if err := hmacMgr.VerifySigStr(sub.SubToken, userID, sig); err != nil {
 		return nil, ErrSubSigExpired
+	}
+	// 修复 P0-17: nonce 防重放 - 同一签名只允许使用一次
+	// 提取 nonce, 若存在则在 Redis 中标记已用(过期时间与签名 TTL 一致)
+	// 无 Redis 时降级为不防重放(与历史行为一致)
+	nonce := hmacMgr.ExtractNonce(sig)
+	if nonce != "" {
+		if rdb := app.Get().RDB; rdb != nil {
+			ctx := context.Background()
+			key := "subnonce:" + nonce
+			ok, err := rdb.SetNX(ctx, key, "1", app.Get().Cfg.SubSigTTL).Result()
+			if err == nil && !ok {
+				// nonce 已被使用, 拒绝重放
+				return nil, ErrSubSigExpired
+			}
+		}
 	}
 
 	// 2. 校验用户状态: 账号禁用 / 已到期 / 流量耗尽时返回空订阅(避免客户端报错)

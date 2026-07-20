@@ -61,16 +61,13 @@ func (s *UserSyncServiceServer) SyncUsers(ctx context.Context, req *nexuspb.Sync
 
 	creds := make([]*nexuspb.UserCredential, 0, len(users))
 	for _, u := range users {
+		// 修复 P0-14: 节点 agent 只需要 UUID(Xray clients[].id)做代理认证,
+		// 不需要 username/traffic_limit/traffic_used(计费在面板侧, 下发这些敏感信息
+		// 会让被攻破的节点获取业务数据)。proto 字段保留但置空, 兼容旧 agent。
 		creds = append(creds, &nexuspb.UserCredential{
-			UserId:       u.ID,
-			Username:     u.Username,
-			Uuid:         u.ID, // users.id 即为 uuid
-			Password:     "",   // VLESS+REALITY 不需要密码
-			TrafficLimit: u.TrafficLimit,
-			TrafficUsed:  u.TrafficUsed,
-			Status:       userStatusToProto(u.Status),
-			ExpiredAt:    expiredAtUnix(u.ExpiredAt),
-			Version:      u.UpdatedAt.Unix(),
+			Uuid:    u.ID, // users.id 即为 uuid, 仅用于 Xray clients[].id
+			Status:  userStatusToProto(u.Status),
+			Version: u.UpdatedAt.Unix(),
 		})
 	}
 
