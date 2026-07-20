@@ -2,7 +2,10 @@ package handler
 
 import (
 	"context"
+	"crypto/rand"
+	"fmt"
 	"log"
+	"math/big"
 	"net/http"
 	"strings"
 	"time"
@@ -16,14 +19,16 @@ import (
 	"nexus-panel/internal/repo"
 	"nexus-panel/internal/response"
 	"nexus-panel/internal/security"
+	"nexus-panel/internal/service"
 )
 
 // AuthHandler 认证处理器
 type AuthHandler struct {
-	adminRepo     *repo.AdminRepo
-	userRepo      *repo.UserRepo
+	adminRepo      *repo.AdminRepo
+	userRepo       *repo.UserRepo
 	loginAuditRepo *repo.LoginAuditRepo
-	jwtMgr        *security.JWTManager
+	jwtMgr         *security.JWTManager
+	emailSvc       *service.EmailService // P0-2: 用于发送邮箱验证码
 }
 
 // bcryptCost 与 service.user_register_service / service.user_service 保持一致,
@@ -31,8 +36,8 @@ type AuthHandler struct {
 const bcryptCost = 12
 
 // NewAuthHandler 创建认证处理器
-func NewAuthHandler(a *repo.AdminRepo, u *repo.UserRepo, la *repo.LoginAuditRepo, jwtMgr *security.JWTManager) *AuthHandler {
-	return &AuthHandler{adminRepo: a, userRepo: u, loginAuditRepo: la, jwtMgr: jwtMgr}
+func NewAuthHandler(a *repo.AdminRepo, u *repo.UserRepo, la *repo.LoginAuditRepo, jwtMgr *security.JWTManager, emailSvc *service.EmailService) *AuthHandler {
+	return &AuthHandler{adminRepo: a, userRepo: u, loginAuditRepo: la, jwtMgr: jwtMgr, emailSvc: emailSvc}
 }
 
 // loginRequest 登录请求
@@ -231,6 +236,14 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 		response.Fail(c, response.CodeTokenInvalid)
 		return
 	}
+	// 修复 P0-1: 校验 token 版本号, 防止用户改密/注销后旧 refresh token 仍可换新 access token
+	// bumpTokenVersion 会在 LogoutAll/ChangePassword 时自增 tokver:<role>:<id>,
+	// 旧 token 中的 claims.TokenVer 与当前版本不一致则拒绝刷新
+	currentVer := getCurrentTokenVersion(c.Request.Context(), claims.UserID, claims.Role)
+	if claims.TokenVer != currentVer {
+		response.Fail(c, response.CodeTokenInvalid)
+		return
+	}
 	// 签发新的 token 对(轮换) - 携带当前 token 版本号, 防止注销所有设备后用户用旧 refresh 续命
 	ver := getCurrentTokenVersion(c.Request.Context(), claims.UserID, claims.Role)
 	access, refresh, err := h.jwtMgr.GenerateTokenPairWithVer(claims.UserID, claims.Username, claims.Role, ver)
@@ -389,8 +402,8 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 // LogoutAll [POST] /api/v1/auth/logout-all
 // 鉴权: AnyAuth
 // 逻辑:
-//  - 提升 token version(存 Redis: tokver:<role>:<id>), 旧 token 在下次请求中将被拒绝
-//  - 提示: 前端需跳到登录页
+//   - 提升 token version(存 Redis: tokver:<role>:<id>), 旧 token 在下次请求中将被拒绝
+//   - 提示: 前端需跳到登录页
 func (h *AuthHandler) LogoutAll(c *gin.Context) {
 	claims := middleware.GetClaims(c)
 	if claims == nil {
@@ -458,4 +471,169 @@ func atoiDefault(s string, def int) int {
 		n = n*10 + int(ch-'0')
 	}
 	return n
+}
+
+// ============================================================
+// P0-2 修复: 邮箱验证码 + 修改邮箱 (ChangeEmail.vue 配套)
+// ============================================================
+
+// sendEmailCodeRequest 发送邮箱验证码请求
+type sendEmailCodeRequest struct {
+	Email string `json:"email" binding:"required,email"`
+	Type  string `json:"type" binding:"required,oneof=register change_email"`
+}
+
+// SendEmailCode [POST] /api/v1/email/send-code
+// 鉴权: AnyAuth (改邮箱场景需要登录; 注册场景由调用方决定是否带 token)
+// 逻辑:
+//  1. 校验邮箱格式
+//  2. change_email 场景: 检查新邮箱是否已被占用
+//  3. 生成 6 位数字验证码, 存入 Redis (key: emailcode:<type>:<email>, TTL 5min)
+//  4. 调用 EmailService.SendMail 发送验证码邮件
+func (h *AuthHandler) SendEmailCode(c *gin.Context) {
+	var req sendEmailCodeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, response.CodeParamError)
+		return
+	}
+
+	// change_email 场景: 检查新邮箱是否已被占用
+	if req.Type == "change_email" {
+		if existing, err := h.userRepo.GetByEmail(req.Email); err == nil && existing != nil {
+			response.FailMsg(c, response.CodeDuplicate, "邮箱已被占用")
+			return
+		}
+	}
+
+	// 生成 6 位数字验证码
+	code, err := generateNumericCode(6)
+	if err != nil {
+		response.Fail(c, response.CodeServerError)
+		return
+	}
+
+	// 存入 Redis, 5 分钟过期
+	rdb := app.Get().RDB
+	if rdb == nil {
+		response.FailMsg(c, response.CodeServerError, "缓存服务不可用")
+		return
+	}
+	ctx := c.Request.Context()
+	key := "emailcode:" + req.Type + ":" + req.Email
+	if err := rdb.Set(ctx, key, code, 5*time.Minute).Err(); err != nil {
+		response.Fail(c, response.CodeServerError)
+		return
+	}
+
+	// 发送邮件
+	if h.emailSvc != nil {
+		subject := "Nexus Panel 验证码"
+		body := fmt.Sprintf("您的验证码是: %s\n\n验证码 5 分钟内有效, 请勿告知他人。", code)
+		if err := h.emailSvc.SendMail([]string{req.Email}, subject, body); err != nil {
+			response.FailMsg(c, response.CodeServerError, "邮件发送失败: "+err.Error())
+			return
+		}
+	} else {
+		log.Printf("[Auth] emailSvc 未注入, 验证码 %s (开发模式, 仅日志)", code)
+	}
+
+	response.OKMsg(c, "验证码已发送")
+}
+
+// changeEmailRequest 修改邮箱请求
+type changeEmailRequest struct {
+	NewEmail string `json:"new_email" binding:"required,email"`
+	Code     string `json:"code" binding:"required"`
+	Password string `json:"password" binding:"required"`
+}
+
+// ChangeEmail [POST] /api/v1/auth/change-email
+// 鉴权: AnyAuth
+// 逻辑:
+//  1. 从 JWT claims 取出当前主体(role+id)
+//  2. 校验当前密码(防止会话被劫持后改邮箱)
+//  3. 从 Redis 取验证码并校验, 校验通过后立即删除(一次性)
+//  4. 检查新邮箱是否已被占用
+//  5. 更新邮箱
+//  6. bumpTokenVersion 强制其他设备重新登录
+func (h *AuthHandler) ChangeEmail(c *gin.Context) {
+	var req changeEmailRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, response.CodeParamError)
+		return
+	}
+	claims := middleware.GetClaims(c)
+	if claims == nil {
+		response.Fail(c, response.CodeTokenInvalid)
+		return
+	}
+	ctx := c.Request.Context()
+
+	// 仅支持 user 角色改邮箱(admin 邮箱由系统管理)
+	if claims.Role != security.RoleUser {
+		response.FailMsg(c, response.CodeParamError, "仅用户可修改邮箱")
+		return
+	}
+
+	// 1. 校验当前密码
+	user, err := h.userRepo.GetByID(claims.UserID)
+	if err != nil {
+		response.Fail(c, response.CodeAccountPwdError)
+		return
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
+		response.Fail(c, response.CodeAccountPwdError)
+		return
+	}
+
+	// 2. 校验验证码(一次性, 校验后立即删除)
+	rdb := app.Get().RDB
+	if rdb == nil {
+		response.FailMsg(c, response.CodeServerError, "缓存服务不可用")
+		return
+	}
+	codeKey := "emailcode:change_email:" + req.NewEmail
+	storedCode, err := rdb.Get(ctx, codeKey).Result()
+	if err != nil {
+		response.FailMsg(c, response.CodeParamError, "验证码已过期, 请重新获取")
+		return
+	}
+	if storedCode != req.Code {
+		response.FailMsg(c, response.CodeParamError, "验证码错误")
+		return
+	}
+	// 一次性: 立即删除
+	rdb.Del(ctx, codeKey)
+
+	// 3. 检查新邮箱是否已被占用
+	if existing, err := h.userRepo.GetByEmail(req.NewEmail); err == nil && existing != nil {
+		response.FailMsg(c, response.CodeDuplicate, "邮箱已被占用")
+		return
+	}
+
+	// 4. 更新邮箱
+	user.Email = req.NewEmail
+	if err := h.userRepo.Update(user); err != nil {
+		response.Fail(c, response.CodeDBError)
+		return
+	}
+
+	// 5. 强制其他设备重新登录(改邮箱应触发重新认证)
+	_ = bumpTokenVersion(ctx, claims.UserID, claims.Role)
+
+	response.OKMsg(c, "邮箱已修改")
+}
+
+// generateNumericCode 生成指定长度的数字验证码(密码学安全)
+func generateNumericCode(length int) (string, error) {
+	if length <= 0 {
+		return "", fmt.Errorf("length must be positive")
+	}
+	max := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(length)), nil)
+	n, err := rand.Int(rand.Reader, max)
+	if err != nil {
+		return "", err
+	}
+	// 前导零补齐
+	return fmt.Sprintf("%0*d", length, n), nil
 }

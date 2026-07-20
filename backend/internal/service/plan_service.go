@@ -54,12 +54,23 @@ type UpdatePlanInput struct {
 }
 
 // CreatePlan 创建套餐
+// 修复 P1-4: 增加 original_price >= price 校验, 避免创建 "原价 10 售价 50" 荒谬套餐
 func (s *PlanService) CreatePlan(in *CreatePlanInput) (*model.Plan, error) {
 	if in.Name == "" {
 		return nil, errors.New("套餐名称不能为空")
 	}
 	if in.PriceCents < 0 {
 		return nil, errors.New("价格不能为负")
+	}
+	// 修复 P1-4: 原价(划线价)若提供则必须 >= 实际售价, 否则营销逻辑荒谬
+	if in.OriginalPriceCents > 0 && in.OriginalPriceCents < in.PriceCents {
+		return nil, errors.New("原价不能小于售价")
+	}
+	if in.TrafficLimit < 0 {
+		return nil, errors.New("流量上限不能为负")
+	}
+	if in.DurationDays < 0 {
+		return nil, errors.New("时长不能为负")
 	}
 	p := &model.Plan{
 		Name:               in.Name,
@@ -86,11 +97,32 @@ func (s *PlanService) CreatePlan(in *CreatePlanInput) (*model.Plan, error) {
 //   - 不修改用户的 expired_at(避免缩短已付费用户有效期)
 //   - 不修改 traffic_used(不清零已用流量)
 //   - 节点可见性由 node_plan_bindings 表决定
+//
+// 修复 P0-5: 仅在 TrafficLimit 实际变化时才调用 SyncUsersByPlanID
+// 原代码无条件同步, 导致管理员只改 name/is_enabled/sort_order 时,
+// 用户手动调整的 traffic_limit 被静默覆盖回套餐默认值
+// 修复 P1-4: 同步增加 original_price >= price 校验
 func (s *PlanService) UpdatePlan(id string, in *UpdatePlanInput) (*model.Plan, error) {
 	p, err := s.repo.GetByID(id)
 	if err != nil {
 		return nil, err
 	}
+	// 修复 P1-4: 价格合理性校验(同时考虑新旧值组合)
+	newPriceCents := p.PriceCents
+	if in.PriceCents != nil {
+		newPriceCents = *in.PriceCents
+	}
+	newOriginalPriceCents := p.OriginalPriceCents
+	if in.OriginalPriceCents != nil {
+		newOriginalPriceCents = *in.OriginalPriceCents
+	}
+	if newOriginalPriceCents > 0 && newOriginalPriceCents < newPriceCents {
+		return nil, errors.New("原价不能小于售价")
+	}
+
+	// 记录旧 TrafficLimit, 用于判断是否需要同步用户配额
+	oldTrafficLimit := p.TrafficLimit
+
 	if in.Name != nil {
 		p.Name = *in.Name
 	}
@@ -128,14 +160,18 @@ func (s *PlanService) UpdatePlan(id string, in *UpdatePlanInput) (*model.Plan, e
 		p.IsTrial = *in.IsTrial
 	}
 
-	// 事务: 更新套餐 + 同步已购该套餐的用户(仅同步 traffic_limit)
+	// 事务: 更新套餐 + (可选)同步已购该套餐的用户 traffic_limit
 	err = s.repo.DB().Transaction(func(tx *gorm.DB) error {
 		if err := tx.Save(p).Error; err != nil {
 			return err
 		}
-		// 同步 users 表的 traffic_limit(不修改 expired_at/traffic_used)
-		if err := s.repo.SyncUsersByPlanID(tx, p.ID, p.TrafficLimit); err != nil {
-			return err
+		// 修复 P0-5: 仅在 TrafficLimit 实际变化时才同步用户配额
+		// 避免管理员改 name/is_enabled/sort_order 时覆盖用户手动调整的配额
+		// (如 VIP 用户被手动调到 200GB, 任意套餐字段更新后被静默覆盖回 100GB)
+		if p.TrafficLimit != oldTrafficLimit {
+			if err := s.repo.SyncUsersByPlanID(tx, p.ID, p.TrafficLimit); err != nil {
+				return err
+			}
 		}
 		return nil
 	})

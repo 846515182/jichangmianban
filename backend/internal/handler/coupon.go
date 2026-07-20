@@ -82,6 +82,9 @@ func (h *CouponHandler) AdminCouponCreate(c *gin.Context) {
 }
 
 // updateCouponRequest 编辑优惠券入参(指针字段支持部分更新, 未传则保持原值)
+// 修复 P0-4: 新增 clear_expire_at 字段, 显式标记清空过期时间
+// 原因: *time.Time 无法区分 "null 清空" 和 "字段缺失不改", 二者都为 nil,
+// 导致前端发 expire_at: null 时被当作 "未传" 而跳过赋值, 清空功能失效
 type updateCouponRequest struct {
 	Code           *string    `json:"code"`
 	Type           *string    `json:"type"`
@@ -89,6 +92,7 @@ type updateCouponRequest struct {
 	MinAmountCents *int64     `json:"min_amount_cents"`
 	MaxUses        *int       `json:"max_uses"`
 	ExpireAt       *time.Time `json:"expire_at"`
+	ClearExpireAt  *bool      `json:"clear_expire_at"` // ✅ 显式清空过期时间(优先级高于 expire_at)
 	IsEnabled      *bool      `json:"is_enabled"`
 }
 
@@ -136,7 +140,12 @@ func (h *CouponHandler) AdminCouponUpdate(c *gin.Context) {
 	if req.MaxUses != nil {
 		coupon.MaxUses = *req.MaxUses
 	}
-	if req.ExpireAt != nil {
+	// 修复 P0-4: 优先处理 clear_expire_at(显式清空), 否则按 expire_at 更新
+	// 原代码: if req.ExpireAt != nil { coupon.ExpireAt = req.ExpireAt }
+	// 问题: 前端发 expire_at: null 时 req.ExpireAt 为 nil, 无法区分 "清空" vs "未传"
+	if req.ClearExpireAt != nil && *req.ClearExpireAt {
+		coupon.ExpireAt = nil
+	} else if req.ExpireAt != nil {
 		coupon.ExpireAt = req.ExpireAt
 	}
 	if req.IsEnabled != nil {

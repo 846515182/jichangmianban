@@ -110,7 +110,7 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
-	authH := NewAuthHandler(deps.AdminRepo, deps.UserRepo, deps.LoginAuditRepo, deps.JWTMgr)
+	authH := NewAuthHandler(deps.AdminRepo, deps.UserRepo, deps.LoginAuditRepo, deps.JWTMgr, deps.EmailSvc)
 	authRegisterH := NewAuthRegisterHandler(deps.RegisterSvc)
 	userH := NewUserHandler(deps.UserRepo, deps.NodeRepo, deps.AnnounceRepo, deps.SubSvc, deps.TrafficSvc)
 	adminNodeH := NewAdminNodeHandler(deps.NodeSvc, deps.NodeRepo)
@@ -135,6 +135,14 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 		auth.POST("/logout", middleware.AnyAuth(), middleware.RateLimit(middleware.RateScopeUser), authH.Logout)
 		auth.POST("/change-password", middleware.AnyAuth(), middleware.RateLimit(middleware.RateScopeUser), authH.ChangePassword)
 		auth.POST("/logout-all", middleware.AnyAuth(), middleware.RateLimit(middleware.RateScopeUser), authH.LogoutAll)
+		// 修复 P0-2: ChangeEmail 路由注册(原前端调用但后端路由缺失, 整页不可用)
+		auth.POST("/change-email", middleware.AnyAuth(), middleware.RateLimit(middleware.RateScopeUser), authH.ChangeEmail)
+	}
+
+	// 修复 P0-2: 邮箱验证码发送路由(register/change_email 两种场景)
+	email := api.Group("/email")
+	{
+		email.POST("/send-code", middleware.AnyAuth(), middleware.RateLimit(middleware.RateScopeUser), authH.SendEmailCode)
 	}
 
 	api.GET("/captcha", GetCaptcha)
@@ -216,17 +224,19 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 		admin.DELETE("/nodes/:id/cleanup", middleware.RBAC(middleware.PermNodeManage), middleware.AuditAction("node.delete"), NewNodeCleanupHandler(deps.NodeSvc, deps.NodeRepo, app.Get().Logger).CleanupWithProgress)
 
 		admin.GET("/users", adminUserH.UserList)
-		admin.POST("/users", middleware.AuditAction("user.create"), adminUserH.UserCreate)
-		admin.PUT("/users/:id", middleware.AuditAction("user.update"), adminUserH.UserUpdate)
-		admin.DELETE("/users/:id", middleware.AuditAction("user.delete"), adminUserH.UserDelete)
+		// 修复 P0-3: /admin/users 写操作全部加 RBAC(PermFundManage), 与 plans/coupons/orders 对齐
+		// 原代码仅有 AuditAction, 普通 admin 可绕过财务权限执行 activate-plan/reset-traffic/DELETE
+		admin.POST("/users", middleware.RBAC(middleware.PermFundManage), middleware.AuditAction("user.create"), adminUserH.UserCreate)
+		admin.PUT("/users/:id", middleware.RBAC(middleware.PermFundManage), middleware.AuditAction("user.update"), adminUserH.UserUpdate)
+		admin.DELETE("/users/:id", middleware.RBAC(middleware.PermFundManage), middleware.AuditAction("user.delete"), adminUserH.UserDelete)
 		// 物理删除(彻底清理测试数据, 释放 username/email 唯一索引, 重新注册不冲突)
-		admin.DELETE("/users/:id/hard", middleware.AuditAction("user.hard_delete"), adminUserH.UserHardDelete)
-		admin.POST("/users/import", middleware.AuditAction("user.import"), adminUserH.UserImport)
-		admin.POST("/users/:id/reset-traffic", middleware.AuditAction("user.reset_traffic"), adminUserH.UserResetTraffic)
+		admin.DELETE("/users/:id/hard", middleware.RBAC(middleware.PermFundManage), middleware.AuditAction("user.hard_delete"), adminUserH.UserHardDelete)
+		admin.POST("/users/import", middleware.RBAC(middleware.PermFundManage), middleware.AuditAction("user.import"), adminUserH.UserImport)
+		admin.POST("/users/:id/reset-traffic", middleware.RBAC(middleware.PermFundManage), middleware.AuditAction("user.reset_traffic"), adminUserH.UserResetTraffic)
 		admin.GET("/subscriptions", NewAdminSubscriptionHandler(deps.SubRepo, deps.SubSvc).List)
 		admin.GET("/users/:id/subscription", NewAdminSubscriptionHandler(deps.SubRepo, deps.SubSvc).GetByUserID)
-		admin.POST("/users/:id/status", middleware.AuditAction("user.toggle_status"), adminUserH.UserToggleStatus)
-		admin.POST("/users/:id/activate-plan", middleware.AuditAction("user.activate_plan"), adminUserH.UserActivatePlan)
+		admin.POST("/users/:id/status", middleware.RBAC(middleware.PermFundManage), middleware.AuditAction("user.toggle_status"), adminUserH.UserToggleStatus)
+		admin.POST("/users/:id/activate-plan", middleware.RBAC(middleware.PermFundManage), middleware.AuditAction("user.activate_plan"), adminUserH.UserActivatePlan)
 
 		admin.GET("/traffic/top", systemH.TrafficTop)
 		admin.GET("/dashboard", systemH.Dashboard)
