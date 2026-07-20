@@ -146,6 +146,18 @@ func (h *OrderHandler) AdminOrderList(c *gin.Context) {
 	response.OK(c, gin.H{"list": list, "total": total})
 }
 
+// AdminOrderStats [GET] /api/v1/admin/orders/stats
+// 返回全局订单统计(各状态计数 + 已支付总金额)
+// 修复前端 bug: 原前端只基于当前页数据计算统计, 导致数字不准
+func (h *OrderHandler) AdminOrderStats(c *gin.Context) {
+	stats, err := h.orderSvc.GetOrderStats()
+	if err != nil {
+		response.Fail(c, response.CodeDBError)
+		return
+	}
+	response.OK(c, stats)
+}
+
 // adminMarkPaidRequest 管理员标记已支付请求
 type adminMarkPaidRequest struct {
 	TradeNo string `json:"trade_no"` // 外部流水号(可选, 便于对账)

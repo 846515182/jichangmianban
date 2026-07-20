@@ -153,3 +153,54 @@ func (r *OrderRepo) ListExpiredSince(since time.Time) ([]model.Order, error) {
 	}
 	return list, nil
 }
+
+// OrderStatsResult 订单全局统计结果
+// 用于管理后台订单页头部统计展示, 避免前端只基于当前页数据计算导致的偏差
+type OrderStatsResult struct {
+	PendingCount     int64 `json:"pending_count"`
+	PaidCount        int64 `json:"paid_count"`
+	CancelledCount   int64 `json:"cancelled_count"`
+	ExpiredCount     int64 `json:"expired_count"`
+	RefundedCount    int64 `json:"refunded_count"`
+	TotalIncomeCents int64 `json:"total_income_cents"` // 已支付订单总金额(分)
+}
+
+// Stats 全局订单统计: 按状态分组计数 + 已支付订单总金额
+// 一次 GROUP BY 拿各状态计数, 一次 SUM 拿总金额, 共 2 次查询(均已走 status 索引)
+func (r *OrderRepo) Stats() (*OrderStatsResult, error) {
+	var stats OrderStatsResult
+	type row struct {
+		Status string
+		Count  int64
+	}
+	var rows []row
+	if err := r.db.Model(&model.Order{}).
+		Select("status, COUNT(*) as count").
+		Where("is_deleted = false").
+		Group("status").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		switch row.Status {
+		case model.OrderStatusPending:
+			stats.PendingCount = row.Count
+		case model.OrderStatusPaid:
+			stats.PaidCount = row.Count
+		case model.OrderStatusCancelled:
+			stats.CancelledCount = row.Count
+		case model.OrderStatusExpired:
+			stats.ExpiredCount = row.Count
+		case model.OrderStatusRefunded:
+			stats.RefundedCount = row.Count
+		}
+	}
+	// 已支付订单总金额(分), COALESCE 防止无数据时返回 NULL
+	if err := r.db.Model(&model.Order{}).
+		Where("is_deleted = false AND status = ?", model.OrderStatusPaid).
+		Select("COALESCE(SUM(amount_cents), 0)").
+		Scan(&stats.TotalIncomeCents).Error; err != nil {
+		return nil, err
+	}
+	return &stats, nil
+}

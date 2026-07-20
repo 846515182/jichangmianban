@@ -165,6 +165,12 @@ func (s *OrderService) ListAllOrders(page, size int, status, userID string) ([]m
 	return s.orderRepo.ListAll(page, size, status, userID)
 }
 
+// GetOrderStats 获取订单全局统计(各状态计数 + 已支付总金额)
+// 供管理后台订单页头部统计展示, 替代前端基于当前页数据计算的错误做法
+func (s *OrderService) GetOrderStats() (*repo.OrderStatsResult, error) {
+	return s.orderRepo.Stats()
+}
+
 // CancelOrder 用户取消订单(仅 pending 可取消)
 // 修复 F-12: 改为条件更新, WHERE status='pending' 防止竞态覆盖已支付订单
 // 修复: 取消时回退优惠券使用次数

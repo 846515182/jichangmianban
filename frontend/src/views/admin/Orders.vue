@@ -37,9 +37,9 @@
 
         <!-- 统计 -->
         <div class="stat-summary">
-          <span class="stat-item">待支付 <b>{{ stats.pending }}</b></span>
-          <span class="stat-item">已支付 <b>{{ stats.paid }}</b></span>
-          <span class="stat-item">总收入 <b class="primary">¥ {{ stats.totalIncome.toFixed(2) }}</b></span>
+          <span class="stat-item">待支付 <b>{{ stats.pending_count }}</b></span>
+          <span class="stat-item">已支付 <b>{{ stats.paid_count }}</b></span>
+          <span class="stat-item">总收入 <b class="primary">¥ {{ totalIncomeYuan.toFixed(2) }}</b></span>
         </div>
       </div>
 
@@ -202,15 +202,46 @@ const filteredList = computed(() => {
   })
 })
 
-// 统计信息
-const stats = computed(() => {
-  const pending = list.value.filter((o) => o.status === 'pending').length
-  const paid = list.value.filter((o) => o.status === 'paid').length
-  const totalIncome = list.value
-    .filter((o) => o.status === 'paid')
-    .reduce((sum, o) => sum + o.finalAmount, 0)
-  return { pending, paid, totalIncome }
+// 统计信息(从后端聚合接口获取, 避免基于当前页数据计算导致偏差)
+interface OrderStats {
+  pending_count: number
+  paid_count: number
+  cancelled_count: number
+  expired_count: number
+  refunded_count: number
+  total_income_cents: number // 已支付总金额(分)
+}
+const stats = ref<OrderStats>({
+  pending_count: 0,
+  paid_count: 0,
+  cancelled_count: 0,
+  expired_count: 0,
+  refunded_count: 0,
+  total_income_cents: 0,
 })
+
+// 总收入(元) = 分 / 100, 用 computed 保证 total_income_cents 变化时自动更新
+const totalIncomeYuan = computed(() => stats.value.total_income_cents / 100)
+
+// 加载统计(失败不阻塞列表展示, 静默处理)
+const loadStats = async () => {
+  try {
+    const res: any = await request.get('/api/v1/admin/orders/stats', { silent: true })
+    const data = res?.data || res
+    if (data && typeof data === 'object') {
+      stats.value = {
+        pending_count: Number(data.pending_count) || 0,
+        paid_count: Number(data.paid_count) || 0,
+        cancelled_count: Number(data.cancelled_count) || 0,
+        expired_count: Number(data.expired_count) || 0,
+        refunded_count: Number(data.refunded_count) || 0,
+        total_income_cents: Number(data.total_income_cents) || 0,
+      }
+    }
+  } catch {
+    // 统计加载失败不影响列表展示
+  }
+}
 
 // 重置筛选
 const resetFilter = () => {
@@ -293,6 +324,8 @@ const loadData = async () => {
   } finally {
     loading.value = false
   }
+  // 并行加载统计(不阻塞列表, 失败静默)
+  loadStats()
 }
 
 onMounted(() => {

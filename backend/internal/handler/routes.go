@@ -273,6 +273,8 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 		admin.PUT("/plans/:id", middleware.AuditAction("plan.update"), planH.AdminPlanUpdate)
 		admin.DELETE("/plans/:id", middleware.AuditAction("plan.delete"), planH.AdminPlanDelete)
 
+		// 注意: /orders/stats 必须在 /orders/:id 之前注册, 避免 stats 被当作 :id 匹配
+		admin.GET("/orders/stats", orderH.AdminOrderStats)
 		admin.GET("/orders", orderH.AdminOrderList)
 		admin.POST("/orders/:id/mark-paid", middleware.RBAC(middleware.PermFundManage), middleware.AuditAction("order.mark_paid"), orderH.AdminMarkPaid)
 		admin.POST("/orders/:id/refund", middleware.RBAC(middleware.PermFundManage), middleware.AuditAction("order.refund"), orderH.AdminRefund)
