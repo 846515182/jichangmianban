@@ -300,27 +300,28 @@ const cancelOrder = (row: any) => {
 }
 
 // 加载数据
+// 修复 ORDER-LIST-01 (P0): 后端 AdminOrderList 返回 {list: [...], total: N},
+// 前端原代码期望数组导致 ElMessage.error("订单数据格式异常") 刷屏。
+// 正确解析路径: res.data.list (后端 response.OK 包装为 {code:0, data:{list, total}})。
+// keyword 是前端字段, 后端 ListAll 只支持 status/user_id, 因此 keyword 走前端过滤;
+// start_date/end_date 后端也未支持, 同样走前端过滤(filteredList computed 已实现)。
 const loadData = async () => {
   loading.value = true
   try {
     const res: any = await request.get('/api/v1/admin/orders', {
       params: {
         status: filter.status || undefined,
-        keyword: filter.keyword || undefined,
-        start_date: filter.dateRange?.[0],
-        end_date: filter.dateRange?.[1],
+        // 注: 后端 ListAll(page,size,status,userID) 不支持 keyword/dateRange,
+        // 这两个筛选条件由 filteredList computed 在前端做, 这里不传给后端避免误解。
       },
     })
-    const arr = res?.data || res
-    if (Array.isArray(arr)) {
-      list.value = arr
-    } else {
-      list.value = []
-      ElMessage.error('订单数据格式异常')
-    }
+    // 兼容两种结构: 标准 {list, total} 或裸数组(老接口/测试用)
+    const data = res?.data || res
+    const arr = Array.isArray(data) ? data : (data?.list || [])
+    list.value = Array.isArray(arr) ? arr : []
   } catch {
     list.value = []
-    ElMessage.error('加载订单列表失败，请稍后重试')
+    // 拦截器已弹错误, 这里不重复弹
   } finally {
     loading.value = false
   }
