@@ -9,7 +9,14 @@
           <div class="section-title"><el-icon><Lock /></el-icon> 安全设置</div>
           <el-form label-width="130px" label-position="right">
             <el-form-item label="HMAC 密钥">
-              <el-input v-model="security.hmacKey" :type="showKey ? 'text' : 'password'" readonly>
+              <!-- 修复 P0: 旧版默认显示 Math.random() 生成的假 key, 现未轮换时显示占位提示。
+                   HMAC 密钥属于机密, 后端不暴露已保存的值, 只在轮换时返回新值。 -->
+              <el-input
+                v-model="security.hmacKey"
+                :type="showKey ? 'text' : 'password'"
+                readonly
+                :placeholder="security.hmacKey ? '' : '点击下方轮换按钮以生成新密钥（出于安全考虑不显示已保存的密钥）'"
+              >
                 <template #append>
                   <el-button @click="showKey = !showKey">
                     <el-icon><View v-if="!showKey" /><Hide v-else /></el-icon>
@@ -124,12 +131,9 @@
                 <el-form-item label="返回地址">
                   <el-input v-model="payment.returnUrl" placeholder="https://panel.example.com/user/orders" />
                 </el-form-item>
-                <el-form-item label="支持方式">
-                  <el-checkbox-group v-model="payment.methods">
-                    <el-checkbox value="epay_alipay">支付宝</el-checkbox>
-                    <el-checkbox value="epay_wechat">微信支付</el-checkbox>
-                  </el-checkbox-group>
-                </el-form-item>
+                <!-- 修复 P1: 旧版"支持方式"checkbox-group 是死控件, savePayment 不发送、
+                     loadPaymentConfig 不读取、后端 EPayConfig 无 methods 字段, 用户勾选完全无效。
+                     EPay 默认支持支付宝/微信支付, 由商户配置决定, 不需要在面板再勾选, 故删除。 -->
                 <el-form-item>
                   <el-button type="primary" @click="savePayment" :loading="savingPay">保存配置</el-button>
                   <el-button @click="testPayment" :loading="testing">测试连接</el-button>
@@ -328,7 +332,13 @@ import request from '@/utils/request'
 import { formatTime } from '@/utils/format'
 
 // 判断密钥/密码是否为脱敏值（后端 maskSecret 输出格式: **** 或 ABCD****WXYZ）
-const isMasked = (s: string) => s.includes('****')
+// 修复 P1: 旧版检测 '****' (4 个连续 *), 后端 containsAsterisk 检测单 '*',
+// 真实密钥含 '*' 时被后端误判为脱敏值丢弃, 用户以为已保存实际未更新。
+// 改为正则 /\*{4,}/ (4 个及以上连续 *) 才算脱敏, 与后端 maskSecret 输出一致。
+// 注: 后端 containsAsterisk 的逻辑同时保留不变, 因为它用于"前端是否传了脱敏值"的检测,
+// 真实密钥通常不会含 4 个连续 *, 这是合理的; 但前端 isMasked 用于"加载时是否清空 input",
+// 改严可避免单 * 误清空。
+const isMasked = (s: string | null | undefined) => !!(s && /\*{4,}/.test(s))
 
 const showKey = ref(false)
 const rotating = ref(false)
@@ -350,11 +360,13 @@ const payment = reactive({
   apiUrl: 'https://pay.example.com',
   notifyUrl: '',
   returnUrl: '',
-  methods: ['epay_alipay', 'epay_wechat'] as string[],
+  // 注: 旧版有 methods: ['epay_alipay', 'epay_wechat'], 是死控件已删除
 })
 
+// 修复 P0: 旧版初始化用 Math.random() 生成假 key, 在用户未点轮换前就显示一个不存在的 key,
+// 误导用户以为这就是当前生效的 key。改为空字符串, onMounted 时从后端加载真实值。
 const security = reactive({
-  hmacKey: 'hmac_' + Math.random().toString(36).slice(2, 18),
+  hmacKey: '',
 })
 
 const subscribe = reactive({
@@ -370,18 +382,20 @@ const rotateHmac = () => {
   }).then(async () => {
     rotating.value = true
     try {
-      let gotKey = false
-      try {
-        const res: any = await request.post('/api/v1/admin/system/rotate-hmac')
-        if (res && (res.hmac_key || res.data?.hmac_key)) {
-          security.hmacKey = res.hmac_key || res.data.hmac_key
-          gotKey = true
-        }
-      } catch { /* 忽略错误，使用本地生成的回退 */ }
-      if (!gotKey) {
-        security.hmacKey = 'hmac_' + Math.random().toString(36).slice(2, 18)
+      // 修复 P0: 旧版 API 失败时本地 Math.random() 生成假 key 当作"已轮换"展示,
+      // 后端实际未换, 订阅 token 仍用旧 key 签名, 故障排查时严重误导。
+      // 移除本地 fallback, API 失败时直接弹错误并保持原 hmacKey 不变。
+      const res: any = await request.post('/api/v1/admin/system/rotate-hmac')
+      const newKey = res?.hmac_key || res?.data?.hmac_key
+      if (newKey) {
+        security.hmacKey = newKey
+        ElMessage.success('HMAC 密钥已轮换')
+      } else {
+        // 后端返回成功但无 key 字段, 视为异常
+        ElMessage.error('HMAC 密钥轮换失败: 后端未返回新密钥')
       }
-      ElMessage.success('HMAC 密钥已轮换')
+    } catch {
+      // 拦截器已弹错误, 保持原 hmacKey 不变
     } finally { rotating.value = false }
   }).catch(() => {})
 }
@@ -389,8 +403,13 @@ const rotateHmac = () => {
 const saveSubscribe = async () => {
   savingSub.value = true
   try {
-    try { await request.put('/api/v1/admin/system/sub-config', { ...subscribe }) } catch { /* */ }
+    // 修复 P1: 旧版 try{}catch{} 吞错后无条件弹"订阅配置已保存",
+    // API 失败时用户看到错误+成功两条提示, 完全无法判断实际结果。
+    // 改为 API 成功后才弹成功, 失败时拦截器已弹错误。
+    await request.put('/api/v1/admin/system/sub-config', { ...subscribe })
     ElMessage.success('订阅配置已保存')
+  } catch {
+    // 拦截器已弹错误
   } finally { savingSub.value = false }
 }
 
@@ -413,15 +432,17 @@ const loadPaymentConfig = async () => {
 
 // 保存支付配置
 const savePayment = async () => {
-  if (!payment.pid) {
-    ElMessage.warning('请填写商户 PID')
+  // 修复 P2: pid 必须为正整数, 旧版 Number('abc')||0 静默把非数字转 0, 后端签名失败但前端无提示
+  const pidNum = Number(payment.pid)
+  if (!payment.pid || !Number.isInteger(pidNum) || pidNum <= 0) {
+    ElMessage.warning('商户 PID 必须为正整数')
     return
   }
   savingPay.value = true
   try {
-    // 后端 EPayConfig 使用 snake_case 字段名；key 为空时后端保留原值
+    // 后端 EPayConfig 使用 snake_case 字段名；key 为空或脱敏值时后端保留原值
     await request.put('/api/v1/admin/system/pay-config', {
-      pid: Number(payment.pid) || 0,
+      pid: pidNum,
       key: payment.key || '',
       api_url: payment.apiUrl,
       enabled: payment.enabled,
@@ -429,6 +450,9 @@ const savePayment = async () => {
       return_url: payment.returnUrl,
     })
     ElMessage.success('支付配置已保存')
+    // 修复 P2: 保存后重新加载脱敏配置, 让密钥框显示脱敏值(而非明文残留),
+    // 也能拿到后端可能修正过的字段(如 notify_url 自动补全)
+    await loadPaymentConfig()
   } catch {
     /* 拦截器已提示 */
   } finally {
@@ -437,24 +461,35 @@ const savePayment = async () => {
 }
 
 // 测试支付连接
+// 修复 P2: 旧版强制要求 payment.key 非空, 用户每次进设置页测已保存配置都得重输密钥。
+// 现若 key 为空或脱敏值, 发送 key 为空, 后端 TestPayConfig 会用已保存的 key 测试。
 const testPayment = async () => {
-  if (!payment.pid || !payment.key || !payment.apiUrl) {
-    ElMessage.warning('请先填写商户 PID、密钥与 API 地址')
+  const pidNum = Number(payment.pid)
+  if (!payment.pid || !Number.isInteger(pidNum) || pidNum <= 0) {
+    ElMessage.warning('请先填写有效的商户 PID')
     return
+  }
+  if (!payment.apiUrl) {
+    ElMessage.warning('请填写 API 地址')
+    return
+  }
+  // key 为空或脱敏值时, 后端会用已保存的 key 测试(containsAsterisk 判断)
+  const keyToSend = payment.key && !isMasked(payment.key) ? payment.key : ''
+  if (!keyToSend) {
+    // 提示用户将使用已保存的密钥
+    ElMessage.info('未输入新密钥, 将使用已保存的密钥测试')
   }
   testing.value = true
   try {
-    // 后端 EPayConfig 使用 snake_case 字段名
     const res: any = await request.post('/api/v1/admin/system/pay-config/test', {
-      pid: Number(payment.pid) || 0,
-      key: payment.key,
+      pid: pidNum,
+      key: keyToSend,
       api_url: payment.apiUrl,
     })
     const data = res?.data || res
     lastTestResult.value = { success: true, message: data?.message || res?.msg || '连接成功' }
     ElMessage.success(res?.msg || '支付接口连接正常')
   } catch (e: any) {
-    // axios 错误: e.response.data.msg 是后端返回的具体错误
     const backendMsg = e?.response?.data?.msg || e?.response?.data?.message
     const msg = backendMsg || e?.message || '连接失败'
     lastTestResult.value = { success: false, message: msg }
@@ -471,7 +506,7 @@ const createBackup = async () => {
     ElMessage.success('备份已创建')
     loadBackups()
   } catch {
-    ElMessage.error('备份创建失败')
+    // 修复 P2: 旧版 catch 中再弹一次 ElMessage.error, 与拦截器重复。改为不弹。
   } finally { backing.value = false }
 }
 

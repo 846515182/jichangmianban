@@ -7,13 +7,14 @@
           <p class="page-desc">管理用户账号、流量配额与状态</p>
         </div>
         <div class="header-actions">
-          <el-input v-model="keyword" placeholder="搜索用户名" :prefix-icon="Search" clearable style="width: 220px" />
+          <el-input v-model="keyword" placeholder="搜索用户名/邮箱" :prefix-icon="Search" clearable style="width: 220px" @keyup.enter="onKeywordChange" @clear="onKeywordChange" />
           <el-button type="primary" @click="openDialog()"><el-icon><Plus /></el-icon>新增用户</el-button>
         </div>
       </div>
 
       <el-table :data="filteredList" stripe v-loading="loading">
         <el-table-column prop="username" label="用户名" min-width="100" />
+        <el-table-column prop="email" label="邮箱" min-width="160" show-overflow-tooltip />
         <el-table-column label="套餐" min-width="120">
           <template #default="{ row }">{{ row.plan_id ? planName(row.plan_id) : "未选择" }}</template>
         </el-table-column>
@@ -65,12 +66,28 @@
           </template>
         </el-table-column>
       </el-table>
+
+      <div class="pagination-wrap">
+        <el-pagination
+          v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
+          :total="total"
+          :page-sizes="[10, 20, 50, 100]"
+          layout="total, sizes, prev, pager, next, jumper"
+          background
+          @current-change="fetchList"
+          @size-change="onSizeChange"
+        />
+      </div>
     </div>
 
     <el-dialog v-model="dialogVisible" :title="editing ? '编辑用户' : '新增用户'" width="520px" destroy-on-close>
       <el-form ref="formRef" :model="form" :rules="rules" label-width="90px">
         <el-form-item label="用户名" prop="username">
           <el-input v-model="form.username" :disabled="!!editing" />
+        </el-form-item>
+        <el-form-item label="邮箱" prop="email">
+          <el-input v-model="form.email" :disabled="!!editing" placeholder="user@example.com" />
         </el-form-item>
         <el-form-item v-if="!editing" label="密码" prop="password">
           <el-input v-model="form.password" type="password" show-password />
@@ -130,11 +147,20 @@ const keyword = ref("")
 const list = ref<UserRow[]>([])
 const planList = ref<PlanRow[]>([])
 
-const filteredList = computed(() => {
-  if (!keyword.value) return list.value
-  const k = keyword.value.toLowerCase()
-  return list.value.filter(u => u.username.toLowerCase().includes(k))
-})
+// 修复 P1: 分页状态。旧版无分页组件, 后端默认 size=20, 第 21 条之后不可见。
+const currentPage = ref(1)
+const pageSize = ref(20)
+const total = ref(0)
+
+// 修复 P1: 旧版 keyword 只在前端过滤当前页, 第 21 条之后搜不到。
+// 现改为后端搜索(后端 UserRepo.List 支持 keyword 模糊匹配 username/email)。
+const filteredList = computed(() => list.value)
+
+// 搜索输入时回到第 1 页重新加载
+const onKeywordChange = () => {
+  currentPage.value = 1
+  fetchList()
+}
 
 const planName = (id: string) => { const p = planList.value.find(x => x.id === id); return p ? p.name : "" }
 
@@ -186,7 +212,8 @@ const handleSave = async () => {
     try {
       const payload: any = {
         username: form.username, email: form.email,
-        traffic_limit: Math.floor(form.trafficLimitGB * 1024 * 1024 * 1024),
+        // 修复 P2: 旧版 Math.floor 会少算最多近 1 字节, 用 Math.round 四舍五入更精确
+        traffic_limit: Math.round(form.trafficLimitGB * 1024 * 1024 * 1024),
       }
       if (form.plan_id) payload.plan_id = form.plan_id
       if (form.expireAt) {
@@ -199,9 +226,10 @@ const handleSave = async () => {
         ElMessage.success("用户已更新")
       } else {
         payload.password = form.password
-        const res: any = await request.post("/api/v1/admin/users", payload)
-        if (res && res.code === 0) { ElMessage.success("用户已创建") }
-        else { ElMessage.error((res as any)?.msg || "创建失败") }
+        // 修复 P2: 旧版 if (res.code === 0) 是死代码, request 拦截器对 code !== 0 已 reject,
+        // 不会走到 else 分支。直接弹成功即可。
+        await request.post("/api/v1/admin/users", payload)
+        ElMessage.success("用户已创建")
       }
       dialogVisible.value = false
       await fetchList()
@@ -278,14 +306,37 @@ const confirmActivate = async () => {
 const fetchList = async () => {
   loading.value = true
   try {
-    const res: any = await request.get("/api/v1/admin/users")
+    // 修复 P1: 加分页 + keyword 参数, 旧版无分页 + 仅前端过滤
+    const res: any = await request.get("/api/v1/admin/users", {
+      params: {
+        page: currentPage.value,
+        size: pageSize.value,
+        keyword: keyword.value || undefined,
+      },
+    })
     let arr: any[] = []
-    if (Array.isArray(res)) arr = res
-    else if (res && Array.isArray(res.data)) arr = res.data
-    else if (res && res.data && Array.isArray(res.data.list)) arr = res.data.list
+    if (res && res.data && Array.isArray(res.data.list)) {
+      arr = res.data.list
+      total.value = Number(res.data.total) || arr.length
+    } else if (res && Array.isArray(res.data)) {
+      arr = res.data
+      total.value = arr.length
+    } else if (Array.isArray(res)) {
+      arr = res
+      total.value = arr.length
+    } else {
+      total.value = 0
+    }
     list.value = arr
   } catch { /* */ }
   finally { loading.value = false }
+}
+
+// 修复 P1: 分页切换处理
+const onSizeChange = (size: number) => {
+  pageSize.value = size
+  currentPage.value = 1
+  fetchList()
 }
 
 const fetchPlans = async () => {
@@ -313,4 +364,5 @@ onMounted(async () => { await fetchPlans(); await fetchList() })
 .traffic-text { font-size: 12px; color: var(--np-text-secondary); }
 .expired { color: var(--np-danger); }
 .form-tip { font-size: 12px; color: var(--np-text-muted); }
+.pagination-wrap { margin-top: 16px; display: flex; justify-content: flex-end; }
 </style>

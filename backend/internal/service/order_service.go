@@ -103,14 +103,19 @@ func (s *OrderService) CreateOrder(in *CreateOrderInput) (*model.Order, error) {
 	// 修复 P0-3: 0 元订单可被无限刷开通套餐。加每用户每日 1 次限频(Redis 计数),
 	// 防止配合 0 元券/0 元套餐批量白嫖流量和有效期。
 	// 无 Redis 时降级为不限制(与历史行为一致), 但记录告警便于排障。
+	// 修复 P1: 旧版 Incr 在事务之前执行, 事务失败(券抢光/开通失败/订单号碰撞)时计数未回退,
+	// 用户当日重试被锁。改为事务失败时显式 Decr 回退, 保证计数与实际成功次数一致。
+	freeOrderRdbKey := ""
+	var freeOrderIncred bool
 	if isFreeOrder {
 		if rdb := app.Get().RDB; rdb != nil {
-			key := fmt.Sprintf("freeorder:uid:%s:%s", in.UserID, now.Format("20060102"))
+			freeOrderRdbKey = fmt.Sprintf("freeorder:uid:%s:%s", in.UserID, now.Format("20060102"))
 			ctx := context.Background()
-			cnt, err := rdb.Incr(ctx, key).Result()
+			cnt, err := rdb.Incr(ctx, freeOrderRdbKey).Result()
 			if err == nil {
+				freeOrderIncred = true
 				if cnt == 1 {
-					rdb.Expire(ctx, key, 25*time.Hour)
+					rdb.Expire(ctx, freeOrderRdbKey, 25*time.Hour)
 				}
 				if cnt > 1 {
 					return nil, errors.New("今日已领取免费套餐, 请明日再试或购买付费套餐")
@@ -161,6 +166,12 @@ func (s *OrderService) CreateOrder(in *CreateOrderInput) (*model.Order, error) {
 		return nil
 	})
 	if err != nil {
+		// 修复 P1: 事务失败时回退 Redis 限频计数, 避免用户当日被锁无法重试
+		if freeOrderIncred && freeOrderRdbKey != "" {
+			if rdb := app.Get().RDB; rdb != nil {
+				_ = rdb.Decr(context.Background(), freeOrderRdbKey).Err()
+			}
+		}
 		return nil, err
 	}
 	return order, nil
@@ -203,8 +214,9 @@ func (s *OrderService) ListUserOrders(userID string, page, size int) ([]model.Or
 }
 
 // ListAllOrders 全部订单列表
-func (s *OrderService) ListAllOrders(page, size int, status, userID string) ([]model.Order, int64, error) {
-	return s.orderRepo.ListAll(page, size, status, userID)
+// 修复 P1: 增加 keyword 参数支持订单号/用户名模糊搜索
+func (s *OrderService) ListAllOrders(page, size int, status, userID, keyword string) ([]repo.OrderListItem, int64, error) {
+	return s.orderRepo.ListAll(page, size, status, userID, keyword)
 }
 
 // GetOrderStats 获取订单全局统计(各状态计数 + 已支付总金额)
@@ -245,9 +257,12 @@ func (s *OrderService) CancelOrder(orderID, userID string) error {
 		// 回退优惠券使用次数
 		if o.CouponID != nil {
 			if err := s.couponRepo.DecrUsedSafeTx(tx, *o.CouponID); err != nil {
-				// 非致命：优惠券计数回退失败不影响订单取消
-				if logger := app.Get().Logger; logger != nil {
-					logger.Warn("回退优惠券使用次数失败", zap.String("coupon_id", *o.CouponID), zap.Error(err))
+				// 修复 P1: ErrRecordNotFound 表示 used_count 已为 0, 视为幂等成功, 不打 Warn 避免日志噪音;
+				// 其它错误才视为真实失败打 Warn(仍非致命, 不回滚事务, 与历史行为一致)。
+				if !errors.Is(err, gorm.ErrRecordNotFound) {
+					if logger := app.Get().Logger; logger != nil {
+						logger.Warn("回退优惠券使用次数失败", zap.String("coupon_id", *o.CouponID), zap.Error(err))
+					}
 				}
 			}
 		}
@@ -260,9 +275,10 @@ func (s *OrderService) CancelOrder(orderID, userID string) error {
 func (s *OrderService) ExpireOrders() (int, error) {
 	now := time.Now()
 	db := app.Get().DB
-	// 先查出要过期的订单(含优惠券信息)
+	// 修复 P2: 旧版 Find 未过滤 is_deleted, 软删除订单也被扫到并改状态, 污染软删除数据。
+	// 与 ListPendingSince/ListExpired 等其它查询保持一致, 加 is_deleted = false。
 	var toExpire []model.Order
-	if err := db.Where("status = ? AND expired_at < ?", model.OrderStatusPending, now).
+	if err := db.Where("is_deleted = false AND status = ? AND expired_at < ?", model.OrderStatusPending, now).
 		Find(&toExpire).Error; err != nil {
 		return 0, err
 	}
@@ -273,7 +289,7 @@ func (s *OrderService) ExpireOrders() (int, error) {
 	for _, o := range toExpire {
 		err := db.Transaction(func(tx *gorm.DB) error {
 			result := tx.Model(&model.Order{}).
-				Where("id = ? AND status = ?", o.ID, model.OrderStatusPending).
+				Where("id = ? AND is_deleted = false AND status = ?", o.ID, model.OrderStatusPending).
 				Update("status", model.OrderStatusExpired)
 			if result.Error != nil {
 				return result.Error
@@ -283,8 +299,11 @@ func (s *OrderService) ExpireOrders() (int, error) {
 			}
 			if o.CouponID != nil {
 				if err := s.couponRepo.DecrUsedSafeTx(tx, *o.CouponID); err != nil {
-					if logger := app.Get().Logger; logger != nil {
-						logger.Warn("过期订单回退优惠券失败", zap.String("coupon_id", *o.CouponID), zap.Error(err))
+					// 修复 P1: ErrRecordNotFound 视为幂等成功, 不打 Warn
+					if !errors.Is(err, gorm.ErrRecordNotFound) {
+						if logger := app.Get().Logger; logger != nil {
+							logger.Warn("过期订单回退优惠券失败", zap.String("coupon_id", *o.CouponID), zap.Error(err))
+						}
 					}
 				}
 			}
@@ -358,13 +377,20 @@ func (s *OrderService) PaySuccess(orderNo, tradeNo string) error {
 }
 
 // SetUserPlan 设置用户套餐(对外暴露给注册/手动开通场景)
+// 修复 P1: 旧版直接传 tx=nil, setUserPlan 内部回退到全局 db, clause.Locking{UPDATE}
+// 不在事务内, SELECT 完即释放锁; 随后 userRepo.Update 是另一独立事务。两步之间并发
+// AddTraffic/ResetTraffic 等会丢失更新(lost update)。改为外层包 db.Transaction,
+// 使 FOR UPDATE 与 Save 在同一事务。
 func (s *OrderService) SetUserPlan(userID string, planID string) error {
 	plan, err := s.planRepo.GetByID(planID)
 	if err != nil {
 		return err
 	}
-	// 非事务场景传 nil, setUserPlan 内部回退到 userRepo.Update
-	return s.setUserPlan(nil, userID, plan, time.Now())
+	now := time.Now()
+	db := app.Get().DB
+	return db.Transaction(func(tx *gorm.DB) error {
+		return s.setUserPlan(tx, userID, plan, now)
+	})
 }
 
 // AdminMarkPaid 管理员手动标记订单已支付(线下转账/对公付款等场景)
@@ -441,8 +467,16 @@ func (s *OrderService) AdminRefund(orderID, reason string) error {
 		}
 		if reason != "" {
 			suffix := " [refund:" + reason + "]"
-			if len(suffix) > 120 {
-				suffix = suffix[:120]
+			// 修复 P1: trade_no 字段为 varchar(128), 旧代码只截断 suffix 不考虑原 trade_no 长度,
+			// 原 trade_no(EPay 流水号约 25-40 字节) + suffix(最多 120) 总长度可达 145+ 字节,
+			// PostgreSQL 会抛 "value too long for type character varying(128)" 导致整个退款事务回滚。
+			// 现按总长度 128 截断 suffix, 保证最终 trade_no 不超长。
+			maxSuffixLen := 128 - len(locked.TradeNo)
+			if maxSuffixLen < 0 {
+				maxSuffixLen = 0
+			}
+			if len(suffix) > maxSuffixLen {
+				suffix = suffix[:maxSuffixLen]
 			}
 			locked.TradeNo = locked.TradeNo + suffix
 		}
@@ -452,8 +486,11 @@ func (s *OrderService) AdminRefund(orderID, reason string) error {
 		}
 		if locked.CouponID != nil {
 			if err := s.couponRepo.DecrUsedSafeTx(tx, *locked.CouponID); err != nil {
-				if logger := app.Get().Logger; logger != nil {
-					logger.Warn("退款回退优惠券失败", zap.String("coupon_id", *locked.CouponID), zap.Error(err))
+				// 修复 P1: ErrRecordNotFound 视为幂等成功, 不打 Warn
+				if !errors.Is(err, gorm.ErrRecordNotFound) {
+					if logger := app.Get().Logger; logger != nil {
+						logger.Warn("退款回退优惠券失败", zap.String("coupon_id", *locked.CouponID), zap.Error(err))
+					}
 				}
 			}
 		}
@@ -555,10 +592,21 @@ func (s *OrderService) AdminCancelOrder(orderID, reason string) error {
 		if locked.Status == model.OrderStatusCancelled {
 			return errors.New("订单已是已取消状态")
 		}
+		// 修复 P0 (TOCTOU): 事务外检查后, 在 FOR UPDATE 加锁前可能并发执行了 PaySuccess,
+		// 此时 locked.Status 已变为 paid, 必须再次校验, 否则会把已支付订单改成 cancelled,
+		// 造成"订单已取消但套餐已生效"的不可逆不一致, 后续也无法退款(状态非 paid)。
+		if locked.Status == model.OrderStatusPaid {
+			return errors.New("订单已支付, 请使用退款")
+		}
 		if reason != "" {
 			suffix := " [cancel:" + reason + "]"
-			if len(suffix) > 120 {
-				suffix = suffix[:120]
+			// 修复 P1: 同 AdminRefund, 按 trade_no 字段 varchar(128) 总长度截断 suffix
+			maxSuffixLen := 128 - len(locked.TradeNo)
+			if maxSuffixLen < 0 {
+				maxSuffixLen = 0
+			}
+			if len(suffix) > maxSuffixLen {
+				suffix = suffix[:maxSuffixLen]
 			}
 			locked.TradeNo = locked.TradeNo + suffix
 		}
@@ -570,8 +618,11 @@ func (s *OrderService) AdminCancelOrder(orderID, reason string) error {
 		}
 		if wasPending && wasPendingNow && locked.CouponID != nil {
 			if err := s.couponRepo.DecrUsedSafeTx(tx, *locked.CouponID); err != nil {
-				if logger := app.Get().Logger; logger != nil {
-					logger.Warn("管理员取消订单回退优惠券失败", zap.String("coupon_id", *locked.CouponID), zap.Error(err))
+				// 修复 P1: ErrRecordNotFound 视为幂等成功, 不打 Warn
+				if !errors.Is(err, gorm.ErrRecordNotFound) {
+					if logger := app.Get().Logger; logger != nil {
+						logger.Warn("管理员取消订单回退优惠券失败", zap.String("coupon_id", *locked.CouponID), zap.Error(err))
+					}
 				}
 			}
 		}

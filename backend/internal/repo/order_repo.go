@@ -48,22 +48,61 @@ func (r *OrderRepo) ListByUserID(userID string, page, size int) ([]model.Order, 
 	return list, total, nil
 }
 
-// ListAll 分页查询全部订单(支持按状态/用户ID过滤)
-func (r *OrderRepo) ListAll(page, size int, status, userID string) ([]model.Order, int64, error) {
-	var list []model.Order
-	var total int64
-	q := r.db.Model(&model.Order{}).Where("is_deleted = false")
+// ListAll 分页查询全部订单(支持按状态/用户ID/keyword过滤)
+// 修复 P1: 旧版不支持 keyword, 前端只能在前端过滤当前 20 条, 第 21 条之后永远搜不到。
+// 现支持 keyword 模糊匹配 order_no 或 username(LEFT JOIN users)。
+// 修复 P0: 旧版直接返回 []model.Order 无 username, 前端表格"用户"列永远空白。
+// 现改用 OrderListItem DTO, LEFT JOIN users 取 username 一起返回。
+// 注意: gorm 不便直接返回 DTO + Count, 这里用 raw SQL 兼容 PostgreSQL。
+func (r *OrderRepo) ListAll(page, size int, status, userID, keyword string) ([]OrderListItem, int64, error) {
+	q := r.db.Table("orders AS o").
+		Select("o.id, o.order_no, o.user_id, o.plan_id, o.plan_name, o.amount_cents, o.status, "+
+			"o.payment_method, o.trade_no, o.coupon_id, o.coupon_code, o.paid_at, o.expired_at, "+
+			"o.is_deleted, o.created_at, o.updated_at, u.username AS user_username").
+		Joins("LEFT JOIN users AS u ON u.id = o.user_id").
+		Where("o.is_deleted = false")
 	if status != "" {
-		q = q.Where("status = ?", status)
+		q = q.Where("o.status = ?", status)
 	}
 	if userID != "" {
-		q = q.Where("user_id = ?", userID)
+		q = q.Where("o.user_id = ?", userID)
 	}
-	q.Count(&total)
-	if err := q.Order("created_at DESC").Offset((page - 1) * size).Limit(size).Find(&list).Error; err != nil {
+	if keyword != "" {
+		like := "%" + keyword + "%"
+		// 同时匹配订单号和用户名, 任一命中即返回
+		q = q.Where("o.order_no ILIKE ? OR u.username ILIKE ?", like, like)
+	}
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var list []OrderListItem
+	if err := q.Order("o.created_at DESC").Offset((page - 1) * size).Limit(size).Find(&list).Error; err != nil {
 		return nil, 0, err
 	}
 	return list, total, nil
+}
+
+// OrderListItem 订单列表项 DTO(含 user_username, 用于管理后台展示)
+// 修复 P0: model.Order 无 Username 字段, 直接返回会让前端表格"用户"列永远空白。
+type OrderListItem struct {
+	ID            string     `gorm:"column:id" json:"id"`
+	OrderNo       string     `gorm:"column:order_no" json:"order_no"`
+	UserID        string     `gorm:"column:user_id" json:"user_id"`
+	UserUsername  string     `gorm:"column:user_username" json:"user_username"`
+	PlanID        string     `gorm:"column:plan_id" json:"plan_id"`
+	PlanName      string     `gorm:"column:plan_name" json:"plan_name"`
+	AmountCents   int64      `gorm:"column:amount_cents" json:"amount_cents"`
+	Status        string     `gorm:"column:status" json:"status"`
+	PaymentMethod string     `gorm:"column:payment_method" json:"payment_method"`
+	TradeNo       string     `gorm:"column:trade_no" json:"trade_no"`
+	CouponID      *string    `gorm:"column:coupon_id" json:"coupon_id,omitempty"`
+	CouponCode    string     `gorm:"column:coupon_code" json:"coupon_code,omitempty"`
+	PaidAt        *time.Time `gorm:"column:paid_at" json:"paid_at,omitempty"`
+	ExpiredAt     time.Time  `gorm:"column:expired_at" json:"expired_at"`
+	IsDeleted     bool       `gorm:"column:is_deleted" json:"-"`
+	CreatedAt     time.Time  `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt     time.Time  `gorm:"column:updated_at" json:"updated_at"`
 }
 
 // Create 创建订单

@@ -7,7 +7,7 @@
           <p class="page-desc">创建、管理优惠券</p>
         </div>
         <div class="header-actions">
-          <el-input v-model="keyword" placeholder="搜索优惠码" :prefix-icon="Search" clearable style="width: 220px" />
+          <el-input v-model="keyword" placeholder="搜索优惠码" :prefix-icon="Search" clearable style="width: 220px" @keyup.enter="onKeywordChange" @clear="onKeywordChange" />
           <el-button type="primary" @click="openDialog()">
             <el-icon><Plus /></el-icon>新增优惠券
           </el-button>
@@ -42,6 +42,7 @@
             <div class="usage-cell">
               <span>{{ row.used_count }} / {{ row.max_uses === 0 ? '不限' : row.max_uses }}</span>
               <el-progress
+                v-if="row.max_uses > 0"
                 :percentage="usagePercent(row)"
                 :stroke-width="6"
                 :show-text="false"
@@ -59,7 +60,7 @@
           <template #default="{ row }">
             <el-switch
               :model-value="!!row.is_enabled"
-              :disabled="isExpired(row) || (row.max_uses > 0 && row.used_count >= row.max_uses)"
+              :disabled="isExpiredOrExhausted(row) && !row.is_enabled"
               @change="(v) => toggleStatus(row, v)"
             />
           </template>
@@ -72,6 +73,20 @@
           </template>
         </el-table-column>
       </el-table>
+
+      <!-- 修复 P1: 加分页组件 -->
+      <div class="pagination-wrap">
+        <el-pagination
+          v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
+          :total="total"
+          :page-sizes="[10, 20, 50, 100]"
+          layout="total, sizes, prev, pager, next, jumper"
+          background
+          @current-change="loadData"
+          @size-change="onSizeChange"
+        />
+      </div>
     </div>
 
     <!-- 新增/编辑对话框 -->
@@ -168,16 +183,19 @@ const saving = ref(false)
 const keyword = ref('')
 const list = ref<Coupon[]>([])
 
-const filteredList = computed(() => {
-  if (!keyword.value) return list.value
-  const k = keyword.value.toLowerCase()
-  return list.value.filter((c) => c.code.toLowerCase().includes(k))
-})
+// 修复 P1: 分页状态
+const currentPage = ref(1)
+const pageSize = ref(20)
+const total = ref(0)
 
+// 修复 P1: 旧版 keyword 只在前端过滤当前 20 条, 第 21 条之后永远搜不到。
+// 现改为后端搜索(后端 coupon_repo.List 支持 keyword)。
+const filteredList = computed(() => list.value)
+
+// 修复 P2: 旧版不限量优惠券(max_uses=0)只要被用过一次, 进度条就显示 100% 红色,
+// 让用户误以为"已耗尽"。改为不限量优惠券不显示进度条(模板 v-if="row.max_uses > 0")
 const usagePercent = (row: any): number => {
-  if (!row.max_uses || row.max_uses === 0) {
-    return row.used_count > 0 ? 100 : 0
-  }
+  if (!row.max_uses || row.max_uses === 0) return 0
   return Math.min(100, Math.round((row.used_count / row.max_uses) * 100))
 }
 const usageColor = (row: any): string => {
@@ -190,6 +208,11 @@ const usageColor = (row: any): string => {
 const isExpired = (row: any): boolean => {
   if (!row.expire_at) return false
   return new Date(row.expire_at).getTime() < Date.now()
+}
+// 修复 P2: 旧版开关在"已用尽/已过期"时完全禁用, 无法手动关闭。
+// 改为仅禁用"启用"方向: 已过期/已用尽时仍可关闭, 但不能开启。
+const isExpiredOrExhausted = (row: any): boolean => {
+  return isExpired(row) || (row.max_uses > 0 && row.used_count >= row.max_uses)
 }
 
 // 对话框
@@ -258,12 +281,13 @@ const handleSave = async () => {
       ElMessage.warning('请输入优惠码或点击随机生成')
       return
     }
+    // 修复 P2: 旧版可选过去时间作为过期时间, 创建后立即 isExpired=true, 开关被禁用, 优惠券实际无法使用
+    if (form.expireAt && new Date(form.expireAt).getTime() < Date.now()) {
+      ElMessage.error('过期时间必须晚于当前时间')
+      return
+    }
     saving.value = true
     try {
-      // 修复 P1 bug: 字段名/单位对齐后端 createCouponRequest / updateCouponRequest
-      // - fixed 类型 value 从元转分; percent 类型 value 直接为百分比整数
-      // - min_amount_cents 从元转分
-      // - expire_at: 后端 *time.Time 接受 RFC3339, el-date-picker value-format 已设为 RFC3339
       const isPercent = form.type === 'percent'
       const payload: any = {
         code: form.code.trim(),
@@ -273,31 +297,24 @@ const handleSave = async () => {
         max_uses: form.totalCount,
         is_enabled: form.isEnabled,
       }
-      if (form.expireAt) payload.expire_at = form.expireAt
-      try {
-        if (editing.value) {
-          // 编辑: PUT, 后端会忽略 type 跨类型修改
-          const res: any = await request.put(`/api/v1/admin/coupons/${editing.value.id}`, payload)
-          const data = res?.data || res
-          if (data && data.id) {
-            const idx = list.value.findIndex((c) => c.id === editing.value!.id)
-            if (idx >= 0) list.value[idx] = data as Coupon
-            ElMessage.success('优惠券已更新')
-            dialogVisible.value = false
-          }
-        } else {
-          // 创建: POST
-          const res: any = await request.post('/api/v1/admin/coupons', payload)
-          const data = res?.data || res
-          if (data && data.id) {
-            list.value.unshift(data as Coupon)
-            ElMessage.success('优惠券创建成功')
-            dialogVisible.value = false
-          }
-        }
-      } catch {
-        // 错误提示已由 request 拦截器统一处理
+      // 修复 P1: 旧版 if (form.expireAt) payload.expire_at = form.expireAt,
+      // 用户清空日期选择器后 expire_at 不发送, 后端 *time.Time 保持原值,
+      // 用户以为改成"永不过期"实际仍是原过期时间。
+      // 现显式发送 null 表示清空(后端 *time.Time 接受 null)。
+      payload.expire_at = form.expireAt || null
+      if (editing.value) {
+        await request.put(`/api/v1/admin/coupons/${editing.value.id}`, payload)
+        ElMessage.success('优惠券已更新')
+        dialogVisible.value = false
+        await loadData()
+      } else {
+        await request.post('/api/v1/admin/coupons', payload)
+        ElMessage.success('优惠券创建成功')
+        dialogVisible.value = false
+        await loadData()
       }
+    } catch {
+      // 拦截器已弹错误
     } finally {
       saving.value = false
     }
@@ -312,7 +329,7 @@ const toggleStatus = async (row: any, value: boolean | string | number) => {
     row.is_enabled = value === true
     ElMessage.success(newStatus === 'active' ? '已启用' : '已禁用')
   } catch {
-    // 错误提示已由 request 拦截器统一处理
+    // 拦截器已弹错误
   }
 }
 
@@ -323,9 +340,9 @@ const handleDelete = (row: any) => {
   }).then(async () => {
     try {
       await request.delete(`/api/v1/admin/coupons/${row.id}`)
-      list.value = list.value.filter((c) => c.id !== row.id)
       ElMessage.success('优惠券已删除')
-    } catch { /* */ }
+      await loadData()
+    } catch { /* 拦截器已弹错误 */ }
   }).catch(() => {})
 }
 
@@ -353,17 +370,44 @@ const copyCode = async (row: any) => {
 }
 
 // 加载数据
-onMounted(async () => {
+// 修复 P1: 加 page/size/keyword 参数, 旧版无分页组件 + 仅前端过滤
+const loadData = async () => {
   loading.value = true
   try {
-    const res: any = await request.get('/api/v1/admin/coupons')
-    // 修复 P1 bug: 后端返回 {code:0, data:{list:[...], total:N}}
-    list.value = res?.data?.list || (Array.isArray(res?.data) ? res.data : []) || []
+    const res: any = await request.get('/api/v1/admin/coupons', {
+      params: {
+        page: currentPage.value,
+        size: pageSize.value,
+        keyword: keyword.value || undefined,
+      },
+    })
+    // 兼容两种结构: 标准 {list, total} 或裸数组
+    const data = res?.data || res
+    const arr = Array.isArray(data) ? data : (data?.list || [])
+    list.value = Array.isArray(arr) ? arr : []
+    total.value = Array.isArray(data) ? data.length : (Number(data?.total) || 0)
   } catch {
     list.value = []
+    total.value = 0
   } finally {
     loading.value = false
   }
+}
+
+const onSizeChange = (size: number) => {
+  pageSize.value = size
+  currentPage.value = 1
+  loadData()
+}
+
+// 搜索输入时回到第 1 页重新加载
+const onKeywordChange = () => {
+  currentPage.value = 1
+  loadData()
+}
+
+onMounted(() => {
+  loadData()
 })
 </script>
 
@@ -397,4 +441,10 @@ onMounted(async () => {
 }
 .expired { color: var(--np-danger); }
 .form-tip { font-size: 12px; color: var(--np-text-muted); margin-left: 8px; }
+
+.pagination-wrap {
+  margin-top: 20px;
+  display: flex;
+  justify-content: flex-end;
+}
 </style>

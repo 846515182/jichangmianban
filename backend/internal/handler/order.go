@@ -139,11 +139,13 @@ func (h *OrderHandler) PayOrder(c *gin.Context) {
 }
 
 // AdminOrderList [38] GET /api/v1/admin/orders
+// 修复 P1: 支持 keyword 查询参数(订单号/用户名模糊匹配), 转发到 service 层。
 func (h *OrderHandler) AdminOrderList(c *gin.Context) {
 	page, size := parsePage(c)
 	status := c.Query("status")
 	userID := c.Query("user_id")
-	list, total, err := h.orderSvc.ListAllOrders(page, size, status, userID)
+	keyword := c.Query("keyword")
+	list, total, err := h.orderSvc.ListAllOrders(page, size, status, userID, keyword)
 	if err != nil {
 		response.Fail(c, response.CodeDBError)
 		return
@@ -165,7 +167,9 @@ func (h *OrderHandler) AdminOrderStats(c *gin.Context) {
 
 // adminMarkPaidRequest 管理员标记已支付请求
 type adminMarkPaidRequest struct {
-	TradeNo string `json:"trade_no"` // 外部流水号(可选, 便于对账)
+	// 修复 P2: trade_no 字段在 model.Order 为 varchar(64), 加 max=64 长度校验,
+	// 避免前端传超长字符串写库失败报"服务器错误"
+	TradeNo string `json:"trade_no" binding:"max=64"`
 }
 
 // AdminMarkPaid [POST] /api/v1/admin/orders/:id/mark-paid
@@ -182,8 +186,10 @@ func (h *OrderHandler) AdminMarkPaid(c *gin.Context) {
 }
 
 // adminOrderActionRequest 通用操作请求(reason)
+// 修复 P2: reason 会被拼接进 TradeNo(varchar(128)), 加 max=100 长度校验,
+// 避免前端传超长 reason 触发 PG "value too long" 错误
 type adminOrderActionRequest struct {
-	Reason string `json:"reason"`
+	Reason string `json:"reason" binding:"max=100"`
 }
 
 // AdminRefund [POST] /api/v1/admin/orders/:id/refund

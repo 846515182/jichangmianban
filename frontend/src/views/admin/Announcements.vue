@@ -26,12 +26,26 @@
         </el-table-column>
         <el-table-column label="操作" width="180" fixed="right">
           <template #default="{ row }">
-            <el-button size="small" link @click="togglePin(row)">{{ row.pinned ? '取消置顶' : '置顶' }}</el-button>
+            <el-button size="small" link :loading="actionLoadingId === row.id" @click="togglePin(row)">{{ row.pinned ? '取消置顶' : '置顶' }}</el-button>
             <el-button size="small" link type="primary" @click="openDialog(row)">编辑</el-button>
-            <el-button size="small" link type="danger" @click="handleDelete(row)">删除</el-button>
+            <el-button size="small" link type="danger" :loading="actionLoadingId === row.id" @click="handleDelete(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
+
+      <!-- 修复 P1: 加分页组件 -->
+      <div class="pagination-wrap">
+        <el-pagination
+          v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
+          :total="total"
+          :page-sizes="[10, 20, 50, 100]"
+          layout="total, sizes, prev, pager, next, jumper"
+          background
+          @current-change="loadData"
+          @size-change="onSizeChange"
+        />
+      </div>
     </div>
 
     <!-- 编辑对话框 -->
@@ -72,13 +86,22 @@ import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'elem
 import { Plus } from '@element-plus/icons-vue'
 import request from '@/utils/request'
 import { formatTime } from '@/utils/format'
-import { mockAnnouncements, type AnnouncementRecord } from '@/mock/data'
+import type { AnnouncementRecord } from '@/mock/data'
 
+// 修复 P1: 旧版初始化为 [...mockAnnouncements], fetch 失败时 mock 假公告永久残留, 误导管理员。
+// 改为空数组, fetch 失败时显示 el-empty 或空表。
 const loading = ref(false)
 const saving = ref(false)
-const list = ref<AnnouncementRecord[]>([...mockAnnouncements])
+const list = ref<AnnouncementRecord[]>([])
+const actionLoadingId = ref('')
 
-const stripHtml = (html: string) => html.replace(/<[^>]+>/g, '')
+// 修复 P1: 分页状态
+const currentPage = ref(1)
+const pageSize = ref(20)
+const total = ref(0)
+
+// 修复 P2: 旧版 stripHtml 未处理 null/undefined, row.content 为空时抛错导致表格崩溃
+const stripHtml = (html: string | null | undefined) => (html || '').replace(/<[^>]+>/g, '')
 
 // 对话框
 const dialogVisible = ref(false)
@@ -114,6 +137,9 @@ const exec = (cmd: string, val?: string) => {
   editorRef.value?.focus()
 }
 
+// 修复 P0: 旧版 try{}catch{} 后无条件更新本地状态 + 弹成功, API 失败时用户看到"已发布"
+// 但后端实际无此公告, 刷新后消失。改为 API 成功后才更新本地 + 弹成功, 并重新 loadData
+// 拿后端返回的真实 id/published_at, 避免本地写时区错乱。
 const handleSave = async () => {
   if (!formRef.value) return
   await formRef.value.validate(async (valid) => {
@@ -121,21 +147,17 @@ const handleSave = async () => {
     saving.value = true
     try {
       if (editing.value) {
-        try { await request.put(`/api/v1/admin/announcements/${editing.value.id}`, { ...form }) } catch { /* */ }
-        const idx = list.value.findIndex((a) => a.id === editing.value!.id)
-        if (idx > -1) list.value[idx] = { ...list.value[idx], ...form }
+        await request.put(`/api/v1/admin/announcements/${editing.value.id}`, { ...form })
         ElMessage.success('公告已更新')
       } else {
-        const newItem: AnnouncementRecord = {
-          id: 'a' + Date.now(), title: form.title, content: form.content, pinned: form.pinned,
-          published_at: new Date().toISOString().replace('T', ' ').slice(0, 19),
-        }
-        // 修复 P1 bug: 后端 response.OK 包装为 {code:0, data: a}, 真正的 id 在 res.data.id
-        try { const res: any = await request.post('/api/v1/admin/announcements', { ...form }); if (res && res.data && res.data.id) newItem.id = res.data.id } catch { /* */ }
-        list.value.unshift(newItem)
+        await request.post('/api/v1/admin/announcements', { ...form })
         ElMessage.success('公告已发布')
       }
       dialogVisible.value = false
+      // 重新拉取列表, 拿后端返回的真实 id/published_at
+      await loadData()
+    } catch {
+      // 拦截器已弹错误, 不改本地状态
     } finally {
       saving.value = false
     }
@@ -144,25 +166,60 @@ const handleSave = async () => {
 
 const handleDelete = (row: any) => {
   ElMessageBox.confirm(`确定删除公告「${row.title}」吗？`, '提示', { type: 'warning' }).then(async () => {
-    try { await request.delete(`/api/v1/admin/announcements/${row.id}`) } catch { /* */ }
-    list.value = list.value.filter((a) => a.id !== row.id)
-    ElMessage.success('公告已删除')
+    actionLoadingId.value = row.id
+    try {
+      await request.delete(`/api/v1/admin/announcements/${row.id}`)
+      ElMessage.success('公告已删除')
+      await loadData()
+    } catch {
+      // 拦截器已弹错误
+    } finally {
+      actionLoadingId.value = ''
+    }
   }).catch(() => {})
 }
 
 const togglePin = async (row: any) => {
-  try { await request.patch(`/api/v1/admin/announcements/${row.id}/pin`, { pinned: !row.pinned }) } catch { /* */ }
-  row.pinned = !row.pinned
-  ElMessage.success(row.pinned ? '已置顶' : '已取消置顶')
+  actionLoadingId.value = row.id
+  try {
+    await request.patch(`/api/v1/admin/announcements/${row.id}/pin`, { pinned: !row.pinned })
+    ElMessage.success(!row.pinned ? '已置顶' : '已取消置顶')
+    await loadData()
+  } catch {
+    // 拦截器已弹错误
+  } finally {
+    actionLoadingId.value = ''
+  }
 }
 
-onMounted(async () => {
+const onSizeChange = (size: number) => {
+  pageSize.value = size
+  currentPage.value = 1
+  loadData()
+}
+
+// 修复 P1: 加分页参数 page/size, 旧版只取前 20 条, 第 21 条之后不可见
+const loadData = async () => {
   loading.value = true
   try {
-    const res: any = await request.get('/api/v1/admin/announcements')
-    // 修复 P1 bug: 后端返回 {code:0, data:{list:[...], total:N}}, 旧代码两个分支都不命中
-    list.value = res?.data?.list || (Array.isArray(res?.data) ? res.data : []) || []
-  } catch { /* */ } finally { loading.value = false }
+    const res: any = await request.get('/api/v1/admin/announcements', {
+      params: { page: currentPage.value, size: pageSize.value },
+    })
+    // 兼容两种结构: 标准 {list, total} 或裸数组
+    const data = res?.data || res
+    const arr = Array.isArray(data) ? data : (data?.list || [])
+    list.value = Array.isArray(arr) ? arr : []
+    total.value = Array.isArray(data) ? data.length : (Number(data?.total) || 0)
+  } catch {
+    list.value = []
+    total.value = 0
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(() => {
+  loadData()
 })
 </script>
 
@@ -182,4 +239,10 @@ onMounted(async () => {
 .rich-editor:focus { border-color: var(--np-primary); }
 .rich-editor :deep(h3) { color: var(--np-primary); margin: 8px 0; }
 .rich-editor :deep(ul), .rich-editor :deep(ol) { padding-left: 24px; }
+
+.pagination-wrap {
+  margin-top: 20px;
+  display: flex;
+  justify-content: flex-end;
+}
 </style>

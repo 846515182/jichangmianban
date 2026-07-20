@@ -7,7 +7,7 @@
           <p class="page-desc">管理售卖套餐、流量配额与价格。节点可见性通过「节点管理」绑定套餐实现，无需等级配置</p>
         </div>
         <div class="header-actions">
-          <el-input v-model="keyword" placeholder="搜索套餐名称" :prefix-icon="Search" clearable style="width: 220px" />
+          <el-input v-model="keyword" placeholder="搜索套餐名称" :prefix-icon="Search" clearable style="width: 220px" @keyup.enter="onKeywordChange" @clear="onKeywordChange" />
           <el-button type="primary" @click="openDialog()"><el-icon><Plus /></el-icon>新增套餐</el-button>
         </div>
       </div>
@@ -48,6 +48,19 @@
           </template>
         </el-table-column>
       </el-table>
+
+      <div class="pagination-wrap">
+        <el-pagination
+          v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
+          :total="total"
+          :page-sizes="[10, 20, 50, 100]"
+          layout="total, sizes, prev, pager, next, jumper"
+          background
+          @current-change="fetchList"
+          @size-change="onSizeChange"
+        />
+      </div>
     </div>
 
     <el-dialog v-model="dialogVisible" :title="editing ? '编辑套餐' : '新增套餐'" width="560px" destroy-on-close>
@@ -147,11 +160,20 @@ const saving = ref(false)
 const keyword = ref("")
 const list = ref<PlanRow[]>([])
 
-const filteredList = computed(() => {
-  if (!keyword.value) return list.value
-  const k = keyword.value.toLowerCase()
-  return list.value.filter(p => p.name.toLowerCase().includes(k))
-})
+// 修复 P1: 分页状态。旧版无分页组件, 后端默认 size=20, 第 21 条之后不可见。
+const currentPage = ref(1)
+const pageSize = ref(20)
+const total = ref(0)
+
+// 修复 P1: 旧版 keyword 只在前端过滤当前 20 条, 第 21 条之后永远搜不到。
+// 现改为后端搜索(后端 plans 接口支持 keyword)。
+const filteredList = computed(() => list.value)
+
+// 搜索输入时回到第 1 页重新加载
+const onKeywordChange = () => {
+  currentPage.value = 1
+  fetchList()
+}
 
 const dialogVisible = ref(false)
 const editing = ref<PlanRow | null>(null)
@@ -183,11 +205,14 @@ const openDialog = (row?: any) => {
       sort_order: row.sort_order, is_enabled: row.is_enabled,
     })
   } else {
+    // 修复 P2: 旧版 sort_order = list.value.length + 1, 删除后会产生重复。
+    // 改为 max(sort_order) + 1, 保证新套餐 sort_order 不与已有套餐冲突。
+    const maxSort = list.value.reduce((m, p) => Math.max(m, p.sort_order || 0), 0)
     Object.assign(form, {
       name: "", description: "", features: [], limitations: [],
       trafficLimitGB: 100, duration_days: 30,
       price: 0.01, original_price: 0, device_limit: 3,
-      sort_order: list.value.length + 1, is_enabled: true,
+      sort_order: maxSort + 1, is_enabled: true,
     })
   }
   dialogVisible.value = true
@@ -197,6 +222,11 @@ const handleSave = async () => {
   if (!formRef.value) return
   await formRef.value.validate(async (valid) => {
     if (!valid) return
+    // 修复 P2: 旧版原价可小于价格, 出现"原价 10 元, 实付 50 元"的荒谬套餐
+    if (form.original_price > 0 && form.original_price < form.price) {
+      ElMessage.error("原价不能低于售价")
+      return
+    }
     saving.value = true
     try {
       const payload = {
@@ -214,14 +244,16 @@ const handleSave = async () => {
         await request.put("/api/v1/admin/plans/" + editing.value.id, payload)
         ElMessage.success("套餐已更新")
       } else {
-        const res: any = await request.post("/api/v1/admin/plans", payload)
-        if (res && res.code === 0) { ElMessage.success("套餐已创建") }
-        else { ElMessage.error((res as any)?.msg || "创建失败") }
+        // 修复 P2: 旧版 if (res.code === 0) 是死代码, request 拦截器对 code !== 0 已 reject,
+        // 不会走到 else 分支。直接弹成功即可。
+        await request.post("/api/v1/admin/plans", payload)
+        ElMessage.success("套餐已创建")
       }
       dialogVisible.value = false
       await fetchList()
-    } catch { /* */ }
-    finally { saving.value = false }
+    } catch {
+      // 拦截器已弹错误
+    } finally { saving.value = false }
   })
 }
 
@@ -238,13 +270,30 @@ const toggleStatus = async (row: any, val: boolean) => {
 const fetchList = async () => {
   loading.value = true
   try {
-    const res: any = await request.get("/api/v1/admin/plans")
+    // 修复 P1: 加分页参数, 旧版无分页组件, 后端默认 size=20, 第 21 条之后不可见
+    const res: any = await request.get("/api/v1/admin/plans", {
+      params: { page: currentPage.value, size: pageSize.value, keyword: keyword.value || undefined },
+    })
     let arr: any[] = []
-    if (res && res.data && Array.isArray(res.data.list)) arr = res.data.list
-    else if (res && Array.isArray(res.data)) arr = res.data
+    if (res && res.data && Array.isArray(res.data.list)) {
+      arr = res.data.list
+      total.value = Number(res.data.total) || arr.length
+    } else if (res && Array.isArray(res.data)) {
+      arr = res.data
+      total.value = arr.length
+    } else {
+      total.value = 0
+    }
     list.value = arr.sort((a: PlanRow, b: PlanRow) => a.sort_order - b.sort_order)
   } catch { /* */ }
   finally { loading.value = false }
+}
+
+// 修复 P1: 分页状态 + 切换处理
+const onSizeChange = (size: number) => {
+  pageSize.value = size
+  currentPage.value = 1
+  fetchList()
 }
 
 onMounted(() => { fetchList() })
@@ -261,4 +310,5 @@ onMounted(() => { fetchList() })
 .dynamic-list { width: 100%; }
 .dynamic-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
 .dynamic-row .el-input { flex: 1; }
+.pagination-wrap { margin-top: 16px; display: flex; justify-content: flex-end; }
 </style>

@@ -166,11 +166,18 @@ func (h *AdminSystemHandler) RotateHMAC(c *gin.Context) {
 }
 
 // LoginAudit [25] GET /api/v1/admin/system/login-audit
-// 登录审计列表(支持按 target_type 过滤)
+// 登录审计列表(支持按 target_type / keyword / success 过滤)
+// 修复 P1: 旧版只支持 target_type, 现增加 keyword(模糊匹配 IP/位置/target_id) 和 success(成功/失败) 筛选
 func (h *AdminSystemHandler) LoginAudit(c *gin.Context) {
 	page, size := parsePage(c)
 	targetType := c.Query("target_type")
-	list, total, err := h.loginAuditRepo.ListAll(targetType, page, size)
+	keyword := c.Query("keyword")
+	var success *bool
+	if s := c.Query("success"); s != "" {
+		v := s == "true" || s == "1" || s == "success"
+		success = &v
+	}
+	list, total, err := h.loginAuditRepo.ListAll(targetType, keyword, success, page, size)
 	if err != nil {
 		response.Fail(c, response.CodeDBError)
 		return
@@ -391,6 +398,14 @@ func (h *AdminSystemHandler) UpdatePayConfig(c *gin.Context) {
 	var in service.EPayConfig
 	if err := c.ShouldBindJSON(&in); err != nil {
 		response.Fail(c, response.CodeParamError)
+		return
+	}
+	// 修复 P1: 旧版只 TestPayConfig 调 validatePayAPIURL, UpdatePayConfig 完全没校验。
+	// super_admin 可保存 http://169.254.169.254/ 或内网地址作为 epay_api_url,
+	// 之后 CreatePayment/QueryOrderStatus/RequestRefund 都会向该地址发起请求, 构成 SSRF。
+	// 保存前同样校验。
+	if err := validatePayAPIURL(in.APIURL); err != nil {
+		response.FailMsg(c, response.CodeParamError, err.Error())
 		return
 	}
 	// 若前端传入的是脱敏值(包含 *), 则保留原 key

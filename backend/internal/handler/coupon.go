@@ -26,9 +26,11 @@ func NewCouponHandler(cr *repo.CouponRepo, or *repo.OrderRepo) *CouponHandler {
 }
 
 // createCouponRequest 创建优惠券请求
+// 修复 P2: code 字段在 model.Coupon 为 varchar(32), 加 max=32 长度校验,
+// type 加 oneof 白名单(虽然 handler 内也校验了, 提前在 binding 拒绝更清晰)
 type createCouponRequest struct {
-	Code           string     `json:"code" binding:"required"`
-	Type           string     `json:"type" binding:"required"` // percent / fixed
+	Code           string     `json:"code" binding:"required,max=32"`
+	Type           string     `json:"type" binding:"required,oneof=percent fixed"`
 	Value          int64      `json:"value" binding:"required"`
 	MinAmountCents int64      `json:"min_amount_cents"`
 	MaxUses        int        `json:"max_uses"`

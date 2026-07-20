@@ -109,12 +109,25 @@ func (r *CouponRepo) DecrUsedSafe(id string) error {
 }
 
 // DecrUsedSafeTx 事务内减少优惠券使用次数
+// 修复 P1: 旧版在 RowsAffected==0(used_count 已为 0, 无法再减)时仍返回 nil,
+// 调用方(CancelOrder/ExpireOrders/AdminRefund/AdminCancelOrder)据此认为"已回退成功"
+// 只 Warn 不回滚事务。导致两类问题:
+// (a) DB 真实错误时事务仍提交, 订单状态变更但计数未回退;
+// (b) 重复回退(如 ExpireOrders 已减, 之后 PaySuccess 履约 IncrUsedSafeTx 失败)后
+//     used_count 永久低于实际, 后续用户无法用券。
+// 现在返回 gorm.ErrRecordNotFound 让调用方区分"已为 0"与"真减了 1"。
+// 调用方对 ErrRecordNotFound 视为幂等成功(可继续提交), 对其它错误应 return err 终止事务。
 func (r *CouponRepo) DecrUsedSafeTx(tx *gorm.DB, id string) error {
 	result := tx.Model(&model.Coupon{}).
 		Where("id = ? AND used_count > 0", id).
 		UpdateColumn("used_count", gorm.Expr("used_count - ?", 1))
 	if result.Error != nil {
 		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		// used_count 已为 0, 视为幂等成功。但仍返回错误让调用方有机会感知,
+		// 由调用方根据 errors.Is(err, gorm.ErrRecordNotFound) 决定是否继续。
+		return gorm.ErrRecordNotFound
 	}
 	return nil
 }

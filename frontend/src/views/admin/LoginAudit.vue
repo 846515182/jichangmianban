@@ -7,11 +7,12 @@
           <p class="page-desc">查看所有用户登录记录，监控异常登录</p>
         </div>
         <div class="header-actions">
-          <el-select v-model="statusFilter" placeholder="状态筛选" clearable style="width: 100%; max-width: 130px">
+          <el-select v-model="statusFilter" placeholder="状态筛选" clearable style="width: 100%; max-width: 130px" @change="onFilterChange">
             <el-option label="成功" value="success" />
             <el-option label="失败" value="failed" />
           </el-select>
-          <el-input v-model="keyword" placeholder="搜索用户名/IP" :prefix-icon="Search" clearable style="width: 100%; max-width: 220px" />
+          <!-- 修复 P1: 旧版 placeholder 写"搜索用户名/IP", 但后端 LoginAudit 不存 username, 实际可搜 IP/位置/target_id -->
+          <el-input v-model="keyword" placeholder="搜索 IP/位置" :prefix-icon="Search" clearable style="width: 100%; max-width: 220px" @keyup.enter="onFilterChange" @clear="onFilterChange" />
         </div>
       </div>
 
@@ -39,12 +40,26 @@
         </el-table-column>
       </el-table>
 
+      <!-- 修复 P1: 旧版无分页组件, 后端默认 size=20, 第 21 条之后不可见 -->
+      <div class="pagination-wrap">
+        <el-pagination
+          v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
+          :total="total"
+          :page-sizes="[10, 20, 50, 100]"
+          layout="total, sizes, prev, pager, next, jumper"
+          background
+          @current-change="fetchList"
+          @size-change="onSizeChange"
+        />
+      </div>
+
       <div class="audit-stats">
         <el-row :gutter="16">
           <el-col :xs="24" :sm="8">
             <div class="stat-mini np-card">
               <div class="stat-mini-label">总登录次数</div>
-              <div class="stat-mini-value">{{ list.length }}</div>
+              <div class="stat-mini-value">{{ total }}</div>
             </div>
           </el-col>
           <el-col :xs="24" :sm="8">
@@ -76,33 +91,47 @@ const keyword = ref('')
 const statusFilter = ref('')
 const list = ref<any[]>([])
 
-const filteredList = computed(() => {
-  return list.value.filter((item) => {
-    // 后端 success 是 bool, 状态筛选器值是 'success'/'failed'
-    if (statusFilter.value) {
-      const wantSuccess = statusFilter.value === 'success'
-      if (!!item.success !== wantSuccess) return false
-    }
-    if (keyword.value) {
-      const k = keyword.value.toLowerCase()
-      const hay = `${item.target_type || ''} ${item.target_id || ''} ${item.ip || ''} ${item.location || ''}`.toLowerCase()
-      if (!hay.includes(k)) return false
-    }
-    return true
-  })
-})
+// 修复 P1: 分页状态。旧版无分页组件, 后端默认 size=20, 第 21 条之后不可见。
+const currentPage = ref(1)
+const pageSize = ref(20)
+const total = ref(0)
 
+// 修复 P1: 旧版 keyword/statusFilter 只在前端过滤当前页, 第 21 条之后永远搜不到。
+// 现改为后端查询(后端 LoginAudit ListAll 支持 keyword + success 参数)。
+const filteredList = computed(() => list.value)
+
+// 注意: 成功/失败次数为当前页统计, 非全局总数(后端未提供聚合统计接口)
 const successCount = computed(() => list.value.filter((l) => l.success).length)
 const failedCount = computed(() => list.value.filter((l) => !l.success).length)
 
-onMounted(async () => {
+// 修复 P1: 提取为可复用函数, 加分页 + 后端搜索参数
+const fetchList = async () => {
   loading.value = true
   try {
-    const res: any = await request.get('/api/v1/admin/system/login-audit')
-    // 修复 P1 bug: 后端返回 {code:0, data:{list:[...], total:N}}
+    const params: any = {
+      page: currentPage.value,
+      size: pageSize.value,
+    }
+    if (keyword.value) params.keyword = keyword.value
+    if (statusFilter.value) params.success = statusFilter.value === 'success' ? 'true' : 'false'
+    const res: any = await request.get('/api/v1/admin/system/login-audit', { params })
     list.value = res?.data?.list || (Array.isArray(res?.data) ? res.data : []) || []
+    total.value = Number(res?.data?.total) || list.value.length
   } catch { /* */ } finally { loading.value = false }
-})
+}
+
+const onSizeChange = (size: number) => {
+  pageSize.value = size
+  currentPage.value = 1
+  fetchList()
+}
+
+const onFilterChange = () => {
+  currentPage.value = 1
+  fetchList()
+}
+
+onMounted(() => { fetchList() })
 </script>
 
 <style scoped>
@@ -118,4 +147,5 @@ onMounted(async () => {
 .stat-mini-value.success { color: var(--np-primary); }
 .stat-mini-value.danger { color: var(--np-danger); }
 .target-id { margin-left: 6px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--np-text-muted); }
+.pagination-wrap { margin-top: 16px; display: flex; justify-content: flex-end; }
 </style>
