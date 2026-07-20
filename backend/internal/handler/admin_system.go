@@ -1183,12 +1183,21 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 			logWrite("警告: 读取 git HEAD short hash 失败, 将用 dev 作为版本号")
 			newHead = "dev"
 		}
+		// 修复 CRITICAL 2026-07-21: 所有 docker compose 调用必须用 hostGitRoot 作为工作目录。
+		// 原因: docker compose CLI 通过 docker.sock 调用宿主机 dockerd 执行,
+		// docker-compose.yml 里的相对路径(如 ./deployments/nginx/conf.d)会被宿主机 dockerd
+		// 按工作目录解析。如果工作目录是容器内路径(如 /root/nexus-panel), 宿主机上该路径为空,
+		// 导致挂载空目录覆盖镜像里 COPY 的配置文件 → frontend 容器 nginx 无配置 → 80/443 不响应。
+		// hostGitRoot 优先读 HOST_PROJECT_ROOT 环境变量, 没配置则回退到 gitRoot(容器内路径)。
+		hostGitRoot := getHostProjectRoot()
+		logWrite(">>> 宿主机项目路径: %s (容器内路径: %s)", hostGitRoot, gitRoot)
+
 		logWrite(">>> 5/7 构建镜像 docker compose build --build-arg VERSION=%s panel frontend", newHead)
 		logWrite("（首次构建约3-5分钟，后续有缓存会快很多）")
 		// --build-arg VERSION=<newHead>: 把 git HEAD short hash 注入到 Dockerfile 的 ARG VERSION,
 		// 再由 ldflags 写入 main.Version, 容器启动后 app.Version 就是这个值,
 		// CheckVersionConsistency 据此判断是否需要兜底重建容器。
-		if !execCommandLogTimeout(gitRoot, "docker", 1800, "compose", "build",
+		if !execCommandLogTimeout(hostGitRoot, "docker", 1800, "compose", "build",
 			"--build-arg", "VERSION="+newHead, "panel", "frontend") {
 			logWrite("镜像构建失败，请查看上方日志")
 			setPullDone(false)
@@ -1196,7 +1205,7 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		}
 
 		logWrite(">>> 6/7 重建前端容器 + 清理旧镜像")
-		if !execCommandLog(gitRoot, "docker", "compose", "up", "-d", "--no-deps", "frontend") {
+		if !execCommandLog(hostGitRoot, "docker", "compose", "up", "-d", "--no-deps", "frontend") {
 			logWrite("重启前端失败")
 			setPullDone(false)
 			return
@@ -1276,10 +1285,7 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		// 前置: 先清理可能存在的同名 helper 容器(上次失败残留)
 		logWrite(">>> 重建 panel 容器(通过 helper 容器, 避免自杀时序问题)")
 		_ = exec.Command("docker", "rm", "-f", "nexus-panel-restarter").Run()
-		// 关键: 挂载源路径必须是宿主机路径(通过 docker.sock 调宿主机 docker),
-		// 不能用容器内路径, 否则 docker compose 找不到配置文件
-		// 用 HOST_PROJECT_ROOT 环境变量指定宿主机路径, 没配置则回退到 gitRoot
-		hostGitRoot := getHostProjectRoot()
+		// hostGitRoot 已在步骤 5 之前获取(修复 2026-07-21)
 		helperCmd := exec.Command("docker", "run", "-d",
 			"--name", "nexus-panel-restarter",
 			"-v", "/var/run/docker.sock:/var/run/docker.sock",
@@ -1299,13 +1305,22 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		// 回退到自杀式直接执行, 引发"只 Create 不 Start"+nginx 挂载路径错乱等连锁事故。
 		// docker run 命令本身不依赖执行进程的 cwd, -v/-w 参数已指定挂载和工作目录。
 		if out, err := helperCmd.CombinedOutput(); err != nil {
-			logWrite(">>> 警告: helper 容器启动失败, 回退到直接执行 docker compose up: %v", err)
+			// 修复 CRITICAL 2026-07-21: 删除原 fallback "自杀式直接执行 docker compose up"。
+			// 根因: fallback 在 panel 容器内执行 docker compose up panel, docker compose CLI
+			// 通过 docker.sock 调宿主机 dockerd stop 旧 panel 时, SIGKILL 会杀掉 docker compose CLI 自己,
+			// 导致 CLI 还没发完 stop/remove/create/start 全部 API 请求就被杀, 新容器只 Create 不 Start,
+			// panel 502 不恢复。这是定时炸弹: 任何 helper 失败(网络抖动/apk 源不可用/sock 权限)
+			// 都会触发, 重复今天的事故。
+			// 正确做法: helper 失败就明确告警 + 标记失败, 让管理员手动介入。
+			// 管理员可在宿主机直接执行: cd $HOST_PROJECT_ROOT && docker compose up -d --no-deps panel
+			logWrite(">>> 错误: helper 容器启动失败, 更新中断, 请手动重建 panel 容器")
+			logWrite(">>> 错误详情: %v", err)
 			logWrite(">>> 输出: %s", string(out))
-			// 回退: 直接执行(可能再现"只 Create 不 Start", 但至少尝试)
-			execCommandLog(gitRoot, "docker", "compose", "up", "-d", "--no-deps", "panel")
-		} else {
-			logWrite(">>> helper 容器已启动, 3 秒后将重建 panel 容器并自动清理")
+			logWrite(">>> 手动恢复命令: cd %s && docker compose up -d --no-deps panel", hostGitRoot)
+			setPullDone(false)
+			return
 		}
+		logWrite(">>> helper 容器已启动, 3 秒后将重建 panel 容器并自动清理")
 	}()
 
 	response.OK(c, gin.H{"success": true, "msg": "更新已开始，请在日志面板查看实时进度"})
