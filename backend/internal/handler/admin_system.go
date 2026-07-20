@@ -1183,12 +1183,16 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 			logWrite("警告: 读取 git HEAD short hash 失败, 将用 dev 作为版本号")
 			newHead = "dev"
 		}
-		// 修复 CRITICAL 2026-07-21: 所有 docker compose 调用必须用 hostGitRoot 作为工作目录。
-		// 原因: docker compose CLI 通过 docker.sock 调用宿主机 dockerd 执行,
-		// docker-compose.yml 里的相对路径(如 ./deployments/nginx/conf.d)会被宿主机 dockerd
-		// 按工作目录解析。如果工作目录是容器内路径(如 /root/nexus-panel), 宿主机上该路径为空,
-		// 导致挂载空目录覆盖镜像里 COPY 的配置文件 → frontend 容器 nginx 无配置 → 80/443 不响应。
-		// hostGitRoot 优先读 HOST_PROJECT_ROOT 环境变量, 没配置则回退到 gitRoot(容器内路径)。
+		// 修复 CRITICAL 2026-07-21: docker compose up 重建容器必须用宿主机路径。
+		// 原因: docker compose up 通过 docker.sock 调宿主机 dockerd, docker-compose.yml
+		// 里的相对路径 volumes(如 ./deployments/nginx/conf.d)会被宿主机 dockerd 按工作目录
+		// 解析。如果工作目录是容器内路径(/root/nexus-panel), 宿主机上该路径为空,
+		// 导致挂载空目录覆盖镜像里 COPY 的配置文件 → nginx 无配置 → 80/443 不响应。
+		// 解法: frontend + panel 的 docker compose up 都交给 helper 容器, helper 用 -w 指定
+		// 宿主机项目路径(/opt/nexus-panel), 容器内路径正确解析。
+		// 注意: docker compose build 不需要宿主机路径, 用 gitRoot(容器内路径)即可,
+		// 因为 build 只读 Dockerfile/源码, 不涉及 volume 挂载路径解析。
+		// hostGitRoot 优先读 HOST_PROJECT_ROOT 环境变量, 没配置则回退到 getGitRoot()。
 		hostGitRoot := getHostProjectRoot()
 		logWrite(">>> 宿主机项目路径: %s (容器内路径: %s)", hostGitRoot, gitRoot)
 
@@ -1197,7 +1201,7 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 		// --build-arg VERSION=<newHead>: 把 git HEAD short hash 注入到 Dockerfile 的 ARG VERSION,
 		// 再由 ldflags 写入 main.Version, 容器启动后 app.Version 就是这个值,
 		// CheckVersionConsistency 据此判断是否需要兜底重建容器。
-		if !execCommandLogTimeout(hostGitRoot, "docker", 1800, "compose", "build",
+		if !execCommandLogTimeout(gitRoot, "docker", 1800, "compose", "build",
 			"--build-arg", "VERSION="+newHead, "panel", "frontend") {
 			logWrite("镜像构建失败，请查看上方日志")
 			setPullDone(false)
