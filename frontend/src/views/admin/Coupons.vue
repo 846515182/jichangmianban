@@ -226,18 +226,19 @@ const generateCode = () => {
   form.code = code
 }
 
-const openDialog = (row?: Coupon) => {
-  editing.value = row || null
+const openDialog = (row?: any) => {
+  editing.value = (row as Coupon) || null
   if (row) {
     // 编辑: 从 row 加载, value/minSpend 从分转元(percent 的 value 是整数百分比, 直接用)
+    const r = row as Coupon
     Object.assign(form, {
-      type: row.type,
-      value: row.type === 'percent' ? row.value : row.value / 100,
-      minSpend: row.min_amount_cents / 100,
-      totalCount: row.max_uses,
-      expireAt: row.expire_at || '',
-      isEnabled: row.is_enabled,
-      code: row.code,
+      type: r.type,
+      value: r.type === 'percent' ? r.value : r.value / 100,
+      minSpend: r.min_amount_cents / 100,
+      totalCount: r.max_uses,
+      expireAt: r.expire_at || '',
+      isEnabled: r.is_enabled,
+      code: r.code,
     })
   } else {
     Object.assign(form, {
