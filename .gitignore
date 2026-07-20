@@ -8,6 +8,9 @@ nexus-panel.new
 nexus-panel-fix
 nexus-panel.backup.*
 nexus-panel-new
+# node_agent 编译产物 (go build 输出, 不入库, 通过 Dockerfile 重建)
+node_agent/agent
+node_agent/nexus-agent
 node_modules/
 dist/
 *.bak*
@@ -24,13 +27,17 @@ backend/_out/
 # 包含 git-pull.log / git-pull.state 等, 更新时会被 stash 误判为本地变更导致冲突
 .update-state/
 
-# Trae agent 本地辅助脚本 (沙箱内调试用, 不入库)
-deploy_and_verify.py
+# 根目录运维脚本 (沙箱内调试 + 历史一次性排查/修复脚本, 不入库)
+# 通配规则 (按命名前缀, 仅匹配根目录)
+/check_*.py
+/diag_*.py
+/fix_*.py
+/deploy_*.py
+/revive*.py
+/verify_*.py
+# 显式列表 (无统一前缀)
 http_tunnel_exec.py
 rebuild_panel.py
-check_ssh.py
-check_node.py
-check_panel_ssh.py
 update_panel.py
 rebuild.py
 db_cleanup.py
@@ -38,6 +45,18 @@ db_inspect.py
 reset_node_traffic.py
 clear_redis_cache.py
 server_sync_reset.py
+cleanup_dup_nodes.py
+clear_users.py
+disable_cron.py
+disable_mtls.py
+emergency_revive.py
+force_rebuild_agent.py
+kill_zombie_docker.py
+manual_deploy.py
+ops_config.py
+panel_git_pull.py
+recreate_panel.py
+ssh_via_panel.py
 
 # Python 缓存
 __pycache__/
