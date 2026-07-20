@@ -1084,16 +1084,47 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 			}
 		}
 		if hasTrackedChanges {
-			logWrite("工作树有已跟踪文件的修改，自动 stash 保留:\n%s", statusResult.Output)
-			stashResult := execCommand("git", "stash", "push", "-m", "nexus-panel-auto-stash-before-pull")
-			if !stashResult.Success {
-				logWrite("git stash 失败: %s", stashResult.Error)
-				gitPullOK = false
-				gitPullDone = true
-				return
+			// [fix 2026-07-20] 检测未解决的合并冲突状态(porcelain XY 含 'U' 或 'AA'/'DD')。
+			// git stash push 在有 unmerged paths 时必然 exit 1, 导致整个在线更新流程中断。
+			// 典型场景: 之前 merge/rebase 中断残留 DU/UD/AU/UA/AA/UU 状态文件。
+			// 冲突状态无法 stash 保存, 本地冲突在"同步远程 main"语义下也无保留价值,
+			// 直接 git reset --hard HEAD 清掉冲突, 后续 git reset --hard origin/<branch> 会同步最新代码。
+			hasConflicts := false
+			var conflictFiles []string
+			for _, line := range strings.Split(statusResult.Output, "\n") {
+				if len(line) < 2 || strings.HasPrefix(line, "??") {
+					continue
+				}
+				x, y := line[0], line[1]
+				if x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D') {
+					hasConflicts = true
+					conflictFiles = append(conflictFiles, strings.TrimSpace(line[2:]))
+				}
 			}
-			stashed = true
-			logWrite("本地修改已 stash 保存，更新完成后将自动恢复")
+			if hasConflicts {
+				logWrite("警告: 工作树存在未解决的合并冲突(无法 stash), 将通过 git reset --hard 清除:")
+				for _, f := range conflictFiles {
+					logWrite("  冲突文件: %s", f)
+				}
+				if !execCommandLog(gitRoot, "git", "reset", "--hard", "HEAD") {
+					logWrite("git reset --hard HEAD 失败")
+					gitPullOK = false
+					gitPullDone = true
+					return
+				}
+				logWrite("冲突状态已清除, 继续更新流程")
+			} else {
+				logWrite("工作树有已跟踪文件的修改，自动 stash 保留:\n%s", statusResult.Output)
+				stashResult := execCommand("git", "stash", "push", "-m", "nexus-panel-auto-stash-before-pull")
+				if !stashResult.Success {
+					logWrite("git stash 失败: %s", stashResult.Error)
+					gitPullOK = false
+					gitPullDone = true
+					return
+				}
+				stashed = true
+				logWrite("本地修改已 stash 保存，更新完成后将自动恢复")
+			}
 		} else {
 			logWrite("工作树干净(仅有未跟踪文件, 不影响 git reset)")
 		}
