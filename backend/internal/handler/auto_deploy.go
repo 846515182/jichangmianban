@@ -903,14 +903,32 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	// ============================================================
 	sse.event(PhaseStart, "running", "构建镜像并启动 "+containerName+"...", "")
 
-	// 兜底: docker compose 启动增加重试 (镜像拉取超时、网络波动)
+	// 兜底: docker compose 启动增加重试 (镜像拉取超时、网络波动、Docker daemon 中途挂掉)
 	var startOut string
 	var startErr error
 	for retry := 1; retry <= 2; retry++ {
 		if retry > 1 {
 			sse.event(PhaseStart, "log", "", fmt.Sprintf("启动失败, 第 %d 次重试 (先清理旧容器)...", retry))
-			// 兜底: 清理失败的容器和网络残留
+			// 兜底: 清理失败的容器和网络残留 + 确保 Docker daemon 存活
 			sshRun(client, fmt.Sprintf("cd %s 2>/dev/null && docker compose -f docker-compose.node.yml --env-file .env.node down --timeout 5 2>/dev/null; docker rm -f %s 2>/dev/null; true", deployDir, containerName))
+			// Phase 3 到 Phase 5 之间 Docker daemon 可能挂掉(低配 VPS OOM 或 systemd 重启),
+			// 重试前做一次二次验证, 若 daemon 死了则尝试拉起
+			if !verifyDockerReady(client, sse) {
+				sse.event(PhaseStart, "log", "", "Docker daemon 已挂, 尝试修复...")
+				sshRun(client, "systemctl stop docker 2>/dev/null; "+
+					"kill -9 $(cat /var/run/docker.pid 2>/dev/null) 2>/dev/null; "+
+					"pkill -9 dockerd 2>/dev/null; "+
+					"rm -f /var/run/docker.pid /run/docker.pid /var/run/docker.sock /run/docker.sock; "+
+					"sleep 2; "+
+					"systemctl start docker 2>/dev/null || "+
+					"(setsid /usr/local/bin/dockerd > /var/log/dockerd.log 2>&1 < /dev/null &); "+
+					"sleep 5; true")
+				// 再等一轮 verify
+				if !verifyDockerReady(client, sse) {
+					sse.event(PhaseStart, "error", "Docker daemon 修复失败(重试中无法启动docker)", "", DeployErrDockerNotInstalled)
+					return false, DeployErrDockerNotInstalled, "Docker daemon 修复失败"
+				}
+			}
 			time.Sleep(3 * time.Second)
 		}
 		startOut, startErr = sshStream(client, fmt.Sprintf(
@@ -1599,14 +1617,16 @@ func verifyDockerReady(client *ssh.Client, sse *sseWriter) bool {
 		if strings.Contains(out, "not found") || strings.Contains(out, "command not found") {
 			return false
 		}
-		// 其他错误: systemctl 状态异常, 尝试修复
+		// 其他错误: systemctl 状态异常(如 stale PID 文件导致 "process is still running"),
+		// 尝试修复: 先按 PID 文件精准杀僵尸进程, 再 pkill 兜底, 然后清理 socket/pid 重启
 		sse.event(PhasePrepare, "log", "", fmt.Sprintf("Docker 异常(尝试修复): %s", strings.TrimSpace(out)))
 		sshRun(client, "systemctl stop docker 2>/dev/null; "+
+			"kill -9 $(cat /var/run/docker.pid 2>/dev/null) 2>/dev/null; "+
 			"pkill -9 dockerd 2>/dev/null; "+
 			"rm -f /var/run/docker.pid /run/docker.pid /var/run/docker.sock /run/docker.sock; "+
 			"sleep 2; "+
 			"systemctl start docker 2>/dev/null || "+
-			"(setsid dockerd > /var/log/dockerd.log 2>&1 < /dev/null &); "+
+			"(setsid /usr/local/bin/dockerd > /var/log/dockerd.log 2>&1 < /dev/null &); "+
 			"sleep 3; true")
 		time.Sleep(5 * time.Second)
 	}
