@@ -128,7 +128,10 @@ func (s *EmailService) SendVerifyLink(ctx context.Context, email string) error {
 	if row.EmailVerified {
 		return nil // 已激活, 不重复发送
 	}
-	token := randomToken(48)
+	token, err := randomToken(48)
+	if err != nil {
+		return err
+	}
 	if err := s.Redis.Set(ctx, "email:verify:link:"+token, row.ID, emailResetTTL).Err(); err != nil {
 		return err
 	}

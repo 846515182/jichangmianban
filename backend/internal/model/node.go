@@ -21,7 +21,7 @@ type Node struct {
 	TrafficUsed   int64          `gorm:"type:bigint;default:0" json:"traffic_used"`
 	IsEnabled     bool           `gorm:"column:is_enabled;default:true" json:"is_enabled"`
 	NodeToken     string         `gorm:"type:varchar(64);uniqueIndex;not null" json:"node_token"`
-	GrpcPort      int            `gorm:"type:int" json:"grpc_port"`
+	GrpcPort      int            `gorm:"type:int;default:50051" json:"grpc_port"`
 	LastSeenAt    *time.Time     `gorm:"column:last_seen_at" json:"last_seen_at,omitempty"`
 	Online        bool           `gorm:"default:false" json:"online"`
 	Version       string         `gorm:"type:varchar(32)" json:"version"`

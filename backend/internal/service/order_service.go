@@ -103,25 +103,30 @@ func (s *OrderService) CreateOrder(in *CreateOrderInput) (*model.Order, error) {
 	isFreeOrder := amount == 0
 	// 修复 P0-3: 0 元订单可被无限刷开通套餐。加每用户每日 1 次限频(Redis 计数),
 	// 防止配合 0 元券/0 元套餐批量白嫖流量和有效期。
-	// 无 Redis 时降级为不限制(与历史行为一致), 但记录告警便于排障。
+	// 修复 P1-0元订单: Redis 不可用时 fail-closed 拒绝下单, 避免限频被绕过白嫖。
 	// 修复 P1: 旧版 Incr 在事务之前执行, 事务失败(券抢光/开通失败/订单号碰撞)时计数未回退,
 	// 用户当日重试被锁。改为事务失败时显式 Decr 回退, 保证计数与实际成功次数一致。
 	freeOrderRdbKey := ""
 	var freeOrderIncred bool
 	if isFreeOrder {
-		if rdb := app.Get().RDB; rdb != nil {
-			freeOrderRdbKey = fmt.Sprintf("freeorder:uid:%s:%s", in.UserID, now.Format("20060102"))
-			ctx := context.Background()
-			cnt, err := rdb.Incr(ctx, freeOrderRdbKey).Result()
-			if err == nil {
-				freeOrderIncred = true
-				if cnt == 1 {
-					rdb.Expire(ctx, freeOrderRdbKey, 25*time.Hour)
-				}
-				if cnt > 1 {
-					return nil, errors.New("今日已领取免费套餐, 请明日再试或购买付费套餐")
-				}
-			}
+		rdb := app.Get().RDB
+		if rdb == nil {
+			// P1-0元订单: Redis 不可用时 fail-closed, 拒绝而非放行, 防止白嫖
+			return nil, errors.New("免费订单服务暂不可用(Redis 不可用), 请稍后重试")
+		}
+		freeOrderRdbKey = fmt.Sprintf("freeorder:uid:%s:%s", in.UserID, now.Format("20060102"))
+		ctx := context.Background()
+		cnt, err := rdb.Incr(ctx, freeOrderRdbKey).Result()
+		if err != nil {
+			// Redis 操作异常也 fail-closed
+			return nil, errors.New("免费订单服务暂不可用(Redis 异常), 请稍后重试")
+		}
+		freeOrderIncred = true
+		if cnt == 1 {
+			rdb.Expire(ctx, freeOrderRdbKey, 25*time.Hour)
+		}
+		if cnt > 1 {
+			return nil, errors.New("今日已领取免费套餐, 请明日再试或购买付费套餐")
 		}
 	}
 	order := &model.Order{
@@ -135,6 +140,13 @@ func (s *OrderService) CreateOrder(in *CreateOrderInput) (*model.Order, error) {
 		CouponID:      couponID,
 		CouponCode:    couponCode,
 		ExpiredAt:     now.Add(15 * time.Minute),
+	}
+	// P0-F4: 写入 InviterID(注册时绑定的邀请人), 用于首单支付后发放返利
+	// 用户表无 InviterID 字段, 通过 referral 服务查询邀请关系获取
+	if s.referralSvc != nil {
+		if inviterID := s.referralSvc.GetInviterIDByUser(in.UserID); inviterID != nil && *inviterID != "" {
+			order.InviterID = inviterID
+		}
 	}
 	if isFreeOrder {
 		order.Status = model.OrderStatusPaid
@@ -322,6 +334,8 @@ func (s *OrderService) ExpireOrders() (int, error) {
 // 修复 F-11: 将 setUserPlan 移入事务, 使用 tx 而非全局 db
 // 原实现中 setUserPlan 调用 s.userRepo.Update(), 走的是 r.db(全局), 不在事务内,
 // 若事务回滚, 订单状态回滚但用户套餐已生效, 造成"退款不退套餐"
+// 修复 P0-F1: 改为原子状态机更新。先通过 RowsAffected 判定本次是否履约(幂等),
+// 所有副作用(返佣/订阅激活/流量) 都放在状态机更新之后, 杜绝并发重复履约。
 func (s *OrderService) PaySuccess(orderNo, tradeNo string) error {
 	o, err := s.orderRepo.GetByOrderNo(orderNo)
 	if err != nil {
@@ -336,28 +350,34 @@ func (s *OrderService) PaySuccess(orderNo, tradeNo string) error {
 	if o.Status != model.OrderStatusPending && o.Status != model.OrderStatusExpired {
 		return errors.New("订单状态不允许支付")
 	}
+	// 记录是否为过期订单履约(其优惠券已被 ExpireOrders 回退, 需重新消费)
+	// 使用进入事务前的状态判定, 事务内原子 UPDATE 的 RowsAffected 决定是否本请求履约
+	wasExpired := o.Status == model.OrderStatusExpired
 	now := time.Now()
 
 	db := app.Get().DB
 	return db.Transaction(func(tx *gorm.DB) error {
-		var locked model.Order
-		if err := tx.Set("gorm:query_option", "FOR UPDATE").
-			Where("id = ?", o.ID).First(&locked).Error; err != nil {
-			return err
+		// P0-F1: 原子状态机更新 - 仅当 status IN ('pending','expired') 时改为 'paid'
+		// 通过 RowsAffected 判定是否本次履约(幂等)
+		res := tx.Model(&model.Order{}).
+			Where("id = ? AND status IN (?, ?)", o.ID, model.OrderStatusPending, model.OrderStatusExpired).
+			Updates(map[string]interface{}{
+				"status":   model.OrderStatusPaid,
+				"trade_no": tradeNo,
+				"paid_at":  now,
+			})
+		if res.Error != nil {
+			return res.Error
 		}
-		if locked.Status == model.OrderStatusPaid {
+		if res.RowsAffected == 0 {
+			// 已被其他请求履约, 幂等返回(不重复发放权益)
 			return nil
 		}
-		if locked.Status != model.OrderStatusPending && locked.Status != model.OrderStatusExpired {
-			return errors.New("订单状态不允许支付")
-		}
-		// 记录是否为过期订单履约(其优惠券已被 ExpireOrders 回退, 需重新消费)
-		wasExpired := locked.Status == model.OrderStatusExpired
-		locked.Status = model.OrderStatusPaid
-		locked.TradeNo = tradeNo
-		locked.PaidAt = &now
-		if err := tx.Save(&locked).Error; err != nil {
-			return err
+		// 本请求赢得履约权, 执行所有副作用
+		// 重新加载订单获取最新数据(避免使用 o 的旧快照)
+		var locked model.Order
+		if err := tx.Where("id = ?", o.ID).First(&locked).Error; err != nil {
+			return fmt.Errorf("加载已支付订单失败: %w", err)
 		}
 		plan, err := s.planRepo.GetByID(locked.PlanID)
 		if err != nil {
@@ -567,8 +587,39 @@ func (s *OrderService) AdminRefund(orderID, reason string) error {
 				}
 			}
 			// otherPaid > 0 之外: 用户仍有其它有效订阅, 保留套餐不重置(仅退款本笔金额)
+		} else {
+			// 修复 P0-F3: 跨套餐退款 - 用户当前 plan 与本订单 plan 不同,
+			// 旧版静默放过导致用户白嫖已发放的权益(天数/流量)。现按本订单 plan
+			// 实际发放的 DurationDays/TrafficLimit 扣减, 钳制不为负, 到期则标记过期。
+			changed := false
+			if plan.DurationDays > 0 && u.ExpiredAt != nil {
+				newExp := u.ExpiredAt.AddDate(0, 0, -plan.DurationDays)
+				if newExp.Before(now) {
+					newExp = now
+					// 有效期已过, 标记过期
+					u.Status = "expired"
+				}
+				u.ExpiredAt = &newExp
+				changed = true
+			}
+			if plan.TrafficLimit > 0 {
+				newLimit := u.TrafficLimit - plan.TrafficLimit
+				// 不低于已用量, 否则用户立即超额(保护用户)
+				if newLimit < u.TrafficUsed {
+					newLimit = u.TrafficUsed
+				}
+				if newLimit < 0 {
+					newLimit = 0
+				}
+				u.TrafficLimit = newLimit
+				changed = true
+			}
+			if changed {
+				if err := tx.Save(&u).Error; err != nil {
+					return fmt.Errorf("跨套餐退款回退权益失败: %w", err)
+				}
+			}
 		}
-		// u.PlanID != locked.PlanID: 当前套餐非本订单所开, 不重置
 		return nil
 	})
 }

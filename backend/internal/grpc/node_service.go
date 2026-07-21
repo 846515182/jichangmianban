@@ -69,23 +69,11 @@ func (s *NodeServiceServer) Register(ctx context.Context, req *nexuspb.RegisterR
 	node.Version = req.GetVersion()
 	node.LastSeenAt = &now
 
-	// 若 agent 上报了地址/端口，覆盖节点表
-	if req.GetServerAddress() != "" || req.GetGrpcPort() != 0 {
-		updates := map[string]interface{}{}
-		if req.GetServerAddress() != "" {
-			updates["server_address"] = req.GetServerAddress()
-			node.ServerAddress = req.GetServerAddress()
-		}
-		if req.GetGrpcPort() != 0 {
-			updates["grpc_port"] = req.GetGrpcPort()
-			node.GrpcPort = int(req.GetGrpcPort())
-		}
-		if err := app.Get().DB.Model(&model.Node{}).
-			Where("id = ? AND is_deleted = false", node.ID).
-			Updates(updates).Error; err != nil {
-			s.logger.Warn("更新节点上报地址失败", zap.Error(err))
-		}
-	}
+	// P1-Register校验: 移除 agent 上报 server_address/grpc_port 的覆盖逻辑。
+	// 节点地址由管理员在面板配置, agent 不应修改。旧版允许 agent 覆盖会导致:
+	//   1. 被攻破的节点 agent 可伪造地址把流量统计指向错误节点
+	//   2. NAT/CDN 环境下 agent 上报的内网/回环地址覆盖公网地址, 面板 PingNode 失败
+	//   3. 管理员修改地址后 agent 下次注册又改回去, 配置漂移
 
 	info, err := buildNodeInfoWithDecryptedKey(node)
 	if err != nil {
@@ -176,9 +164,16 @@ func (s *NodeServiceServer) Heartbeat(ctx context.Context, req *nexuspb.Heartbea
 			}
 		}
 	} else {
-		configChanged = true
-		s.logger.Warn("Redis 不可用, 强制 configChanged=true 保证最终一致",
-			zap.String("node_id", node.ID))
+		// P1-Redis-configChanged: Redis 不可用时不再强制 configChanged=true,
+		// 改用节点 ID hash 做随机退避(约 10% 概率触发拉配置, 平均每 10 次心跳拉一次),
+		// 避免所有节点在 Redis 故障期间每次心跳都全量拉配置导致 DB 压力激增。
+		// 用 fnv hash 让不同节点错开, 避免同一时刻全节点涌入 GetConfig。
+		if hashString(node.ID)%10 == 0 {
+			configChanged = true
+		}
+		s.logger.Warn("Redis 不可用, 用节点 ID hash 退避拉配置",
+			zap.String("node_id", node.ID),
+			zap.Bool("config_changed", configChanged))
 	}
 
 	// 用户变更检测：对当前活跃用户列表做指纹哈希，与 Redis 缓存比较
@@ -207,12 +202,16 @@ func (s *NodeServiceServer) Heartbeat(ctx context.Context, req *nexuspb.Heartbea
 					s.logger.Warn("写入 usershash 失败", zap.String("key", key), zap.Error(err))
 				}
 				s.logger.Info("检测到用户列表变更，触发配置更新",
-					zap.String("node_id", node.ID),
-					zap.Int("user_count", len(users)))
+				zap.String("node_id", node.ID),
+				zap.Int("user_count", len(users)))
 			}
 		}
 	} else {
-		usersChanged = true
+		// P1-Redis-configChanged: 同 configChanged, Redis 不可用时用节点 ID hash 退避,
+		// 避免每次心跳都触发全量用户列表查询(在高用户数场景下 DB 压力大)。
+		if hashString(node.ID)%10 == 0 {
+			usersChanged = true
+		}
 	}
 
 	return &nexuspb.HeartbeatResponse{
@@ -277,8 +276,9 @@ func (s *NodeServiceServer) GetConfig(ctx context.Context, req *nexuspb.GetConfi
 	}
 	metaBytes, _ := json.Marshal(metaMap)
 
-	// 配置版本: 用节点 updated_at unix 作为简单版本号
-	configVersion := strconv.FormatInt(node.UpdatedAt.Unix(), 10)
+	// P1-configVersion: 用节点 updated_at 的 UnixNano 作为版本号,
+	// 与 Heartbeat 中的 configVer 保持一致(都用纳秒), 避免秒级精度下同秒多次更新漏判。
+	configVersion := strconv.FormatInt(node.UpdatedAt.UnixNano(), 10)
 
 	return &nexuspb.NodeConfigResponse{
 		Resp:          &nexuspb.Response{Code: 0, Message: "ok"},

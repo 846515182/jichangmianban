@@ -53,13 +53,14 @@ func (r *OrderRepo) ListByUserID(userID string, page, size int) ([]model.Order, 
 // 现支持 keyword 模糊匹配 order_no 或 username(LEFT JOIN users)。
 // 修复 P0: 旧版直接返回 []model.Order 无 username, 前端表格"用户"列永远空白。
 // 现改用 OrderListItem DTO, LEFT JOIN users 取 username 一起返回。
+// 修复 P1-repo-软删除过滤: JOIN users 加 AND u.is_deleted = false, 避免查出软删用户的订单
 // 注意: gorm 不便直接返回 DTO + Count, 这里用 raw SQL 兼容 PostgreSQL。
 func (r *OrderRepo) ListAll(page, size int, status, userID, keyword string) ([]OrderListItem, int64, error) {
 	q := r.db.Table("orders AS o").
 		Select("o.id, o.order_no, o.user_id, o.plan_id, o.plan_name, o.amount_cents, o.status, "+
 			"o.payment_method, o.trade_no, o.coupon_id, o.coupon_code, o.paid_at, o.expired_at, "+
 			"o.is_deleted, o.created_at, o.updated_at, u.username AS user_username").
-		Joins("LEFT JOIN users AS u ON u.id = o.user_id").
+		Joins("LEFT JOIN users AS u ON u.id = o.user_id AND u.is_deleted = false").
 		Where("o.is_deleted = false")
 	if status != "" {
 		q = q.Where("o.status = ?", status)

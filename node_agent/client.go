@@ -26,9 +26,13 @@ type PanelClient struct {
 	nodeSvc    proto.NodeServiceClient
 	trafficSvc proto.TrafficServiceClient
 	userSvc    proto.UserSyncServiceClient
+	// P1-AG13: 主 ctx 引用, 用于派生 RPC ctx; mainCtx 被取消时所有 RPC 也会被取消
+	mainCtx context.Context
 }
 
-func NewPanelClient(addr string) (*PanelClient, error) {
+// NewPanelClient 创建 gRPC 客户端。mainCtx 用于派生 RPC 超时 ctx, 传入主 ctx 后,
+// 主 ctx 取消(SIGTERM)会级联取消所有进行中的 RPC, 加快优雅退出。
+func NewPanelClient(addr string, mainCtx context.Context) (*PanelClient, error) {
 	var creds credentials.TransportCredentials
 
 	tlsCert := os.Getenv("GRPC_TLS_CA")
@@ -113,6 +117,7 @@ func NewPanelClient(addr string) (*PanelClient, error) {
 		nodeSvc:    proto.NewNodeServiceClient(conn),
 		trafficSvc: proto.NewTrafficServiceClient(conn),
 		userSvc:    proto.NewUserSyncServiceClient(conn),
+		mainCtx:    mainCtx,
 	}, nil
 }
 
@@ -190,15 +195,48 @@ func autoDetectCredentials(addr string) credentials.TransportCredentials {
 		log.Printf("[WARN] gRPC 面板为 TLS 但系统 CA 池不可用(%v), 退回明文 — 自签证书请显式配置 GRPC_TLS_CA", err)
 		return insecure.NewCredentials()
 	}
-	log.Printf("[INFO] gRPC 自动 TLS 模式(未配置 GRPC_TLS_CA, 探测面板为 TLS, 使用系统 CA 池)")
-	return credentials.NewTLS(&tls.Config{
+	// P1-AG17: 先用系统池 + ServerName=host 做严格 TLS 校验。
+	// 若失败且错误含 "x509:"(典型: 证书 SAN 不匹配, 如面板用 IP 直连但证书 SAN 只有域名),
+	// 回退到 InsecureSkipVerify 并强烈告警, 避免节点因证书 SAN 不匹配永久掉线。
+	// 其他错误(网络瞬断等)仍用系统池让 gRPC 重连机制处理。
+	strictCreds := credentials.NewTLS(&tls.Config{
 		RootCAs:            systemPool,
 		MinVersion:         tls.VersionTLS12,
 		InsecureSkipVerify: false,
-		// ServerName 设为 host, 让 TLS 校验证书 SAN/CN(公信 CA 签发的证书需域名匹配)
-		// 若面板用 IP 直连且证书 SAN 无 IP, 校验会失败 — 此时仍需 GRPC_TLS_CA 显式配置
-		ServerName: host,
+		ServerName:         host,
 	})
+	if verifyErr := probeTLSHandshake(host, port, systemPool, host); verifyErr != nil {
+		if strings.Contains(verifyErr.Error(), "x509:") {
+			log.Printf("[WARN][SECURITY] TLS 证书 SAN 不匹配(host=%s), 回退到 InsecureSkipVerify(不安全! 建议配置 GRPC_TLS_CA 或修正证书 SAN): %v", host, verifyErr)
+			return credentials.NewTLS(&tls.Config{
+				MinVersion:         tls.VersionTLS12,
+				InsecureSkipVerify: true,
+			})
+		}
+		// 非 x509 错误(如网络瞬断), 仍用系统池让 gRPC 重连机制处理
+		log.Printf("[INFO] gRPC 自动 TLS 模式(系统 CA 池), 测试握手错误(非 x509, 将由 gRPC 重连处理): %v", verifyErr)
+	}
+	log.Printf("[INFO] gRPC 自动 TLS 模式(未配置 GRPC_TLS_CA, 探测面板为 TLS, 使用系统 CA 池)")
+	return strictCreds
+}
+
+// probeTLSHandshake 用指定 CA 池和 ServerName 做一次完整 TLS 握手测试。
+// 用于 autoDetectCredentials 在严格校验模式下检测证书 SAN 是否匹配。
+// 返回 nil 表示握手成功(证书校验通过), 返回 error 表示握手/校验失败。
+func probeTLSHandshake(host, port string, pool *x509.CertPool, serverName string) error {
+	dialer := &net.Dialer{Timeout: 3 * time.Second}
+	conn, err := dialer.Dial("tcp", net.JoinHostPort(host, port))
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	tlsConn := tls.Client(conn, &tls.Config{
+		RootCAs:    pool,
+		MinVersion: tls.VersionTLS12,
+		ServerName: serverName,
+	})
+	return tlsConn.Handshake()
 }
 
 // probeTLSServer 向 host:port 发起 TLS ClientHello, 判断对面是否是 TLS 服务端。
@@ -253,12 +291,19 @@ func (c *PanelClient) Close() error {
 	return nil
 }
 
-func withTimeout() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), 15*time.Second)
+// withTimeout 派生 15s 超时 ctx 用于 RPC 调用
+// P1-AG13: 改为 PanelClient 方法, 基于 c.mainCtx 派生; mainCtx 被取消时 RPC 也会被取消
+// 若 c.mainCtx 为 nil(构造后未设置), 回退到 context.Background() 保持向后兼容
+func (c *PanelClient) withTimeout() (context.Context, context.CancelFunc) {
+	parent := c.mainCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(parent, 15*time.Second)
 }
 
 func (c *PanelClient) Register(nodeToken, hostname, version string) (*proto.RegisterResponse, error) {
-	ctx, cancel := withTimeout()
+	ctx, cancel := c.withTimeout()
 	defer cancel()
 	req := &proto.RegisterRequest{
 		NodeToken: nodeToken,
@@ -273,7 +318,7 @@ func (c *PanelClient) Register(nodeToken, hostname, version string) (*proto.Regi
 }
 
 func (c *PanelClient) GetConfig(nodeID, nodeToken, configVersion string) (*proto.NodeConfigResponse, error) {
-	ctx, cancel := withTimeout()
+	ctx, cancel := c.withTimeout()
 	defer cancel()
 	req := &proto.GetConfigRequest{
 		NodeId:        nodeID,
@@ -288,7 +333,7 @@ func (c *PanelClient) GetConfig(nodeID, nodeToken, configVersion string) (*proto
 }
 
 func (c *PanelClient) Heartbeat(nodeID, nodeToken, version string, cpuUsage, memUsage float64, memTotal int64, onlineConns int32, uptime float64, trafficLimit, trafficUsed int64, proxyReachable bool, proxyLatencyMs int64, proxyError string) (*proto.HeartbeatResponse, error) {
-	ctx, cancel := withTimeout()
+	ctx, cancel := c.withTimeout()
 	defer cancel()
 	req := &proto.HeartbeatRequest{
 		NodeId:            nodeID,
@@ -314,7 +359,7 @@ func (c *PanelClient) Heartbeat(nodeID, nodeToken, version string, cpuUsage, mem
 }
 
 func (c *PanelClient) ReportRealtime(nodeID, nodeToken string, records []*proto.TrafficRecord) (*proto.ReportRealtimeResponse, error) {
-	ctx, cancel := withTimeout()
+	ctx, cancel := c.withTimeout()
 	defer cancel()
 	req := &proto.ReportRealtimeRequest{
 		NodeId:       nodeID,
@@ -329,7 +374,7 @@ func (c *PanelClient) ReportRealtime(nodeID, nodeToken string, records []*proto.
 }
 
 func (c *PanelClient) SyncUsers(nodeID, nodeToken string, sinceVersion int64) (*proto.SyncUsersResponse, error) {
-	ctx, cancel := withTimeout()
+	ctx, cancel := c.withTimeout()
 	defer cancel()
 	req := &proto.SyncUsersRequest{
 		NodeId:       nodeID,

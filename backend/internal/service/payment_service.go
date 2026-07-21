@@ -278,12 +278,10 @@ func (s *PaymentService) VerifyCallback(params map[string]string) (bool, error) 
 
 // HandleNotify 处理支付回调, 调用 order_service.PaySuccess
 // 修复 SEC-P1-02: 增加金额校验 + 防重放
-// 修复 F-10: 调换 SetNX 与 PaySuccess 顺序, 防止"标记成功但业务失败"导致回调永久丢失
-// 原实现: SetNX 在 PaySuccess 之前, 若 SetNX 成功但 PaySuccess 因 DB 故障失败,
-//          返回 fail 给支付平台, 但 trade_no 已被 SetNX 占位, 后续重试全部被 !set 拦截,
-//          导致用户付款后套餐永远无法开通, 必须人工介入清理 Redis key。
-// 现实现: 先 PaySuccess, 成功后再 SetNX 标记。PaySuccess 内部用 FOR UPDATE 做幂等,
-//         重复回调会命中 status==paid 直接返回 nil, 不会重复开通套餐。
+// 修复 P0-F5: 在验签+金额校验通过后、PaySuccess 之前, 先 SetNX trade_no 占坑,
+// 防止 PaySuccess 后崩溃导致重复履约(EPay 重试回调时会再次进入 PaySuccess)。
+// 若 SetNX 返回 false(已处理过), 直接返回 success, EPay 收到 200 不再重试。
+// 若 Redis 不可用或异常, 降级走 PaySuccess 自身的原子状态机幂等(P0-F1) 兜底。
 func (s *PaymentService) HandleNotify(params map[string]string) (string, error) {
 	ok, err := s.VerifyCallback(params)
 	if err != nil {
@@ -314,21 +312,47 @@ func (s *PaymentService) HandleNotify(params map[string]string) (string, error) 
 	if moneyCents != order.AmountCents {
 		return "fail", fmt.Errorf("金额不匹配: 回调=%d分 订单=%d分", moneyCents, order.AmountCents)
 	}
-	// 先执行业务逻辑(PaySuccess 内部用 SELECT FOR UPDATE 保证幂等)
-	if err := s.orderSvc.PaySuccess(orderNo, tradeNo); err != nil {
-		return "fail", err
-	}
-	// 业务成功后再标记 trade_no 已处理, 阻断后续重复回调
-	// 即使此处 SetNX 失败也不影响正确性: 下次回调会再次进入 PaySuccess,
-	// 命中 status==paid 提前返回 nil, 不会重复开通套餐
+	// P0-F5: 先占坑, 防止 PaySuccess 后崩溃导致重复履约
+	// 若 SetNX 返回 false 表示已处理过, 直接返回 success(EPay 收到 200 不再重试)
+	// 若 Redis 不可用/异常, 降级走 PaySuccess 自身的原子状态机幂等(P0-F1) 兜底
+	//
+	// 关键: 若 SetNX 成功但 PaySuccess 失败(DB 故障等), 必须显式 DEL key,
+	// 否则下次 EPay 重试回调会因 SetNX=false 直接返回 success 而 PaySuccess 没被调用,
+	// 导致订单永久丢失履约(用户付款但套餐未开通)。
 	rdb := app.Get().RDB
+	notifyKey := ""
+	notifyKeySet := false
 	if rdb != nil {
-		key := "epay:tradedone:" + tradeNo
-		if _, err := rdb.SetNX(context.Background(), key, "1", 24*time.Hour).Result(); err != nil {
-			// Redis 失败不影响正确性 (下次回调会幂等), 但要记录便于排障
-			app.Get().Logger.Warn("SetNX trade done failed",
-				zap.String("trade_no", tradeNo), zap.Error(err))
+		notifyKey = "epay_notify:" + tradeNo
+		ok, err := rdb.SetNX(context.Background(), notifyKey, "1", 7*24*time.Hour).Result()
+		if err == nil && !ok {
+			// 已处理过, 直接返回成功(EPay 收到 200 不再重试)
+			return "success", nil
 		}
+		// err != nil 时降级走 PaySuccess 兜底, 但记录告警
+		if err != nil {
+			if logger := app.Get().Logger; logger != nil {
+				logger.Warn("HandleNotify SetNX 异常, 降级走 PaySuccess 兜底",
+					zap.String("trade_no", tradeNo), zap.Error(err))
+			}
+		} else {
+			// SetNX 成功占坑, 标记后续 PaySuccess 失败时需 DEL 回退
+			notifyKeySet = true
+		}
+	}
+	// 然后才调 PaySuccess(P0-F1 内部原子状态机保证幂等, 不会重复履约)
+	if err := s.orderSvc.PaySuccess(orderNo, tradeNo); err != nil {
+		// PaySuccess 失败: 回退 SetNX 占坑, 让 EPay 下次重试能重新进入 PaySuccess
+		// (不回退会导致下次重试被 SetNX=false 拦截, 订单永久丢失履约)
+		if notifyKeySet && rdb != nil {
+			if delErr := rdb.Del(context.Background(), notifyKey).Err(); delErr != nil {
+				if logger := app.Get().Logger; logger != nil {
+					logger.Warn("HandleNotify 回退 SetNX key 失败, 下次重试可能被吞",
+						zap.String("trade_no", tradeNo), zap.Error(delErr))
+				}
+			}
+		}
+		return "fail", err
 	}
 	return "success", nil
 }

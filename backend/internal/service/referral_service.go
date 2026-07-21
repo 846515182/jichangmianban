@@ -112,6 +112,7 @@ func generateInviteCode(length int) string {
 
 // BindInviter 绑定邀请关系(注册时调用)
 // 注意: 每人只能被邀请一次, 重复调用返回错误
+// 修复 P1-BindInviter: 三步(查重/创建)包入事务, 事务内查重避免并发重复绑定
 func (s *ReferralService) BindInviter(inviteeID, inviteCode string) error {
 	enabled, _, _ := s.GetReferralConfig()
 	if !enabled {
@@ -128,17 +129,30 @@ func (s *ReferralService) BindInviter(inviteeID, inviteCode string) error {
 	if inviter.ID == inviteeID {
 		return errors.New("不能邀请自己")
 	}
-	// 检查是否已被邀请
-	if existing, _ := s.referralRepo.GetByInviteeID(inviteeID); existing != nil {
-		return errors.New("只能被邀请一次")
-	}
-	// 创建邀请关系
 	ref := &model.Referral{
 		InviterID: inviter.ID,
 		InviteeID: inviteeID,
 		Status:    model.ReferralStatusPending,
 	}
-	return s.referralRepo.Create(ref)
+	// 事务内查重 + 创建, 避免并发场景下两个请求同时通过查重后双写
+	// 优先用 repo 持有的 DB(单元测试 SQLite 内存库场景兼容), 回退到 app.Get().DB
+	db := s.referralRepo.DB()
+	if db == nil {
+		db = s.GetDB()
+	}
+	if db == nil {
+		return errors.New("数据库不可用")
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		existing, err := s.referralRepo.GetByInviteeIDTx(tx, inviteeID)
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if existing != nil {
+			return errors.New("只能被邀请一次")
+		}
+		return s.referralRepo.CreateTx(tx, ref)
+	})
 }
 
 // ListInvitations 分页查询我发出的邀请
@@ -156,9 +170,21 @@ func (s *ReferralService) ListRewards(userID string, page, size int) ([]model.Re
 	return s.referralRepo.ListRewards(userID, page, size)
 }
 
+// ListAllInvitations 分页查询全部邀请关系(管理端 P1-admin_referral 用)
+func (s *ReferralService) ListAllInvitations(page, size int) ([]model.Referral, int64, error) {
+	return s.referralRepo.ListAll(page, size)
+}
+
+// ListAllRewards 分页查询全部返利记录(管理端对账 P1-admin_referral 用)
+func (s *ReferralService) ListAllRewards(page, size int) ([]model.ReferralReward, int64, error) {
+	return s.referralRepo.ListAllRewards(page, size)
+}
+
 // HandleOrderPaid 订单支付成功后处理返利
 // 在 PaySuccess 事务内调用, 保证原子性
 // 只对用户的首笔支付订单发放返利
+// 修复 P0-F2: 在事务内对 referrals 行加 FOR UPDATE 锁, 加锁后重新检查 status,
+// 防止并发场景下两个 PaySuccess 同时进入并重复发放返利。
 func (s *ReferralService) HandleOrderPaid(tx *gorm.DB, order *model.Order) error {
 	if order == nil || order.ID == "" {
 		return nil
@@ -167,13 +193,17 @@ func (s *ReferralService) HandleOrderPaid(tx *gorm.DB, order *model.Order) error
 	if !enabled {
 		return nil
 	}
-	// 查找邀请关系
-	ref, err := s.referralRepo.GetByInviteeID(order.UserID)
+	// P0-F2: 事务内锁定 referral 行, 防止并发重复发放
+	ref, err := s.referralRepo.GetByInviteeIDForUpdateTx(tx, order.UserID)
 	if err != nil {
-		return nil // 没有邀请关系, 跳过
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil // 没有邀请关系, 跳过
+		}
+		return err
 	}
+	// 加锁后重新检查 status
 	if ref.Status != model.ReferralStatusPending {
-		return nil // 已发放过或已失效, 跳过
+		return nil // 已处理, 幂等
 	}
 	// 计算返利金额
 	rewardCents := int64(float64(order.AmountCents) * rate)
@@ -184,6 +214,7 @@ func (s *ReferralService) HandleOrderPaid(tx *gorm.DB, order *model.Order) error
 		return nil // 0元不发放
 	}
 	// 在事务内完成: 标记邀请完成 + 创建返利记录
+	// P0-F2: CompleteTx 内部 UPDATE 加 AND status='pending' 兜底, 双保险
 	now := time.Now()
 	if err := s.referralRepo.CompleteTx(tx, ref.ID, order.ID, rewardCents); err != nil {
 		return fmt.Errorf("标记邀请完成失败: %w", err)

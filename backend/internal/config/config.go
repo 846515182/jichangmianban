@@ -73,6 +73,10 @@ type Config struct {
 
 	TelegramBotToken string
 	TelegramChatID   string
+
+	// P1-known_hosts: SSH known_hosts 持久化路径, 默认指向挂载卷,
+	// 避免容器重启后 TOFU 指纹丢失导致节点重新部署时被拒绝。
+	SSHKnownHostsPath string
 }
 
 func Load() (*Config, error) {
@@ -114,6 +118,7 @@ func Load() (*Config, error) {
 		SMTPFromName:     getEnv("SMTP_FROM_NAME", "Nexus-Panel"),
 		TelegramBotToken: getEnv("TELEGRAM_BOT_TOKEN", ""),
 		TelegramChatID:   getEnv("TELEGRAM_CHAT_ID", ""),
+		SSHKnownHostsPath: getEnv("SSH_KNOWN_HOSTS_PATH", "/app/data/ssh_known_hosts"),
 	}
 
 	cfg.JWTAccessTTL = getEnvDuration("JWT_ACCESS_TTL", 24*time.Hour)
@@ -277,7 +282,9 @@ func ensureCACert(cfg *Config) {
 			CommonName: "Nexus-Panel-Root-CA",
 		},
 		NotBefore:             time.Now(),
-		NotAfter:              time.Now().Add(3650 * 24 * time.Hour), // 10 �?
+		// P1-config: CA 证书有效期从 10 年缩短到 2 年。10 年期过长, 私钥泄露后无法
+		// 在合理周期内轮换; 2 年兼顾运维成本与安全, 配合监控告警提前续期。
+		NotAfter:              time.Now().Add(2 * 365 * 24 * time.Hour), // 2 年
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true,
 		IsCA:                  true,

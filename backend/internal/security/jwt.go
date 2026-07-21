@@ -19,6 +19,12 @@ const (
 	TokenTypeRefresh = "refresh"
 )
 
+// P1-JWT: 统一的签发方/受众声明, 用于签发与校验时一致性校验, 防止 token 跨服务混用
+const (
+	tokenIssuer   = "nexus-panel"
+	tokenAudience = "nexus-panel-api"
+)
+
 // Claims 自定义 JWT 声明
 type Claims struct {
 	UserID      string `json:"uid"`
@@ -91,6 +97,8 @@ func (m *JWTManager) generate(userID, username, role, ttype string, ttl time.Dur
 		TokenVer:  ver,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   userID,
+			Issuer:    tokenIssuer,
+			Audience:  jwt.ClaimStrings{tokenAudience},
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
 			NotBefore: jwt.NewNumericDate(now),
@@ -101,6 +109,7 @@ func (m *JWTManager) generate(userID, username, role, ttype string, ttl time.Dur
 }
 
 // Parse 解析并校验 token
+// P1-JWT: 强制校验 iss/aud, 防止其它服务签发的同密钥 token 被误用, 或 token 被篡改后绕过 audience 检查
 func (m *JWTManager) Parse(tokenStr string) (*Claims, error) {
 	claims := &Claims{}
 	token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
@@ -108,7 +117,7 @@ func (m *JWTManager) Parse(tokenStr string) (*Claims, error) {
 			return nil, errors.New("签名算法不匹配")
 		}
 		return m.secret, nil
-	})
+	}, jwt.WithIssuer(tokenIssuer), jwt.WithAudience(tokenAudience))
 	if err != nil {
 		return nil, err
 	}

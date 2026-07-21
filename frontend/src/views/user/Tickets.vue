@@ -160,21 +160,25 @@ const handleCreate = async () => {
     if (!valid) return
     creating.value = true
     try {
+      // 修复 P1-FE3: 旧版内层 try{}catch{} 吞掉 API 错误后无条件 unshift + 弹成功,
+      // 后端实际未创建工单时用户看到"已提交"但刷新后消失。改为 API 成功拿到 id 后再 unshift,
+      // 失败时拦截器已弹错误, 本地状态不动。
       const now = new Date().toISOString().replace('T', ' ').slice(0, 19)
       const newTicket: TicketRecord = {
         id: 't' + Date.now(), subject: form.subject, username: '',
         status: 'open', priority: form.priority, created_at: now, updated_at: now,
         messages: [{ id: 'm' + Date.now(), from: 'user', content: form.content, created_at: now }],
       }
-      try {
-        const res: any = await request.post('/api/v1/user/tickets', { ...form })
-        if (res && res.data && res.data.id) newTicket.id = res.data.id
-        else if (res && res.id) newTicket.id = res.id
-      } catch { /* 拦截器处理 */ }
+      const res: any = await request.post('/api/v1/user/tickets', { ...form })
+      const id = res?.data?.id || res?.id
+      if (!id) throw new Error('创建失败')
+      newTicket.id = id
       tickets.value.unshift(newTicket)
       current.value = newTicket
       createDialog.value = false
       ElMessage.success('工单已提交')
+    } catch {
+      // 拦截器已弹错误, 不修改本地状态
     } finally {
       creating.value = false
     }

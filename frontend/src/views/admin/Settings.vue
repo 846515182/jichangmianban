@@ -510,17 +510,34 @@ const createBackup = async () => {
   } finally { backing.value = false }
 }
 
-const restoreBackup = (file: File) => {
-  ElMessageBox.confirm(`确定从「${file.name}」恢复备份吗？当前数据将被覆盖。`, '恢复备份', {
-    type: 'warning', confirmButtonText: '确认恢复', cancelButtonText: '取消',
-  }).then(() => {
-    ElMessage.success(`正在从 ${file.name} 恢复...`)
-  }).catch(() => {})
+// 修复 P1-FE7: 旧版 restoreBackup 仅弹"正在从 X 恢复..."提示, 未实际调用任何接口,
+// 用户以为已恢复实际什么都没发生, 后续操作可能基于旧数据。现实现完整上传逻辑:
+// 1. 二次确认(防止误点覆盖现网数据)
+// 2. multipart/form-data 上传备份文件到 /api/v1/admin/system/backups/restore
+// 3. 成功后 5s 自动刷新(后端会重启)
+const restoreBackup = async (file: File) => {
+  try {
+    await ElMessageBox.confirm(`确定从「${file.name}」恢复备份吗？当前数据将被覆盖。`, '恢复备份', {
+      type: 'warning', confirmButtonText: '确认恢复', cancelButtonText: '取消',
+    })
+  } catch { return false }
+  try {
+    const fd = new FormData()
+    fd.append('file', file)
+    await request.post('/api/v1/admin/system/backups/restore', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+    ElMessage.success('恢复成功，系统将在 5 秒后重启')
+    setTimeout(() => location.reload(), 5000)
+  } catch (e: any) {
+    ElMessage.error('恢复失败: ' + (e?.message || '未知错误'))
+  }
   return false
 }
 
 const downloadBackup = (row: any) => {
-  window.open(`/api/v1/admin/system/backups/${encodeURIComponent(row.name)}/download`, '_blank')
+  // 修复 P1-FE1: 加 'noopener,noreferrer' 防止下载页(可能 302 跳外站)通过 window.opener 反向操作原页面
+  window.open(`/api/v1/admin/system/backups/${encodeURIComponent(row.name)}/download`, '_blank', 'noopener,noreferrer')
 }
 
 const deleteBackup = (row: any) => {

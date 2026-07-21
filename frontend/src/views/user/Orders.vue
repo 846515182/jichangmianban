@@ -192,7 +192,8 @@ const goPay = async (order: any) => {
     const payUrl = data?.pay_url
     if (payUrl) {
       ElMessage.success('正在跳转支付页面')
-      window.open(payUrl, '_blank')
+      // 修复 P1-FE1: 加 'noopener,noreferrer' 防止支付页通过 window.opener 反向操作原页面
+      window.open(payUrl, '_blank', 'noopener,noreferrer')
     } else {
       ElMessage.warning('未获取到支付链接，请稍后重试')
     }
@@ -202,13 +203,18 @@ const goPay = async (order: any) => {
 }
 
 // 取消订单
+// 修复 P1-FE2: 旧版 try{}catch{} 后无条件 order.status='cancelled' + 弹成功,
+// API 失败时用户看到"已取消"但后端订单仍为 pending, 刷新后状态回退造成困惑。
+// 改为 API 成功后才更新本地状态 + 弹成功, 失败时拦截器已弹错误。
 const cancelOrder = (order: any) => {
   ElMessageBox.confirm(`确定取消订单「${order.order_no}」吗？`, '提示', {
     type: 'warning', confirmButtonText: '取消订单', cancelButtonText: '保留',
   }).then(async () => {
-    try { await request.post(`/api/v1/user/orders/${order.id}/cancel`) } catch { /* */ }
-    order.status = 'cancelled'
-    ElMessage.success('订单已取消')
+    try {
+      await request.post(`/api/v1/user/orders/${order.id}/cancel`)
+      order.status = 'cancelled'
+      ElMessage.success('订单已取消')
+    } catch { /* 拦截器已提示 */ }
   }).catch(() => {})
 }
 

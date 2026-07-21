@@ -137,20 +137,20 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 
 	auth := api.Group("/auth")
 	{
-		auth.POST("/login", middleware.LoginLockGuard(), middleware.RateLimit(middleware.RateScopeAdmin), authH.Login)
-		auth.POST("/register", middleware.RateLimit(middleware.RateScopeUser), authRegisterH.Register)
-		auth.POST("/refresh", middleware.RateLimit(middleware.RateScopeAdmin), authH.Refresh)
-		auth.POST("/logout", middleware.AnyAuth(), middleware.RateLimit(middleware.RateScopeUser), authH.Logout)
-		auth.POST("/change-password", middleware.AnyAuth(), middleware.RateLimit(middleware.RateScopeUser), authH.ChangePassword)
-		auth.POST("/logout-all", middleware.AnyAuth(), middleware.RateLimit(middleware.RateScopeUser), authH.LogoutAll)
+		auth.POST("/login", authH.Login)
+		auth.POST("/register", authRegisterH.Register)
+		auth.POST("/refresh", authH.Refresh)
+		auth.POST("/logout", middleware.AnyAuth(), authH.Logout)
+		auth.POST("/change-password", middleware.AnyAuth(), authH.ChangePassword)
+		auth.POST("/logout-all", middleware.AnyAuth(), authH.LogoutAll)
 		// 修复 P0-2: ChangeEmail 路由注册(原前端调用但后端路由缺失, 整页不可用)
-		auth.POST("/change-email", middleware.AnyAuth(), middleware.RateLimit(middleware.RateScopeUser), authH.ChangeEmail)
+		auth.POST("/change-email", middleware.AnyAuth(), authH.ChangeEmail)
 	}
 
 	// 修复 P0-2: 邮箱验证码发送路由(register/change_email 两种场景)
 	email := api.Group("/email")
 	{
-		email.POST("/send-code", middleware.AnyAuth(), middleware.RateLimit(middleware.RateScopeUser), authH.SendEmailCode)
+		email.POST("/send-code", middleware.AnyAuth(), authH.SendEmailCode)
 	}
 
 	api.GET("/captcha", GetCaptcha)
@@ -163,14 +163,14 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 	}
 
 	// 公开订阅拉取(无需 JWT, 通过 token+sig 认证)
-	api.GET("/subscribe", middleware.RateLimit(middleware.RateScopeSub), userH.PublicSubscribe)
+	api.GET("/subscribe", userH.PublicSubscribe)
 
 	user := api.Group("/user")
-	user.Use(middleware.RateLimit(middleware.RateScopeUser), middleware.UserAuth())
+	user.Use(middleware.UserAuth())
 	{
 		user.GET("/info", userH.UserInfo)
 		user.GET("/login-logs", authH.LoginLogs)
-		user.GET("/subscribe", middleware.RateLimit(middleware.RateScopeSub), userH.Subscribe)
+		user.GET("/subscribe", userH.Subscribe)
 		user.POST("/orders", orderH.CreateOrder)
 		user.GET("/orders", orderH.ListUserOrders)
 		user.GET("/orders/:id", orderH.GetOrder)
@@ -195,7 +195,7 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 
 	// 兼容老路径 /api/v1/tickets/* (与前端约定一致)
 	tickets := api.Group("/tickets")
-	tickets.Use(middleware.RateLimit(middleware.RateScopeUser), middleware.AnyAuth())
+	tickets.Use(middleware.AnyAuth())
 	{
 		// 用户的 mine/list: 走 user handler
 		tickets.GET("/mine", ticketH.UserListTickets)
@@ -205,7 +205,7 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 	}
 
 	userPub := api.Group("")
-	userPub.Use(middleware.RateLimit(middleware.RateScopeUser), middleware.UserAuth())
+	userPub.Use(middleware.UserAuth())
 	{
 		userPub.GET("/nodes/list", userH.NodeList)
 		userPub.GET("/nodes/latency", userH.NodeLatency)
@@ -216,12 +216,13 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 	// SSH WebSocket 终端（token 通过 query 参数传递，handler 内部自验证）
 	sshTermH := NewSSHTerminalHandler(deps.NodeRepo, deps.JWTMgr)
 	api.GET("/admin/nodes/:id/terminal",
-		middleware.RateLimit("ssh_term"),
+		middleware.AdminAuth(),
+		middleware.RBAC(middleware.PermNodeManage),
 		sshTermH.Terminal,
 	)
 
 	admin := api.Group("/admin")
-	admin.Use(middleware.RateLimit(middleware.RateScopeAdmin), middleware.AdminAuth())
+	admin.Use(middleware.AdminAuth())
 	{
 		admin.GET("/nodes", adminNodeH.NodeList)
 		admin.GET("/nodes/:id", adminNodeH.NodeDetail)

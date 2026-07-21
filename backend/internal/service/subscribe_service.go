@@ -93,17 +93,25 @@ func (s *SubscribeService) Fetch(userID, subType, sig, userAgent, clientIP strin
 	}
 	// 修复 P0-17: nonce 防重放 - 同一签名只允许使用一次
 	// 提取 nonce, 若存在则在 Redis 中标记已用(过期时间与签名 TTL 一致)
-	// 无 Redis 时降级为不防重放(与历史行为一致)
+	// 修复 P0-X1: Redis 不可用时改为 fail-closed, 拒绝而非放行
+	// (放行会让 nonce 防重放完全失效, 签名被截获后可无限重放)
 	nonce := hmacMgr.ExtractNonce(sig)
 	if nonce != "" {
-		if rdb := app.Get().RDB; rdb != nil {
-			ctx := context.Background()
-			key := "subnonce:" + nonce
-			ok, err := rdb.SetNX(ctx, key, "1", app.Get().Cfg.SubSigTTL).Result()
-			if err == nil && !ok {
-				// nonce 已被使用, 拒绝重放
-				return nil, ErrSubSigExpired
-			}
+		rdb := app.Get().RDB
+		if rdb == nil {
+			// Redis 不可用时 fail-closed, 拒绝而非放行
+			return nil, errors.New("订阅服务暂不可用(Redis 不可用)")
+		}
+		ctx := context.Background()
+		key := "subnonce:" + nonce
+		ok, err := rdb.SetNX(ctx, key, "1", app.Get().Cfg.SubSigTTL).Result()
+		if err != nil {
+			// Redis 操作异常也 fail-closed
+			return nil, errors.New("订阅服务暂不可用(Redis 异常)")
+		}
+		if !ok {
+			// nonce 已被使用, 拒绝重放
+			return nil, ErrSubSigExpired
 		}
 	}
 

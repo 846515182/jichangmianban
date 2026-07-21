@@ -472,8 +472,11 @@ interface NodeRow {
   [k: string]: any
 }
 
-// 面板服务器公网IP（固定）
-const PANEL_IP = '177.3.32.94'
+// 修复 P0-FE3: 旧版硬编码 PANEL_IP = '177.3.32.94', 多环境部署(开发/测试/生产)都指向同一台,
+// 节点 agent 连不上正确面板。改为从 Vite 环境变量读取, 缺省回退到当前域名。
+// - 开发: 在 frontend/.env 中设置 VITE_PANEL_IP=192.168.x.x
+// - 生产: 不配置则自动用 window.location.hostname(节点通过浏览器访问的同一面板域名)
+const PANEL_IP = import.meta.env.VITE_PANEL_IP || window.location.hostname
 
 // 部署步骤数据结构
 interface DeployCommand {

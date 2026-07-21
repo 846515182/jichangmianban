@@ -3,6 +3,7 @@ package handler
 import (
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -30,7 +31,8 @@ func NewAuthRegisterHandler(r *service.UserRegisterService) *AuthRegisterHandler
 type registerRequest struct {
 	Username    string `json:"username" binding:"required"`
 	Password    string `json:"password" binding:"required"`
-	Email       string `json:"email"`
+	// P1-REG-01: email 非必填(可为空走占位邮箱), 但若填写则必须为合法邮箱格式
+	Email       string `json:"email" binding:"omitempty,email"`
 	// [E-fix 2026-07-14] 图形验证码 (从 GetCaptcha 拉取, 后端校验)
 	CaptchaID  string `json:"captcha_id"`
 	CaptchaCode string `json:"captcha_code"`
@@ -88,7 +90,9 @@ func (h *AuthRegisterHandler) Register(c *gin.Context) {
 			response.FailMsg(c, response.CodeDuplicate, "该邮箱已被注册, 请更换或联系管理员清理旧账号")
 			return
 		}
-		response.FailMsg(c, response.CodeServerError, err.Error())
+		// P1-REG-02: 内部错误不向客户端暴露明文(可能含 SQL/堆栈), 仅记日志并返回通用提示
+		log.Printf("[auth_register] register failed username=%s ip=%s: %v", req.Username, ip, err)
+		response.FailMsg(c, response.CodeServerError, "注册失败")
 		return
 	}
 

@@ -40,7 +40,7 @@ func NewCronService(u *repo.UserRepo, o *OrderService, n *repo.NodeRepo, sr *rep
 }
 
 func (s *CronService) ExpireOverdueUsers() {
-	now := time.Now()
+	now := time.Now().UTC()
 	count, err := s.userRepo.ExpireOverdueUsers(now)
 	if err != nil {
 		s.logger.Error("clean expired users failed", zap.Error(err))
@@ -92,17 +92,34 @@ func tryLock(rdb *redis.Client, key string, ttl time.Duration) (unlock func()) {
 }
 
 // RunAll 执行所有定时任务（带分布式锁，防止多副本重复执行）
+//
+// P0-N6: 锁 TTL 从 4 分钟延长到 10 分钟, 避免任务执行时长接近 TTL 时锁被误释放
+// 导致多副本并发执行(掉单对账+流量重置+备份等任务叠加可能 >4min)。
+// 同时每个子任务用 safeRun 包裹做 panic recover, 单个任务 panic 不会拖垮整个 cron。
 func (s *CronService) RunAll() {
-	unlock := tryLock(app.Get().RDB, "cron:lock:runall", 4*time.Minute)
+	unlock := tryLock(app.Get().RDB, "cron:lock:runall", 10*time.Minute)
 	if unlock == nil {
 		s.logger.Debug("定时任务 RunAll 被其它实例占用，跳过本次")
 		return
 	}
 	defer unlock()
-	s.ExpireOverdueUsers()
-	s.ExpireOrders()
-	s.MarkTrafficExhausted()
-	s.CleanAggregateTrafficLogs()
+	s.safeRun("ExpireOverdueUsers", func() { s.ExpireOverdueUsers() })
+	s.safeRun("ExpireOrders", func() { s.ExpireOrders() })
+	s.safeRun("MarkTrafficExhausted", func() { s.MarkTrafficExhausted() })
+	s.safeRun("CleanAggregateTrafficLogs", func() { s.CleanAggregateTrafficLogs() })
+}
+
+// safeRun 执行 cron 子任务并捕获 panic, 单任务 panic 不会影响其它任务
+// P0-N6 / P1-cron-panic: 防止某个子任务 panic 导致整个 RunAll 中断, 后续任务被跳过
+func (s *CronService) safeRun(name string, fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("cron 任务 panic",
+				zap.String("task", name),
+				zap.Any("panic", r))
+		}
+	}()
+	fn()
 }
 
 // MarkTrafficExhausted 兜底检测所有超额用户并标记 traffic_exhausted
@@ -131,9 +148,10 @@ func (s *CronService) MarkTrafficExhausted() {
 // 修复 SQL-CRON-01 (P0): 旧版 SQL 含 `user_id LIKE 'node:%'`, 但 traffic_logs.user_id
 // 是 PostgreSQL uuid 类型, 不支持 LIKE 操作符, 每 5 分钟报
 // `operator does not exist: uuid ~~ unknown (SQLSTATE 42883)`。
-// 实际上 "node:"+nodeID 前缀只在 gRPC 内存层(grpc.isNodeAggregateUser)用于标识聚合流量,
-// 在 distributeNodeTraffic 中已被分发到真实用户 ID 后才落库, 永远不会以 "node:xxx"
-// 字符串形式写入 user_id 列(uuid 列也根本存不下非 UUID 字符串)。
+// 历史上 "node:"+nodeID 前缀曾在 gRPC 内存层用于标识聚合流量(相关代码已删除:
+// isNodeAggregateUser / distributeNodeTraffic / recordNodeSpeed / nodeTotal 均已移除),
+// 聚合流量分发逻辑撤销后, 永远不会以 "node:xxx" 字符串形式写入 user_id 列
+// (uuid 列也根本存不下非 UUID 字符串)。
 // 因此 LIKE 'node:%' 子句既非法又永远匹配 0 行, 直接移除。
 // 仅保留对占位零值 UUID 的清理即可。
 func (s *CronService) CleanAggregateTrafficLogs() {
@@ -141,7 +159,7 @@ func (s *CronService) CleanAggregateTrafficLogs() {
 	if db == nil {
 		return
 	}
-	cutoff := time.Now().AddDate(0, 0, -7)
+	cutoff := time.Now().UTC().AddDate(0, 0, -7)
 	// 仅清理旧版占位零值 UUID 的聚合流量日志("node:" 前缀数据不会落库, 无需 LIKE)
 	result := db.Exec(`
 		DELETE FROM traffic_logs
@@ -203,7 +221,7 @@ func (s *CronService) CleanOrphanData() {
 		s.logger.Info("cleaned orphan node_plan_bindings", zap.Int64("count", result.RowsAffected))
 	}
 
-	cutOff := time.Now().AddDate(0, 0, -30)
+	cutOff := time.Now().UTC().AddDate(0, 0, -30)
 	result = db.Where("log_time < ?", cutOff).Delete(&model.TrafficLog{})
 	if result.Error != nil {
 		s.logger.Error("clean old traffic logs failed", zap.Error(result.Error))
@@ -213,7 +231,7 @@ func (s *CronService) CleanOrphanData() {
 
 	// 修复 STORAGE-LOG-01 (P1): login_audit / admin_actions 两张审计表无任何清理,
 	// 长期运行会无限累积占用磁盘。保留 90 天, 超过则物理删除。
-	auditCutOff := time.Now().AddDate(0, 0, -90)
+	auditCutOff := time.Now().UTC().AddDate(0, 0, -90)
 	result = db.Where("created_at < ?", auditCutOff).Delete(&model.LoginAudit{})
 	if result.Error != nil {
 		s.logger.Error("clean old login_audit failed", zap.Error(result.Error))
@@ -265,7 +283,7 @@ func (s *CronService) dropOldTrafficPartitions(db *gorm.DB) {
 	}
 
 	// 计算需要保留的分区名: 当月 + 上月(格式 traffic_logs_YYYY_MM)
-	now := time.Now()
+	now := time.Now().UTC()
 	keepMonths := map[string]bool{
 		"traffic_logs_" + now.Format("2006_01"):                   true, // 当月
 		"traffic_logs_" + now.AddDate(0, -1, 0).Format("2006_01"): true, // 上月
@@ -421,7 +439,7 @@ func (s *CronService) CheckVersionConsistency() {
 	// 5. 不一致, 只告警, 不重建
 	//    写告警标记文件, 内容是 running→code, 前端可读取展示提示
 	flagContent := fmt.Sprintf("running=%s\ncode=%s\ndetected_at=%s\n",
-		runningVersion, codeVersion, time.Now().Format(time.RFC3339))
+		runningVersion, codeVersion, time.Now().UTC().Format(time.RFC3339))
 	_ = os.WriteFile(versionMismatchFlagFile, []byte(flagContent), 0644)
 
 	manualFixCmd := fmt.Sprintf("cd %s && docker compose build --build-arg VERSION=$(git rev-parse --short HEAD) panel && docker compose up -d --no-deps panel", gitRepoPath)
@@ -506,7 +524,7 @@ func (s *CronService) MarkStaleNodesOffline() {
 		return
 	}
 	defer unlock()
-	threshold := time.Now().Add(-8 * time.Minute)
+	threshold := time.Now().UTC().Add(-8 * time.Minute)
 	// 修复 PERF-CRON-01: 旧实现先 UPDATE 再 List(0,0,"") 全表扫描 + 循环 Del,
 	// 会清掉所有启用节点的 configver/usershash 缓存, 触发全节点心跳重算配置风暴。
 	// 现改为先 SELECT id 再 UPDATE WHERE id IN, 只清理真正被标记离线的节点缓存。
@@ -562,7 +580,7 @@ func (s *CronService) ResetTrafficMonthly() {
 	}
 
 	// 2) 计算当月目标日(2月无 30/31 日时取月末)
-	now := time.Now()
+	now := time.Now().UTC()
 	lastDay := daysInMonth(now.Year(), int(now.Month()))
 	targetDay := resetDay
 	if targetDay > lastDay {
@@ -587,7 +605,19 @@ func (s *CronService) ResetTrafficMonthly() {
 		}
 	}
 
-	// 4) 批量重置
+	// 4) P0-N7: 先把 traffic_exhausted 用户恢复为 active, 否则 ResetTrafficForCycleBatch
+	//    的 WHERE 只过滤 status='active', traffic_exhausted 用户永远无法被重置
+	//    (用户超额后状态变 traffic_exhausted, 月初重置日若不先恢复, 这些用户流量不会清零,
+	//     仍被节点拒绝连接, 月付套餐用户报障"已续费但用不了")。
+	db := app.Get().DB
+	if db != nil {
+		if err := db.Exec("UPDATE users SET status = 'active' WHERE is_deleted = false AND status = 'traffic_exhausted'").Error; err != nil {
+			s.logger.Warn("恢复 traffic_exhausted 用户状态失败", zap.Error(err))
+			// 不 return, 继续 ResetTrafficForCycleBatch(本次仅重置 active 用户, 下次 cron 再补)
+		}
+	}
+
+	// 5) 批量重置
 	count, err := s.userRepo.ResetTrafficForCycleBatch()
 	if err != nil {
 		s.logger.Error("周期性流量重置失败", zap.Int("reset_day", resetDay), zap.Error(err))
@@ -655,7 +685,7 @@ func (s *CronService) ReconcilePendingOrders() {
 	}
 
 	// 扫描近 30 分钟内仍为 pending 的订单
-	since := time.Now().Add(-30 * time.Minute)
+	since := time.Now().UTC().Add(-30 * time.Minute)
 	orders, err := s.orderSvc.ListPendingSince(since)
 	if err != nil {
 		s.logger.Error("掉单对账查询失败", zap.Error(err))
@@ -705,7 +735,7 @@ func (s *CronService) ReconcilePendingOrders() {
 
 	// 2) 扫描近期已过期的订单(用户可能已付款但回调丢失/延迟到达, P1 资金损失修复):
 	//    PaySuccess 已支持过期订单履约, 此处主动查询 EPay 真实状态兜底开通
-	expSince := time.Now().Add(-30 * time.Minute)
+	expSince := time.Now().UTC().Add(-30 * time.Minute)
 	expOrders, err := s.orderSvc.ListExpiredSince(expSince)
 	if err != nil {
 		s.logger.Warn("掉单对账扫描过期订单失败", zap.Error(err))
@@ -798,7 +828,7 @@ func (s *CronService) AutoBackupDatabase() {
 		return
 	}
 
-	ts := time.Now().Format("20060102-150405")
+	ts := time.Now().UTC().Format("20060102-150405")
 	outPath := filepath.Join(backupDir, "db-backup-"+ts+".sql.gz")
 
 	// 优先尝试本机 pg_dump; 失败则降级用 docker exec 调用 postgres 容器内的 pg_dump

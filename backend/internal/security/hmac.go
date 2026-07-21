@@ -116,37 +116,6 @@ func (m *HMACManager) ExtractNonce(sigStr string) string {
 	return ""
 }
 
-// SignWithTTLAndIP 生成带 IP 绑定的签名 - 修复 SEC-P0-02
-// 签名原文 = sub_token + user_id + exp + client_ip
-func (m *HMACManager) SignWithTTLAndIP(subToken, userID, clientIP string, ttl time.Duration) (sig string, exp int64) {
-    exp = time.Now().Add(ttl).Unix()
-    raw := subToken + "|" + userID + "|" + strconv.FormatInt(exp, 10) + "|" + clientIP
-    h := hmac.New(sha256.New, m.secret)
-    h.Write([]byte(raw))
-    sig = hex.EncodeToString(h.Sum(nil))
-    return
-}
-
-// VerifySigStrWithIP 校验带 IP 绑定的签名 - 修复 SEC-P0-02
-// sigStr 格式: exp.sig
-func (m *HMACManager) VerifySigStrWithIP(subToken, userID, sigStr, clientIP string) error {
-    parts := strings.SplitN(sigStr, ".", 2)
-    if len(parts) != 2 {
-        return errors.New("签名格式错误")
-    }
-    exp, err := strconv.ParseInt(parts[0], 10, 64)
-    if err != nil {
-        return errors.New("过期时间解析失败")
-    }
-    if time.Now().Unix() > exp {
-        return errors.New("签名已过期")
-    }
-    raw := subToken + "|" + userID + "|" + parts[0] + "|" + clientIP
-    h := hmac.New(sha256.New, m.secret)
-    h.Write([]byte(raw))
-    expected := hex.EncodeToString(h.Sum(nil))
-    if !hmac.Equal([]byte(expected), []byte(strings.ToLower(parts[1]))) {
-        return errors.New("签名不匹配")
-    }
-    return nil
-}
+// P1-HMAC: SignWithTTLAndIP / VerifySigStrWithIP 已删除 (IP 绑定版本, 无调用方, 死代码)
+// 后续如需 IP 绑定签名, 应通过 nonce + Redis 防重放实现, 而非把 IP 直接拼入签名原文
+// (IP 在多出口/CDN/代理场景下不稳定, 且 IP 变化会导致合法用户被拒)

@@ -144,7 +144,8 @@ const openClient = (type: string, url: string) => {
   } else {
     finalUrl = url + (url.includes('?') ? '&' : '?') + 'type=' + type
   }
-  window.open(finalUrl, '_blank')
+  // 修复 P1-FE1: 加 'noopener,noreferrer' 防止新窗口通过 window.opener 反向操作原页面(reverse tabnabbing 钓鱼)
+  window.open(finalUrl, '_blank', 'noopener,noreferrer')
 }
 
 onMounted(() => {

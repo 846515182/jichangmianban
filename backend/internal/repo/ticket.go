@@ -53,6 +53,8 @@ type TicketListItem struct {
 
 // ListTickets 分页查询所有工单(管理端, JOIN users 带出 username)
 // 支持 status / user_id / keyword(subject 模糊) 过滤
+// 修复 P1-repo-软删除过滤: JOIN users 加 AND users.is_deleted = false, 避免查出软删用户的工单
+// 修复: 旧版 q.Count 吞 error, 现检查 error
 func (r *TicketRepo) ListTickets(page, size int, status, userID, keyword string) ([]TicketListItem, int64, error) {
 	var list []TicketListItem
 	var total int64
@@ -67,10 +69,12 @@ func (r *TicketRepo) ListTickets(page, size int, status, userID, keyword string)
 		like := "%" + keyword + "%"
 		q = q.Where("tickets.subject LIKE ?", like)
 	}
-	q.Count(&total)
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
 	if err := q.
 		Select("tickets.*, users.username as username").
-		Joins("LEFT JOIN users ON users.id = tickets.user_id").
+		Joins("LEFT JOIN users ON users.id = tickets.user_id AND users.is_deleted = false").
 		Order("tickets.created_at DESC").
 		Offset((page - 1) * size).Limit(size).
 		Find(&list).Error; err != nil {

@@ -131,6 +131,9 @@ const userInfo = ref({
 })
 
 // 从后端加载最新用户信息
+// 修复 P1-FE9: 旧版只更新本地 userInfo ref, 不同步到 auth store, 导致侧边栏/导航中
+// 显示的用户名/邮箱仍是登录时的旧值, 用户改完资料看不到效果以为没保存。
+// 现在拉取成功后同步到 auth store.setUserInfo, 全局感知。
 const fetchUserInfo = async () => {
   try {
     const res = await request.get<ApiResponse<UserInfoResp>>('/api/v1/user/info')
@@ -140,6 +143,18 @@ const fetchUserInfo = async () => {
       userInfo.value.traffic_limit = res.data.traffic_limit || 0
       userInfo.value.traffic_used = res.data.traffic_used || 0
       userInfo.value.expired_at = res.data.expired_at || ''
+      // 同步到 auth store, 让 Header/侧边栏等全局组件感知最新用户信息
+      // 仅在已有 userInfo 基础上更新字段, 避免覆盖 role 等其他字段
+      if (auth.userInfo) {
+        auth.setUserInfo({
+          ...auth.userInfo,
+          username: userInfo.value.username,
+          email: userInfo.value.email,
+          trafficUsed: userInfo.value.traffic_used,
+          trafficLimit: userInfo.value.traffic_limit,
+          expireAt: userInfo.value.expired_at,
+        })
+      }
     }
   } catch { /* 拦截器处理 */ }
 }

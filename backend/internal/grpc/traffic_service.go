@@ -4,11 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -19,13 +18,6 @@ import (
 	"nexus-panel/internal/repo"
 	nexuspb "nexus-panel/proto"
 )
-
-// isNodeAggregateUser 判定是否为节点级聚合流量上报
-// node-agent 用 "node:"+nodeID 作为聚合标识，旧版用占位 UUID "00000000-0000-0000-0000-000000000000"
-// 或 "node"。三种都视为聚合标记。
-func isNodeAggregateUser(uid string) bool {
-	return uid == "node" || uid == "00000000-0000-0000-0000-000000000000" || strings.HasPrefix(uid, "node:")
-}
 
 // s7WarnLimiter 限制每个节点的 S7 警告频率, 避免每 5 分钟刷屏
 var s7WarnLimiter sync.Map // map[nodeID]time.Time
@@ -78,6 +70,32 @@ func NewTrafficServiceServer(trafficRepo *repo.TrafficRepo, nodeRepo *repo.NodeR
 	}
 }
 
+// acceptOldNodeToken 检查给定的 token 是否是节点最近轮换前的旧 token (P0-N3 宽限期消费方)。
+// RotateToken 会把旧 token 写入 Redis key=node:old_token:{nodeID}, TTL=24h。
+// 返回 true 表示当前 token 不匹配但旧 token 匹配 (在宽限期内, 应放行)。
+// Redis 不可用或 key 不存在时返回 false (调用方会拒绝请求)。
+func (s *TrafficServiceServer) acceptOldNodeToken(nodeID, presentedToken string) bool {
+	if presentedToken == "" {
+		return false
+	}
+	rdb := app.Get().RDB
+	if rdb == nil {
+		return false
+	}
+	stored, err := rdb.Get(context.Background(), fmt.Sprintf("node:old_token:%s", nodeID)).Result()
+	if err != nil {
+		return false
+	}
+	if stored == presentedToken {
+		if s.logger != nil {
+			s.logger.Warn("接受节点旧 token (RotateToken 宽限期内)",
+				zap.String("node_id", nodeID))
+		}
+		return true
+	}
+	return false
+}
+
 // ReportRealtime 批量接收流量记录，写入 traffic_logs 表(INSERT)，
 // 同时累加 users.traffic_used 和 nodes.traffic_used(用事务保证一致)
 func (s *TrafficServiceServer) ReportRealtime(ctx context.Context, req *nexuspb.ReportRealtimeRequest) (*nexuspb.ReportRealtimeResponse, error) {
@@ -96,7 +114,13 @@ func (s *TrafficServiceServer) ReportRealtime(ctx context.Context, req *nexuspb.
 		return nil, status.Error(codes.Internal, "查询节点失败")
 	}
 	if node.NodeToken != req.GetNodeToken() {
-		return nil, status.Error(codes.Unauthenticated, "node_token 不匹配")
+		// P0-N3: 双 token 宽限期。RotateToken 时旧 token 会写入 Redis (key=node:old_token:{nodeID},
+		// TTL=24h)。此处校验当前 token 失败时, 兜底查 Redis 旧 token, 匹配则放行。
+		// 用于 RotateToken 后 agent 仍用旧 token 上报流量/查询用户的过渡期, 避免流量丢失。
+		// 注: 宽限期内同时接受新旧 token, 24h 后 Redis key 过期, 旧 token 失效。
+		if !s.acceptOldNodeToken(req.GetNodeId(), req.GetNodeToken()) {
+			return nil, status.Error(codes.Unauthenticated, "node_token 不匹配")
+		}
 	}
 	records := req.GetRecords()
 	if len(records) == 0 {
@@ -113,12 +137,25 @@ func (s *TrafficServiceServer) ReportRealtime(ctx context.Context, req *nexuspb.
 		download int64
 	}
 	userAgg := make(map[string]*agg, len(records))
-	nodeTotal := int64(0)
 	accepted := int32(0)
 
 	err = db.Transaction(func(tx *gorm.DB) error {
 		for _, r := range records {
+			// 校验 upload/download 非负
+			if r.GetUploadBytes() < 0 || r.GetDownloadBytes() < 0 {
+				s.logger.Warn("流量记录含负数, 跳过",
+					zap.String("user_id", r.GetUserId()),
+					zap.Int64("upload", r.GetUploadBytes()),
+					zap.Int64("download", r.GetDownloadBytes()))
+				continue
+			}
+			// 校验 user_id 是有效 UUID 格式(避免 PG uuid 类型报错致整批回滚)
 			if r.GetUserId() == "" {
+				continue
+			}
+			if _, parseErr := uuid.Parse(r.GetUserId()); parseErr != nil {
+				s.logger.Warn("user_id 非有效 UUID, 跳过",
+					zap.String("user_id", r.GetUserId()))
 				continue
 			}
 			logTime := time.Now()
@@ -126,7 +163,7 @@ func (s *TrafficServiceServer) ReportRealtime(ctx context.Context, req *nexuspb.
 				logTime = time.Unix(r.GetLogTime(), 0)
 			}
 
-			// 累加到聚合 map（包括节点聚合流量）
+			// 累加到聚合 map
 			a, ok := userAgg[r.GetUserId()]
 			if !ok {
 				a = &agg{}
@@ -134,13 +171,6 @@ func (s *TrafficServiceServer) ReportRealtime(ctx context.Context, req *nexuspb.
 			}
 			a.upload += r.GetUploadBytes()
 			a.download += r.GetDownloadBytes()
-			nodeTotal += r.GetUploadBytes() + r.GetDownloadBytes()
-
-			// 节点聚合流量: 不写 traffic_log (留到 distributeNodeTraffic 写真实用户),
-			// 不进 userAgg 的后续累加 (会在 distributeNodeTraffic 单独处理)
-			if isNodeAggregateUser(r.GetUserId()) {
-				continue
-			}
 
 			// 写入 traffic_logs
 			log := &model.TrafficLog{
@@ -158,19 +188,6 @@ func (s *TrafficServiceServer) ReportRealtime(ctx context.Context, req *nexuspb.
 				continue
 			}
 			accepted++
-		}
-
-		// 处理节点聚合流量：仅累加节点总流量, 不再等分到用户
-		// 修复 P0-7: 旧实现把节点总流量 / 活跃用户数 等分到每个用户的 traffic_used,
-		// 计费严重失真(用 90GB 的用户和用 10GB 的用户被同等记账 10GB),
-		// 既少收又多收, 还会误标低流量用户为 traffic_exhausted 停服。
-		// 正确做法: 节点 agent 应解析 Xray stats API 获取每用户流量,
-		// 未上报用户级流量的节点不计入 traffic_used, 仅累加节点维度统计。
-		// nodeTotal 已在循环中累加, 此处从 userAgg 删除聚合标记, 避免后续 AddTrafficTx 误加。
-		for aggKey := range userAgg {
-			if isNodeAggregateUser(aggKey) {
-				delete(userAgg, aggKey)
-			}
 		}
 
 		// 累加用户流量(忽略单条错误，整体事务保留)
@@ -191,13 +208,6 @@ func (s *TrafficServiceServer) ReportRealtime(ctx context.Context, req *nexuspb.
 				} else if marked {
 					exhaustedUIDs = append(exhaustedUIDs, uid)
 				}
-			}
-		}
-		// 累加节点流量
-		if nodeTotal > 0 {
-			if err := s.nodeRepo.AddTrafficTx(tx, req.GetNodeId(), nodeTotal); err != nil {
-				s.logger.Warn("累加节点流量失败",
-					zap.String("node_id", req.GetNodeId()), zap.Error(err))
 			}
 		}
 		// 在事务内提交后日志记录(仅记录 ID，事务提交后状态已生效)
@@ -221,56 +231,10 @@ func (s *TrafficServiceServer) ReportRealtime(ctx context.Context, req *nexuspb.
 			zap.String("node_id", req.GetNodeId()), zap.Error(err))
 	}
 
-	// 修复 NODE-SPEED-01 (P1): 计算节点瞬时速度并写入 Redis heartbeat hash。
-	// 旧版面板在 admin API 调用时用 (dbTrafficUsed 差值 / admin 调用时间差) 算速度,
-	// 导致首次访问/快速刷新/agent 60s 未上报时 speed_bps 恒为 0, 且口径是 admin 视角
-	// 平均速率而非节点真实速率。现改为: agent 每次上报流量时(60s 一次), 面板用
-	// (本次上报字节增量 / 距上次上报时间差) 算出 60s 平均瞬时速度, 写入 heartbeat
-	// hash 的 speed_bps 字段。admin API 直接读该字段, 不再自己算。
-	//
-	// 修复 NODE-SPEED-02 (P0): 无论本次是否有流量, 都要刷新 speed_bps。
-	// 旧实现仅在 nodeTotal > 0 时写入, 节点空闲时(nodeTotal==0)不更新 Redis,
-	// 导致上一次有流量时写入的速度值永久残留, 前端显示"CPU 0% + 连接 0 + 速度 611 B/s"
-	// 的矛盾状态。节点空闲时算出 speedBps=0 并覆盖旧值, 保证速度字段与其他指标一致。
-	s.recordNodeSpeed(req.GetNodeId(), nodeTotal)
-
 	return &nexuspb.ReportRealtimeResponse{
 		Resp:     &nexuspb.Response{Code: 0, Message: "ok"},
 		Accepted: accepted,
 	}, nil
-}
-
-// recordNodeSpeed 计算节点瞬时速度(bytes/s)并写入 Redis node:heartbeat:{id} 的 speed_bps 字段。
-// 速度 = 本次上报字节增量 / 距上次上报时间差。首次上报无法算 dt, 跳过(保持 0)。
-//
-// 用独立 key node:traffic_ts:{id} 记录上次上报时间戳(不用 snap key, snap 归 admin
-// 管理用于兜底算法, 两者职责分离避免互相覆盖)。
-func (s *TrafficServiceServer) recordNodeSpeed(nodeID string, deltaBytes int64) {
-	rdb := app.Get().RDB
-	if rdb == nil {
-		return
-	}
-	ctx := context.Background()
-	tsKey := fmt.Sprintf("node:traffic_ts:%s", nodeID)
-	hbKey := fmt.Sprintf("node:heartbeat:%s", nodeID)
-	now := time.Now().Unix()
-
-	// 读上次上报时间戳
-	prevTsStr, err := rdb.Get(ctx, tsKey).Result()
-	var speedBps int64
-	if err == nil && prevTsStr != "" {
-		prevTs, _ := strconv.ParseInt(prevTsStr, 10, 64)
-		dt := now - prevTs
-		// dt > 0 防止除零; dt 上限 600s 防止节点长时间未上报后算出异常小值
-		if dt > 0 && dt <= 600 {
-			speedBps = deltaBytes / dt
-		}
-	}
-
-	// 写入 heartbeat hash 的 speed_bps 字段(HSet 单字段不覆盖其他字段)
-	rdb.HSet(ctx, hbKey, "speed_bps", speedBps)
-	// 更新上报时间戳(下次算 dt 用)
-	rdb.Set(ctx, tsKey, now, 10*time.Minute)
 }
 
 // markUserExhaustedTx 在事务内检测用户是否超额，若是则将 status 改为 traffic_exhausted
@@ -305,7 +269,13 @@ func (s *TrafficServiceServer) QueryUserTraffic(ctx context.Context, req *nexusp
 		return nil, status.Error(codes.Internal, "查询节点失败")
 	}
 	if node.NodeToken != req.GetNodeToken() {
-		return nil, status.Error(codes.Unauthenticated, "node_token 不匹配")
+		// P0-N3: 双 token 宽限期。RotateToken 时旧 token 会写入 Redis (key=node:old_token:{nodeID},
+		// TTL=24h)。此处校验当前 token 失败时, 兜底查 Redis 旧 token, 匹配则放行。
+		// 用于 RotateToken 后 agent 仍用旧 token 上报流量/查询用户的过渡期, 避免流量丢失。
+		// 注: 宽限期内同时接受新旧 token, 24h 后 Redis key 过期, 旧 token 失效。
+		if !s.acceptOldNodeToken(req.GetNodeId(), req.GetNodeToken()) {
+			return nil, status.Error(codes.Unauthenticated, "node_token 不匹配")
+		}
 	}
 
 	userIDs := req.GetUserIds()
@@ -340,15 +310,4 @@ func (s *TrafficServiceServer) QueryUserTraffic(ctx context.Context, req *nexusp
 		Resp:  &nexuspb.Response{Code: 0, Message: "ok"},
 		Users: summaries,
 	}, nil
-}
-
-// distributeNodeTraffic [已废弃 P0-7] 旧的等分计费逻辑, 计费严重失真, 已停止调用。
-// 保留方法体供历史参考, 不再被 ReportRealtime 调用。
-// 长期方案: 节点 agent 解析 Xray stats API 上报每用户流量, 面板直接累加。
-func (s *TrafficServiceServer) distributeNodeTraffic(tx *gorm.DB, nodeID string, node *model.Node, totalUpload, totalDownload int64) {
-	_ = s.nodeRepo
-	_ = nodeID
-	_ = node
-	_ = totalUpload
-	_ = totalDownload
 }

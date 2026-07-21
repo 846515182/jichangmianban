@@ -15,7 +15,7 @@
         </div>
       </div>
 
-      <el-table :data="filteredList" stripe v-loading="loading">
+      <el-table :data="pagedList" stripe v-loading="loading">
         <el-table-column prop="id" label="工单号" width="90" />
         <el-table-column prop="subject" label="主题" min-width="200" />
         <el-table-column prop="username" label="提交用户" width="120" />
@@ -43,6 +43,20 @@
           </template>
         </el-table-column>
       </el-table>
+
+      <!-- 修复 P1-FE8: 旧版无分页组件, 工单多了之后表格无限长, 无法快速翻页。
+           后端 /api/v1/admin/tickets 暂未支持 page/size 参数, 这里用前端分页(slice 当前列表),
+           后端支持分页参数后可改为后端分页(传 page/size 给接口, 替换 pagedList 为 list)。
+           TODO: 后端 ListTickets 支持 page/size 后改为后端分页, 移除 pagedList 切片逻辑。 -->
+      <div class="pagination-wrap">
+        <el-pagination
+          v-model:current-page="currentPage"
+          :page-size="pageSize"
+          :total="totalTickets"
+          layout="prev, pager, next, total"
+          background
+        />
+      </div>
     </div>
 
     <!-- 工单详情对话框 -->
@@ -99,9 +113,20 @@ const loading = ref(false)
 const statusFilter = ref('')
 const list = ref<TicketRow[]>([])
 
+// 修复 P1-FE8: 分页状态(前端分页, 因后端 /admin/tickets 暂未支持 page/size)
+const currentPage = ref(1)
+const pageSize = ref(20)
+
 const filteredList = computed(() => {
   if (!statusFilter.value) return list.value
   return list.value.filter((t) => t.status === statusFilter.value)
+})
+
+// 当前页展示数据(slice 当前列表), 总数取 filteredList.length 以联动状态筛选
+const totalTickets = computed(() => filteredList.value.length)
+const pagedList = computed(() => {
+  const start = (currentPage.value - 1) * pageSize.value
+  return filteredList.value.slice(start, start + pageSize.value)
 })
 
 // el-tag 标签类型
@@ -194,6 +219,7 @@ onMounted(async () => {
 .page-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
 .page-title { margin: 0; font-size: 18px; color: var(--np-text); }
 .page-desc { margin: 6px 0 0; font-size: 13px; color: var(--np-text-secondary); }
+.pagination-wrap { margin-top: 20px; display: flex; justify-content: flex-end; }
 
 .detail-header h3 { margin: 0 0 10px; color: var(--np-text); }
 .detail-meta { display: flex; gap: 16px; align-items: center; font-size: 13px; color: var(--np-text-secondary); margin-bottom: 20px; flex-wrap: wrap; }

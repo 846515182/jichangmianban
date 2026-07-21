@@ -2,6 +2,8 @@ package main
 
 import (
 	"archive/zip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -57,6 +59,8 @@ func (m *XrayManager) EnsureBinary() error {
 }
 
 // downloadXray 从 GitHub releases 下载并解压 Xray-core 二进制
+// P0-AG3: 下载 zip 后同时下载 .dgst 文件提取 SHA-256, 与本地 zip 比对, 校验失败删除并返回错误
+// P1-AG9: io.Copy 加 200MB 上限, 防止恶意/异常响应耗尽磁盘
 func (m *XrayManager) downloadXray() error {
 	arch := xrayArch()
 	url := fmt.Sprintf("https://github.com/XTLS/Xray-core/releases/download/%s/Xray-linux-%s.zip", m.version, arch)
@@ -85,12 +89,42 @@ func (m *XrayManager) downloadXray() error {
 		tmpZip.Close()
 		return fmt.Errorf("下载失败: HTTP %d", resp.StatusCode)
 	}
-	if _, err := io.Copy(tmpZip, resp.Body); err != nil {
+	// P1-AG9: 限制下载大小 200MB, 防止异常响应耗尽磁盘
+	if _, err := io.Copy(tmpZip, io.LimitReader(resp.Body, 200<<20)); err != nil {
 		tmpZip.Close()
 		return fmt.Errorf("写入临时文件失败: %w", err)
 	}
 	if err := tmpZip.Close(); err != nil {
 		return err
+	}
+
+	// P0-AG3: 下载 .dgst 文件提取 SHA-256, 与本地 zip 比对
+	// .dgst 文件格式: SHA256(Xray-linux-64.zip)= <hex> (或类似 SHA2-256=...=<hex>)
+	// 若 .dgst 下载失败(某些镜像可能不提供), 记录警告但继续(不阻断)
+	dgstURL := url + ".dgst"
+	dgstReq, _ := http.NewRequest("GET", dgstURL, nil)
+	dgstResp, dgstErr := client.Do(dgstReq)
+	if dgstErr == nil && dgstResp.StatusCode == http.StatusOK {
+		dgstBytes, _ := io.ReadAll(io.LimitReader(dgstResp.Body, 4096))
+		dgstResp.Body.Close()
+		expectedHash := extractSHA256(string(dgstBytes))
+		if expectedHash != "" {
+			localHash, hashErr := sha256File(tmpName)
+			if hashErr != nil {
+				return fmt.Errorf("计算本地 zip SHA-256 失败: %w", hashErr)
+			}
+			if localHash != expectedHash {
+				os.Remove(tmpName)
+				return fmt.Errorf("xray 二进制 hash 校验失败: expected %s, got %s", expectedHash, localHash)
+			}
+			log.Printf("Xray zip hash 校验通过: %s", localHash)
+		} else {
+			log.Printf("[WARN] .dgst 文件已下载但未提取到 SHA-256, 跳过校验(继续解压)")
+		}
+	} else if dgstErr != nil {
+		log.Printf("[WARN] 下载 .dgst 失败, 跳过 hash 校验(不阻断): %v", dgstErr)
+	} else {
+		log.Printf("[WARN] .dgst HTTP %d, 跳过 hash 校验(不阻断)", dgstResp.StatusCode)
 	}
 
 	if err := extractXrayBinary(tmpName, m.binaryPath); err != nil {
@@ -101,6 +135,50 @@ func (m *XrayManager) downloadXray() error {
 	}
 	log.Printf("Xray-core 下载完成: %s", m.binaryPath)
 	return nil
+}
+
+// extractSHA256 从 .dgst 文件内容中提取 SHA-256 哈希值
+// 支持常见格式:
+//   - "SHA256(filename.zip)= <hex>"
+//   - "SHA2-256=filename.zip=<hex>"
+//   - 行内含 "SHA256" / "SHA2-256" 且行尾有 64 位 hex
+// 若未找到返回空字符串
+func extractSHA256(dgstContent string) string {
+	for _, line := range strings.Split(dgstContent, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		upper := strings.ToUpper(line)
+		if !strings.Contains(upper, "SHA256") && !strings.Contains(upper, "SHA2-256") {
+			continue
+		}
+		// 取最后一个 '=' 后的部分作为 hash 候选
+		idx := strings.LastIndex(line, "=")
+		if idx < 0 {
+			continue
+		}
+		hash := strings.TrimSpace(line[idx+1:])
+		// SHA-256 hex 长度固定 64
+		if len(hash) == 64 {
+			return hash
+		}
+	}
+	return ""
+}
+
+// sha256File 计算指定文件路径的 SHA-256 哈希值(返回小写 hex)
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // xrayArch 根据 runtime.GOARCH 返回 Xray 发布包的架构标识
@@ -118,6 +196,8 @@ func xrayArch() string {
 }
 
 // extractXrayBinary 从 zip 中提取 xray 二进制到 dest
+// P1-AG8: 原子写+fsync — 先写到 dest.tmp, fsync 后 rename, 避免写一半进程崩溃导致二进制损坏
+// (原实现直接写 dest, 进程在 io.Copy 中途崩溃会留下半截文件, 下次启动 Xray 会执行失败)
 func extractXrayBinary(zipPath, dest string) error {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
@@ -133,15 +213,28 @@ func extractXrayBinary(zipPath, dest string) error {
 		if err != nil {
 			return err
 		}
-		out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
+		tmpPath := dest + ".tmp"
+		out, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
 		if err != nil {
 			rc.Close()
 			return err
 		}
 		_, err = io.Copy(out, rc)
 		rc.Close()
-		out.Close()
 		if err != nil {
+			out.Close()
+			os.Remove(tmpPath)
+			return err
+		}
+		if err := out.Sync(); err != nil {
+			out.Close()
+			os.Remove(tmpPath)
+			return err
+		}
+		out.Close()
+		// 原子替换, 保证 dest 要么是完整新版本, 要么是旧版本, 不会是半截文件
+		if err := os.Rename(tmpPath, dest); err != nil {
+			os.Remove(tmpPath)
 			return err
 		}
 		return nil
@@ -177,11 +270,17 @@ func OverrideListenPort(cfgJSON string, listenPort int) (string, error) {
 }
 
 // WriteConfig 写入 Xray 配置文件
+// P1-AG7: 原子写 — 先写到 configPath.tmp, 再 rename, 避免写一半进程崩溃导致配置文件损坏
+// (原实现直接 WriteFile, 进程在写中途崩溃会留下半截 JSON, Xray 启动解析失败)
 func (m *XrayManager) WriteConfig(cfgJSON string) error {
 	if err := os.MkdirAll(filepath.Dir(m.configPath), 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(m.configPath, []byte(cfgJSON), 0600)
+	tmpPath := m.configPath + ".tmp"
+	if err := os.WriteFile(tmpPath, []byte(cfgJSON), 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, m.configPath)
 }
 
 // IsRunning 返回 Xray 进程是否在运行
@@ -195,7 +294,12 @@ func (m *XrayManager) IsRunning() bool {
 func (m *XrayManager) Start() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.startLocked()
+}
 
+// startLocked 启动 Xray 进程的内部实现(不加锁), 供 Start 和 Restart 复用
+// 调用方必须已持有 m.mu
+func (m *XrayManager) startLocked() error {
 	if m.cmd != nil {
 		return nil
 	}
@@ -261,11 +365,29 @@ func (m *XrayManager) Stop() error {
 }
 
 // Restart 重启 Xray 进程
+// P1-AG16: 用一把锁覆盖 Stop+Start, 防止并发 Restart/Start 在 Stop 释放锁后
+// 被其他 goroutine 插入 Start, 导致多个 Xray 进程同时运行抢占端口
+// (原实现 Stop 释放锁后再 Start 重新获取锁, 中间窗口可能被并发 Start 插入)
 func (m *XrayManager) Restart() error {
-	if err := m.Stop(); err != nil {
-		return err
+	m.mu.Lock()
+	cmd := m.cmd
+	if cmd != nil && cmd.Process != nil {
+		doneCh := m.doneCh
+		m.cmd = nil
+		pid := cmd.Process.Pid
+		log.Printf("重启: 停止旧 Xray 进程 pid=%d", pid)
+		// 注意: 此处不能持锁阻塞等待 SIGTERM(5s), 否则与 startLocked 的锁需求死锁。
+		// 但又必须持锁防止并发。妥协: 在锁内发 SIGKILL 立即终止, 然后等 doneCh 关闭。
+		// SIGKILL 比 SIGTERM 更暴力但能快速释放锁, 对重启场景可接受(Xray 无持久状态需保存)。
+		_ = cmd.Process.Signal(syscall.SIGKILL)
+		m.mu.Unlock()
+		<-doneCh
+		m.mu.Lock()
+	} else {
+		// 无运行中的进程, 直接持锁启动(不释放)
 	}
-	return m.Start()
+	defer m.mu.Unlock()
+	return m.startLocked()
 }
 
 // logWriter 将子进程输出按行写入标准日志

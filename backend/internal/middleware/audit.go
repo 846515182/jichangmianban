@@ -14,6 +14,15 @@ import (
 	"nexus-panel/internal/repo"
 )
 
+// P1-AUDIT: 审计日志中需脱敏的敏感字段(全小写匹配, JSON key 不区分大小写也覆盖)
+// 命中后值会被替换为 "***" 再截断到 512 字节, 避免明文密码/密钥进入审计表
+var sensitiveFields = []string{
+	"password", "old_password", "new_password",
+	"secret", "api_key", "apikey",
+	"smtp_pass", "smtp_password",
+	"private_key", "node_token",
+}
+
 // AuditAction 记录管理员操作审计日志中间件
 // 用法: admin.PUT("/nodes/:id", AuditAction("node.update"), adminNodeH.NodeUpdate)
 func AuditAction(action string) gin.HandlerFunc {
@@ -82,22 +91,57 @@ func readRequestBody(c *gin.Context) []byte {
         return body
 }
 
-// formatRequestBody 格式化已读取的请求体字节，截取最多 512 字节
+// formatRequestBody 格式化已读取的请求体字节, 对敏感字段脱敏后截取最多 512 字节
+// P1-AUDIT: 防止明文密码/密钥/私钥等敏感数据进入审计表
 func formatRequestBody(body []byte) string {
-        if len(body) == 0 {
-                return ""
-        }
-        if len(body) > 512 {
-                body = body[:512]
-        }
-        // 尝试格式化 JSON
-        var obj interface{}
-        if json.Unmarshal(body, &obj) == nil {
-                if formatted, err := json.Marshal(obj); err == nil {
-                        return string(formatted)
-                }
-        }
-        return string(body)
+	if len(body) == 0 {
+		return ""
+	}
+	// 尝试解析为 JSON 做字段级脱敏; 失败则按原始文本截断(无法识别字段, 仅截断)
+	var obj interface{}
+	if json.Unmarshal(body, &obj) == nil {
+		maskSensitive(obj)
+		if formatted, err := json.Marshal(obj); err == nil {
+			if len(formatted) > 512 {
+				formatted = formatted[:512]
+			}
+			return string(formatted)
+		}
+	}
+	if len(body) > 512 {
+		body = body[:512]
+	}
+	return string(body)
+}
+
+// maskSensitive 递归遍历 JSON 解析结果, 将命中 sensitiveFields 的 key 的值替换为 "***"
+// 支持 map[string]interface{} 与 []interface{}; key 比较忽略大小写
+func maskSensitive(v interface{}) {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for k, val := range t {
+			if isSensitiveField(k) {
+				t[k] = "***"
+				continue
+			}
+			maskSensitive(val)
+		}
+	case []interface{}:
+		for i := range t {
+			maskSensitive(t[i])
+		}
+	}
+}
+
+// isSensitiveField 判断字段名是否敏感(忽略大小写)
+func isSensitiveField(key string) bool {
+	lk := strings.ToLower(key)
+	for _, s := range sensitiveFields {
+		if lk == s {
+			return true
+		}
+	}
+	return false
 }
 
 func extractTargetType(path string) string {

@@ -91,6 +91,7 @@ func (r *TrafficRepo) SumByUsers(userIDs []string) (map[string]int64, error) {
 }
 
 // TopUsers 流量 TOP 用户统计
+// 修复 P1-repo-traffic: 旧版循环内逐条查 users 表(N+1), 现改为一次 IN 查询批量填充用户名
 func (r *TrafficRepo) TopUsers(limit int, since time.Time) ([]TrafficTopRow, error) {
 	var results []TrafficTopRow
 
@@ -107,21 +108,39 @@ func (r *TrafficRepo) TopUsers(limit int, since time.Time) ([]TrafficTopRow, err
 	if err != nil {
 		return nil, err
 	}
-	
-	// 填充用户名
-	for i := range results {
-		var username string
-		r.db.Table("users").Select("username").Where("id = ?", results[i].UserID).Scan(&username)
-		results[i].Username = username
+	if len(results) == 0 {
+		return results, nil
 	}
-	
+
+	// 修复 P1-repo-traffic: 批量查询用户名, 替代循环内 N+1 查询
+	userIDs := make([]string, 0, len(results))
+	for _, r := range results {
+		userIDs = append(userIDs, r.UserID)
+	}
+	var users []struct {
+		ID       string `gorm:"column:id"`
+		Username string `gorm:"column:username"`
+	}
+	if err := r.db.Table("users").Select("id, username").
+		Where("id IN ?", userIDs).Scan(&users).Error; err != nil {
+		return nil, err
+	}
+	userMap := make(map[string]string, len(users))
+	for _, u := range users {
+		userMap[u.ID] = u.Username
+	}
+	for i := range results {
+		results[i].Username = userMap[results[i].UserID]
+	}
+
 	return results, nil
 }
 
 // TopNodes 流量 TOP 节点统计
+// 修复 P1-repo-traffic: 旧版循环内逐条查 nodes 表(N+1), 现改为一次 IN 查询批量填充节点名
 func (r *TrafficRepo) TopNodes(limit int, since time.Time) ([]TrafficTopNodeRow, error) {
 	var results []TrafficTopNodeRow
-	
+
 	err := r.db.Table("traffic_logs").
 		Select("node_id, COALESCE(SUM(upload_bytes), 0) as upload_bytes, COALESCE(SUM(download_bytes), 0) as download_bytes, COALESCE(SUM(upload_bytes + download_bytes), 0) as total_bytes").
 		Where("log_time >= ?", since).
@@ -129,18 +148,35 @@ func (r *TrafficRepo) TopNodes(limit int, since time.Time) ([]TrafficTopNodeRow,
 		Order("total_bytes DESC").
 		Limit(limit).
 		Scan(&results).Error
-	
+
 	if err != nil {
 		return nil, err
 	}
-	
-	// 填充节点名称
-	for i := range results {
-		var nodeName string
-		r.db.Table("nodes").Select("name").Where("id = ?", results[i].NodeID).Scan(&nodeName)
-		results[i].NodeName = nodeName
+	if len(results) == 0 {
+		return results, nil
 	}
-	
+
+	// 修复 P1-repo-traffic: 批量查询节点名, 替代循环内 N+1 查询
+	nodeIDs := make([]string, 0, len(results))
+	for _, r := range results {
+		nodeIDs = append(nodeIDs, r.NodeID)
+	}
+	var nodes []struct {
+		ID   string `gorm:"column:id"`
+		Name string `gorm:"column:name"`
+	}
+	if err := r.db.Table("nodes").Select("id, name").
+		Where("id IN ?", nodeIDs).Scan(&nodes).Error; err != nil {
+		return nil, err
+	}
+	nodeMap := make(map[string]string, len(nodes))
+	for _, n := range nodes {
+		nodeMap[n.ID] = n.Name
+	}
+	for i := range results {
+		results[i].NodeName = nodeMap[results[i].NodeID]
+	}
+
 	return results, nil
 }
 

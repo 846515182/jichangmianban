@@ -48,7 +48,12 @@ const onSubmit = async () => {
   try {
     const role = await userStore.loginAuto(form.value.username, form.value.password)
     ElMessage.success('登录成功')
-    const redirect = (route.query.redirect as string) || (role === 'admin' ? '/admin/dashboard' : '/')
+    // 修复 P0-FE2: 开放重定向漏洞。旧版直接信任 route.query.redirect,
+    // 攻击者可构造 /login?redirect=https://evil.com 钓鱼, 登录后跳到恶意站点。
+    // 现仅允许以单个 '/' 开头的相对路径, 拒绝 '//evil.com' 与 '/\\evil.com' 等协议相对 URL。
+    const rawRedirect = String(route.query.redirect || '')
+    const isSafeRedirect = rawRedirect.startsWith('/') && !rawRedirect.startsWith('//') && !rawRedirect.startsWith('/\\')
+    const redirect = isSafeRedirect ? rawRedirect : (role === 'admin' ? '/admin/dashboard' : '/')
     router.push(redirect)
   } catch (e: any) {
     ElMessage.error(e?.msg || '登录失败')

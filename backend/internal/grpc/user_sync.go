@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc/status"
 	"gorm.io/gorm"
 
+	"nexus-panel/internal/model"
 	"nexus-panel/internal/repo"
 	nexuspb "nexus-panel/proto"
 )
@@ -33,8 +34,14 @@ func NewUserSyncServiceServer(nodeRepo *repo.NodeRepo, userRepo *repo.UserRepo, 
 	}
 }
 
-// SyncUsers 用 node_id+node_token 校验后，下发所有 active 用户的凭证列表
+// SyncUsers 用 node_id+node_token 校验后，下发该节点可见的活跃用户凭证列表
 // since_version 暂未做增量(0=全量)，后续可基于 updated_at 实现
+//
+// P1-SyncUsers口径: 改用 listActiveUsersForNode(node) 而非 userRepo.ListActive()。
+// 旧版把全部 active 用户下发到每个节点, 导致:
+//  1. 安全: 节点 A 的用户凭证会泄露给节点 B, 被攻破的节点 B 可冒充节点 A 的用户
+//  2. 性能: 节点数 × 用户数 全量下发, DB 与带宽浪费
+//  现按 node_plan_bindings 过滤, 只下发绑定到该节点套餐的用户。
 func (s *UserSyncServiceServer) SyncUsers(ctx context.Context, req *nexuspb.SyncUsersRequest) (*nexuspb.SyncUsersResponse, error) {
 	if req.GetNodeId() == "" || req.GetNodeToken() == "" {
 		return nil, status.Error(codes.Unauthenticated, "缺少 node_id 或 node_token")
@@ -53,7 +60,7 @@ func (s *UserSyncServiceServer) SyncUsers(ctx context.Context, req *nexuspb.Sync
 		return nil, status.Error(codes.PermissionDenied, "节点已禁用")
 	}
 
-	users, err := s.userRepo.ListActive()
+	users, err := s.listActiveUsersForNode(node)
 	if err != nil {
 		s.logger.Error("SyncUsers 查询用户失败", zap.Error(err))
 		return nil, status.Error(codes.Internal, "查询用户失败")
@@ -76,6 +83,21 @@ func (s *UserSyncServiceServer) SyncUsers(ctx context.Context, req *nexuspb.Sync
 		Users:         creds,
 		LatestVersion: time.Now().Unix(),
 	}, nil
+}
+
+// listActiveUsersForNode 查询节点可见的活跃用户
+// P1-SyncUsers口径: 与 grpc/node_service.go 中同名方法逻辑一致,
+// 按节点套餐绑定过滤用户。复制实现以避免跨 server 类型耦合(两 server 都持有相同 repo)。
+func (s *UserSyncServiceServer) listActiveUsersForNode(node *model.Node) ([]model.User, error) {
+	planIDs, err := s.nodeRepo.GetPlanIDsByNode(node.ID)
+	if err != nil {
+		return nil, err
+	}
+	if len(planIDs) > 0 {
+		return s.userRepo.ListActiveForPlans(planIDs)
+	}
+	// 回退: 节点未配置绑定 → 返回所有活跃用户
+	return s.userRepo.ListActive()
 }
 
 // userStatusToProto 数据库 status 字符串转 proto 枚举

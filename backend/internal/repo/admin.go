@@ -68,8 +68,9 @@ func (r *AdminRepo) UpdateEmail(id, email string) error {
 }
 
 // UpdateLastLogin 更新最后登录信息
+// 修复 P1-repo-软删除过滤: 加 AND is_deleted = false, 避免为已软删的管理员更新登录信息
 func (r *AdminRepo) UpdateLastLogin(id, ip string, t time.Time) error {
-	return r.db.Model(&model.Admin{}).Where("id = ?", id).
+	return r.db.Model(&model.Admin{}).Where("id = ? AND is_deleted = false", id).
 		Updates(map[string]interface{}{
 			"last_login_at": t,
 			"last_login_ip": ip,

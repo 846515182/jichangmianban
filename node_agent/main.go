@@ -62,12 +62,19 @@ type Agent struct {
 
 	// 实际 Xray 监听端口（面板分配或 LISTEN_PORT 覆盖）
 	// 用于健康检查，保证始终与 Xray 实际监听端口一致
+	// P0-AG1: effectivePort 纳入 a.mu 保护, 读写均需持锁
 	effectivePort int
 
 	// 修复 NODE-HEALTH-02: Xray 崩溃自动重启的限流记录
 	// restartHistory 保存最近 10 分钟窗口内的重启时间戳, 超 3 次暂停自动重启
-	restartMu       sync.Mutex
-	restartHistory  []time.Time
+	restartMu      sync.Mutex
+	restartHistory []time.Time
+
+	// P0-AG2: applyConfig 串行化锁, 防止并发 applyConfig 导致 Xray 进程状态混乱
+	applyMu sync.Mutex
+
+	// P0-AG4/P0-AG5: 主 ctx 引用, 供 handleFatalShutdown 等异步流程派生 ctx
+	mainCtx context.Context
 }
 
 
@@ -93,10 +100,22 @@ func main() {
 	log.Printf("配置: panel=%s listen_port=%d health_port=%d xray=%s",
 		cfg.PanelGrpcAddr, cfg.ListenPort, cfg.HealthPort, cfg.XrayVersion)
 
+	// P0-AG4: 信号注册提前到 main 开头, 确保 waitForBootstrapRecovery 等长阻塞流程能响应 SIGTERM/SIGINT
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	safeGo(func() {
+		sig := <-sigCh
+		log.Printf("收到信号 %v，开始关闭...", sig)
+		cancel()
+	})
+
 	agent := &Agent{
 		cfg:       cfg,
 		startTime: time.Now(),
 		traffic:   NewTrafficCounter(),
+		mainCtx:   ctx,
 	}
 
 	// 1. 启动健康检查 HTTP 服务
@@ -109,12 +128,12 @@ func main() {
 	//   - 面板 gRPC 暂时不可达(面板重启中)
 	//   - CA 证书路径配错, 运维修正后 docker restart 即可恢复
 	//   - 文件系统临时异常(如磁盘满、权限问题)
-	client, err := NewPanelClient(cfg.PanelGrpcAddr)
+	client, err := NewPanelClient(cfg.PanelGrpcAddr, ctx)
 	if err != nil {
 		log.Printf("[FATAL] 建立 gRPC 连接失败, 进入等待重试模式: %v", err)
-		agent.waitForBootstrapRecovery()
+		agent.waitForBootstrapRecovery(ctx)
 		// recovery 成功后重新初始化 client
-		client, err = NewPanelClient(cfg.PanelGrpcAddr)
+		client, err = NewPanelClient(cfg.PanelGrpcAddr, ctx)
 		if err != nil {
 			log.Fatalf("gRPC 连接 recovery 后仍然失败: %v", err)
 		}
@@ -126,7 +145,7 @@ func main() {
 	xm, err := NewXrayManager(cfg.XrayVersion)
 	if err != nil {
 		log.Printf("[FATAL] 初始化 Xray 管理器失败, 进入等待重试模式: %v", err)
-		agent.waitForBootstrapRecovery()
+		agent.waitForBootstrapRecovery(ctx)
 		xm, err = NewXrayManager(cfg.XrayVersion)
 		if err != nil {
 			log.Fatalf("Xray 管理器 recovery 后仍然失败: %v", err)
@@ -143,13 +162,12 @@ func main() {
 	// 持续刷 docker 日志、占 CPU。现改为: bootstrap 失败进入"休眠+周期重试"模式,
 	// 进程不退出, 等待运维在面板侧恢复节点(token 复用/节点重新创建)后自动注册成功。
 	// 这样避免 docker 死循环; 同时也给运维时间在面板侧排查问题。
-	if err := agent.bootstrap(); err != nil {
+	if err := agent.bootstrap(ctx); err != nil {
 		log.Printf("[FATAL] 首次启动失败, 进入等待重试模式(不退出进程, 避免 docker 死循环): %v", err)
-		agent.waitForBootstrapRecovery()
+		agent.waitForBootstrapRecovery(ctx)
 	}
 
 	// 5. 启动心跳定时器(每 30s)
-	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	wg.Add(1)
 	safeGo(func() {
@@ -164,13 +182,8 @@ func main() {
 		agent.trafficLoop(ctx)
 	})
 
-	// 7. 监听信号优雅退出
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	sig := <-sigCh
-	log.Printf("收到信号 %v，开始关闭...", sig)
-
-	cancel()
+	// 7. 等待信号触发 ctx 取消, 然后等所有后台 goroutine 退出
+	<-ctx.Done()
 	wg.Wait()
 
 	if agent.xray != nil {
@@ -235,7 +248,8 @@ func (a *Agent) runHealthServer() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	addr := fmt.Sprintf(":%d", a.cfg.HealthPort)
+	// P1-AG12: 健康检查服务绑定 127.0.0.1, 避免暴露到公网被外部扫描
+	addr := fmt.Sprintf("127.0.0.1:%d", a.cfg.HealthPort)
 	log.Printf("健康检查服务监听 %s (/healthz=完整检查, /livez=存活检查)", addr)
 	srv := &http.Server{Addr: addr, Handler: mux}
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -244,20 +258,34 @@ func (a *Agent) runHealthServer() {
 }
 
 // bootstrap 注册节点 + 拉取配置 + 启动 Xray，带重试直到成功
-func (a *Agent) bootstrap() error {
+// P0-AG4: 接受 ctx 参数, 内部 RPC 调用通过 PanelClient.mainCtx 派生 ctx, ctx 取消时立即返回
+func (a *Agent) bootstrap(ctx context.Context) error {
 	const maxAttempts = 30
 	// 注册
 	var nodeInfo *proto.NodeInfo
 	for i := 1; i <= maxAttempts; i++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		ni, err := a.client.Register(a.cfg.NodeToken, hostname(), agentVersion)
 		if err != nil {
 			log.Printf("注册失败(%d/%d): %v", i, maxAttempts, err)
-			time.Sleep(5 * time.Second)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(5 * time.Second):
+			}
 			continue
 		}
 		if ni.GetResp().GetCode() != 0 {
 			log.Printf("注册被拒(%d/%d): code=%d msg=%s", i, maxAttempts, ni.GetResp().GetCode(), ni.GetResp().GetMessage())
-			time.Sleep(5 * time.Second)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(5 * time.Second):
+			}
 			continue
 		}
 		nodeInfo = ni.GetNode()
@@ -275,15 +303,28 @@ func (a *Agent) bootstrap() error {
 
 	// 拉取配置
 	for i := 1; i <= maxAttempts; i++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		cfgResp, err := a.client.GetConfig(a.getNodeID(), a.cfg.NodeToken, "")
 		if err != nil {
 			log.Printf("拉取配置失败(%d/%d): %v", i, maxAttempts, err)
-			time.Sleep(5 * time.Second)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(5 * time.Second):
+			}
 			continue
 		}
 		if cfgResp.GetResp().GetCode() != 0 {
 			log.Printf("拉取配置被拒(%d/%d): code=%d msg=%s", i, maxAttempts, cfgResp.GetResp().GetCode(), cfgResp.GetResp().GetMessage())
-			time.Sleep(5 * time.Second)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(5 * time.Second):
+			}
 			continue
 		}
 		a.mu.Lock()
@@ -313,14 +354,21 @@ func (a *Agent) bootstrap() error {
 //   - 节点 token 被误删, 运维在面板重新创建节点后能自动恢复
 //   - 面板 IP 变化后运维修正 .env 后能自动恢复
 // 一旦 bootstrap 成功则返回, 主流程继续启动心跳/流量上报。
-func (a *Agent) waitForBootstrapRecovery() {
+//
+// P0-AG4: 接受 ctx 参数, select 监听 ctx.Done(), 收到 SIGTERM/SIGINT 时立即返回不再重试
+func (a *Agent) waitForBootstrapRecovery(ctx context.Context) {
 	const retryInterval = 5 * time.Minute
 	attempt := 0
 	for {
 		attempt++
 		log.Printf("[recovery] 等待 %v 后第 %d 次重试 bootstrap...", retryInterval, attempt)
-		time.Sleep(retryInterval)
-		if err := a.bootstrap(); err != nil {
+		select {
+		case <-ctx.Done():
+			log.Printf("[recovery] ctx 已取消, 停止重试 bootstrap")
+			return
+		case <-time.After(retryInterval):
+		}
+		if err := a.bootstrap(ctx); err != nil {
 			log.Printf("[recovery] 第 %d 次重试失败: %v", attempt, err)
 			continue
 		}
@@ -330,7 +378,12 @@ func (a *Agent) waitForBootstrapRecovery() {
 }
 
 // applyConfig 写入 Xray 配置文件并(重启)启动 Xray 进程
+// P0-AG2: 整体持 applyMu 锁串行化, 防止并发 applyConfig 导致 Xray 进程状态混乱
+// (reloadConfig + autoRestartXray + heartbeatLoop 可能并发触发)
 func (a *Agent) applyConfig() error {
+	a.applyMu.Lock()
+	defer a.applyMu.Unlock()
+
 	a.mu.RLock()
 	cfgJSON := a.xrayCfgJSON
 	nodePort := a.nodePort
@@ -345,7 +398,10 @@ func (a *Agent) applyConfig() error {
 	if listenPort == 0 {
 		listenPort = 443 // 最终兜底
 	}
+	// P0-AG1: effectivePort 写入需持 a.mu 锁, 防止与健康检查/连接数统计的读并发
+	a.mu.Lock()
 	a.effectivePort = listenPort
+	a.mu.Unlock()
 
 	finalCfg, err := OverrideListenPort(cfgJSON, listenPort)
 	if err != nil {
@@ -399,7 +455,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			if atomic.LoadInt32(&a.fatalShutdown) == 1 {
 				continue
 			}
-			ok := a.doHeartbeat()
+			ok := a.doHeartbeat(ctx)
 			if !ok {
 				// 心跳失败(非致命), 10s 后立即补一次, 不等下一个 30s 周期
 				select {
@@ -410,7 +466,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 					if atomic.LoadInt32(&a.fatalShutdown) == 1 {
 						continue
 					}
-					a.doHeartbeat()
+					a.doHeartbeat(ctx)
 				}
 			}
 		case <-recoverTicker.C:
@@ -446,7 +502,8 @@ func (a *Agent) tryRecoverFromFatal(ctx context.Context) {
 	defer atomic.StoreInt32(&a.recoverInProgress, 0)
 
 	log.Printf("[recovery] fatalShutdown 状态下尝试恢复: 重新 bootstrap...")
-	if err := a.bootstrap(); err != nil {
+	// P0-AG5: bootstrap 接受主 ctx, ctx 取消时立即终止(响应 SIGTERM)
+	if err := a.bootstrap(ctx); err != nil {
 		log.Printf("[recovery] 恢复失败, 将在 1 分钟后重试: %v", err)
 		return
 	}
@@ -459,7 +516,8 @@ func (a *Agent) tryRecoverFromFatal(ctx context.Context) {
 // 返回 false 表示心跳失败(网络错误/被拒等非致命情况), 调用方可据此决定是否补发。
 // 致命错误(节点被删/token 失效)会触发 handleFatalShutdown, 此时也返回 false 但
 // fatalShutdown 已置位, 后续不会再补发。
-func (a *Agent) doHeartbeat() bool {
+// P0-AG5/P0-AG6: 接受 ctx 参数, 传递给 autoRestartXray/reloadConfig(进而传给 execCommand)
+func (a *Agent) doHeartbeat(ctx context.Context) bool {
 	// 已因致命错误停服，跳过心跳(进程保持运行，避免 docker 重启死循环)
 	if atomic.LoadInt32(&a.fatalShutdown) == 1 {
 		return false
@@ -476,7 +534,7 @@ func (a *Agent) doHeartbeat() bool {
 	// 这里检测 Xray 进程是否存活, 不存活则尝试重启(最多 3 次/10 分钟窗口)
 	if a.xray != nil && !a.xray.IsRunning() {
 		log.Printf("[health][WARN] Xray 进程未运行, 尝试自动重启...")
-		if err := a.autoRestartXray(); err != nil {
+		if err := a.autoRestartXray(ctx); err != nil {
 			log.Printf("[health][ERROR] Xray 自动重启失败: %v", err)
 		}
 	}
@@ -493,7 +551,7 @@ func (a *Agent) doHeartbeat() bool {
 	// 修复 NODE-DATA-01: cpuUsage/onlineConns 原硬编码 0, 现在用真实值
 	// 修复 NODE-DATA-02: trafficDown/Up 原塞进 trafficLimit/Used, 现在传 0 让 DB 字段为准
 	cpuUsage := readCPUUsage()
-	onlineConns := a.readOnlineConnections()
+	onlineConns := a.readOnlineConnections(ctx)
 	resp, err := a.client.Heartbeat(
 		a.getNodeID(), a.cfg.NodeToken, agentVersion,
 		cpuUsage, memUsage, memTotal, onlineConns, uptime,
@@ -522,7 +580,9 @@ func (a *Agent) doHeartbeat() bool {
 	// 配置或用户变更 -> 重新拉取配置并应用
 	if resp.GetConfigChanged() || resp.GetUsersChanged() {
 		log.Printf("面板提示配置/用户已变更，重新拉取配置...")
-		a.reloadConfig()
+		if err := a.reloadConfig(ctx); err != nil {
+			log.Printf("重新拉取配置失败: %v", err)
+		}
 	}
 	return true
 }
@@ -547,9 +607,18 @@ func (a *Agent) handleFatalShutdown(reason string) {
 	log.Printf("[FATAL] 节点已停服，5s 后异步触发恢复尝试(后续每 1 分钟重试)...")
 	// 立即异步触发一次恢复, 不等 ticker (加快 panel 短暂重启场景的恢复)
 	// 等 5s 是给 panel 一点喘息时间(刚返回 fatal 错误, 立即重试大概率还是失败)
+	// P0-AG5: 使用主 ctx(从 a.mainCtx 取), ctx 取消时立即返回不再触发恢复
+	ctx := a.mainCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	safeGo(func() {
-		time.Sleep(5 * time.Second)
-		a.tryRecoverFromFatal(context.Background())
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
+		a.tryRecoverFromFatal(ctx)
 	})
 }
 
@@ -581,23 +650,23 @@ func isFatalHeartbeatMsg(msg string) bool {
 }
 
 // reloadConfig 重新拉取 Xray 配置并重启进程
-func (a *Agent) reloadConfig() {
+// P0-AG6: 接受 ctx 参数, 返回 error 供调用方决策(如 autoRestartXray 拉取失败时 fallback 到本地缓存)
+func (a *Agent) reloadConfig(ctx context.Context) error {
 	cfgResp, err := a.client.GetConfig(a.getNodeID(), a.cfg.NodeToken, a.getConfigVer())
 	if err != nil {
-		log.Printf("重新拉取配置失败: %v", err)
-		return
+		return fmt.Errorf("重新拉取配置失败: %w", err)
 	}
 	if cfgResp.GetResp().GetCode() != 0 {
-		log.Printf("重新拉取配置被拒: code=%d msg=%s", cfgResp.GetResp().GetCode(), cfgResp.GetResp().GetMessage())
-		return
+		return fmt.Errorf("重新拉取配置被拒: code=%d msg=%s", cfgResp.GetResp().GetCode(), cfgResp.GetResp().GetMessage())
 	}
 	a.mu.Lock()
 	a.configVer = cfgResp.GetConfigVersion()
 	a.xrayCfgJSON = cfgResp.GetXrayConfig()
 	a.mu.Unlock()
 	if err := a.applyConfig(); err != nil {
-		log.Printf("应用新配置失败: %v", err)
+		return fmt.Errorf("应用新配置失败: %w", err)
 	}
+	return nil
 }
 
 // trafficLoop 每 60s 读取系统流量增量并上报
@@ -615,6 +684,10 @@ func (a *Agent) trafficLoop(ctx context.Context) {
 }
 
 func (a *Agent) doTrafficReport() {
+	// P1-AG14: fatalShutdown 状态下不上报流量(节点已停服, 不应再向面板发请求避免触发新的 fatal)
+	if atomic.LoadInt32(&a.fatalShutdown) == 1 {
+		return
+	}
 	upload, download := a.traffic.Peek()
 	if upload == 0 && download == 0 {
 		return // 无流量变化不上报
@@ -681,7 +754,9 @@ func hostname() string {
 // autoRestartXray Xray 进程崩溃后自动重启, 限流: 10 分钟窗口内最多 3 次
 // 修复 NODE-HEALTH-02: 旧版 Xray 退出后 agent 继续发心跳但代理不可用, 无任何恢复机制
 // 限流防止 Xray 配置错误导致无限重启死循环
-func (a *Agent) autoRestartXray() error {
+// P0-AG6: 先尝试从面板拉新配置(可能配置已修复), 拉取失败则 fallback 到本地缓存配置重启
+// 避免用坏掉的本地缓存配置反复重启导致死循环
+func (a *Agent) autoRestartXray(ctx context.Context) error {
 	now := time.Now()
 	a.restartMu.Lock()
 	defer a.restartMu.Unlock()
@@ -703,9 +778,12 @@ func (a *Agent) autoRestartXray() error {
 	a.restartHistory = append(a.restartHistory, now)
 	log.Printf("[health] 开始重启 Xray (窗口内第 %d 次)", len(a.restartHistory))
 
-	// 用上次缓存的配置重启
-	if err := a.applyConfig(); err != nil {
-		return fmt.Errorf("重启 Xray 失败: %w", err)
+	// P0-AG6: 先尝试从面板拉新配置(可能配置已修复), 失败则 fallback 到本地缓存配置
+	if err := a.reloadConfig(ctx); err != nil {
+		log.Printf("[health] 拉取新配置失败, 用本地缓存重启: %v", err)
+		if err := a.applyConfig(); err != nil {
+			return fmt.Errorf("重启 Xray 失败: %w", err)
+		}
 	}
 	log.Printf("[health] Xray 重启成功")
 	return nil
@@ -767,19 +845,23 @@ func readCPUUsage() float64 {
 //
 // 修复 NODE-DATA-01 (P0): 原 doHeartbeat 硬编码 onlineConns=0, 面板连接数永远显示 0。
 // 之前尝试用 ss 修复但 ss 不存在导致恒 0; 现加 /proc/net/tcp 兜底确保至少有值。
-func (a *Agent) readOnlineConnections() int32 {
+func (a *Agent) readOnlineConnections(ctx context.Context) int32 {
+	// P0-AG1: effectivePort 读取需持 a.mu.RLock, 防止与 applyConfig 的写并发
+	a.mu.RLock()
 	port := a.effectivePort
+	a.mu.RUnlock()
 	if port == 0 {
 		return 0
 	}
 	// 主路径: ss 命令
 	// -H 去表头; state established 只看已建立连接;
 	// filter 用 sport/dport 匹配本节点 listen 端口(进/出方向都算)。
-	out, err := execCommand("ss", "-H", "-ant", "state", "established",
+	// P1-AG15: execCommand 接受 ctx, 5s 超时, ctx 取消时立即返回
+	out, err := execCommand(ctx, "ss", "-H", "-ant", "state", "established",
 		fmt.Sprintf("( sport = :%d or dport = :%d )", port, port))
 	if err == nil {
 		var count int32
-		for _, line := range strings.Split(string(out), "\n") {
+		for _, line := range strings.Split(out, "\n") {
 			if strings.TrimSpace(line) != "" {
 				count++
 			}
@@ -864,9 +946,13 @@ func shouldLogConnErr() bool {
 	return true
 }
 
-// execCommand 在 agent 进程内执行命令并返回输出(简化版, 不超时控制)
-// 注: 实际使用场景(ss 命令)非常快, 不需要长超时
-func execCommand(name string, args ...string) ([]byte, error) {
-	cmd := exec.Command(name, args...)
-	return cmd.Output()
+// execCommand 在 agent 进程内执行命令并返回输出
+// P1-AG15: 接受 ctx 参数, 派生 5s 超时 ctx, 防止子进程卡死阻塞心跳/流量上报
+// ctx 取消(如收到 SIGTERM)时, CommandContext 会发送 SIGKILL 给子进程
+func execCommand(ctx context.Context, name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	out, err := cmd.Output()
+	return string(out), err
 }

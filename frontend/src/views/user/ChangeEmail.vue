@@ -31,12 +31,16 @@
 import { ref, reactive, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '@/utils/request'
+import { useAuthStore } from '@/stores/auth'
 
 const formRef = ref()
 const loading = ref(false)
 const submitting = ref(false)
 const cooldown = ref(0)
 let timer: any = null
+
+// 修复 P1-FE10: 用于校验新邮箱是否与当前邮箱相同(避免无效请求)
+const authStore = useAuthStore()
 
 const form = reactive({ email: '', code: '', oldPassword: '' })
 const rules = {
@@ -53,6 +57,11 @@ const rules = {
 
 const sendCode = async () => {
   if (!form.email) { ElMessage.warning('请先填写新邮箱'); return }
+  // 修复 P1-FE10: 新邮箱与当前邮箱相同时直接拦截, 避免发无意义验证码 + 后端校验失败
+  if (form.email === authStore.userInfo?.email) {
+    ElMessage.warning('新邮箱不能与当前邮箱相同')
+    return
+  }
   try {
     // 修复 F2: 后端 SendVerifyCode 要求 type(oneof=verify change), 原前端发 purpose:'change_email' 被拒
     const res: any = await request.post('/api/v1/email/send-code', { email: form.email, type: 'change' })
@@ -75,6 +84,11 @@ const submit = async () => {
   if (!formRef.value) return
   await formRef.value.validate(async (ok: boolean) => {
     if (!ok) return
+    // 修复 P1-FE10: 提交前再次校验新旧邮箱相同(防止用户在 sendCode 后改回原邮箱)
+    if (form.email === authStore.userInfo?.email) {
+      ElMessage.warning('新邮箱不能与当前邮箱相同')
+      return
+    }
     try {
       await ElMessageBox.confirm('确定修改邮箱?', '确认操作', { type: 'warning' })
     } catch { return }

@@ -187,9 +187,11 @@ func (r *UserRepo) CountActive() (int64, error) {
 
 // ListActive 查询所有未删除、active、未过期、未超额的用户(节点凭证下发用)
 // 修复 BIZ-FATAL-01: 原实现不过滤 expired_at 和流量超限，导致到期用户仍可连接代理
+// 修复 P1-repo-ListActive: 显式 Select 不含 password_hash, 避免敏感字段下发到节点 agent
 func (r *UserRepo) ListActive() ([]model.User, error) {
 	var list []model.User
-	err := r.db.Where("is_deleted = false AND status = 'active'").
+	err := r.db.Select("id, username, email, traffic_limit, traffic_used, upload_bytes, download_bytes, expired_at, status, lock_until, plan_id, invite_code, remark, is_deleted, created_at, updated_at").
+		Where("is_deleted = false AND status = 'active'").
 		Where("expired_at IS NULL OR expired_at > NOW()").
 		Where("traffic_limit = 0 OR traffic_used < traffic_limit").
 		Find(&list).Error
@@ -238,12 +240,14 @@ func (r *UserRepo) ResetTrafficForCycleBatch() (int64, error) {
 
 // ListActiveForPlans 查询 plan_id 命中给定列表的活跃用户(用于 node_plan_bindings)
 // 用户状态过滤: 未删除 / active / 未过期 / 未超额
+// 修复 P1-repo-ListActive: 显式 Select 不含 password_hash, 与 ListActive 保持一致
 func (r *UserRepo) ListActiveForPlans(planIDs []string) ([]model.User, error) {
 	if len(planIDs) == 0 {
 		return nil, nil
 	}
 	var list []model.User
-	err := r.db.Where("is_deleted = false AND status = 'active' AND plan_id IN ?", planIDs).
+	err := r.db.Select("id, username, email, traffic_limit, traffic_used, upload_bytes, download_bytes, expired_at, status, lock_until, plan_id, invite_code, remark, is_deleted, created_at, updated_at").
+		Where("is_deleted = false AND status = 'active' AND plan_id IN ?", planIDs).
 		Where("expired_at IS NULL OR expired_at > NOW()").
 		Where("traffic_limit = 0 OR traffic_used < traffic_limit").
 		Find(&list).Error

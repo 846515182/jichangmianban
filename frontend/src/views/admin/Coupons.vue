@@ -322,11 +322,15 @@ const handleSave = async () => {
 }
 
 // 启用/禁用
+// 修复 P1-FE11: 旧版 row.is_enabled = value === true 在 value 为 '1' / 1 / 'true' 等 truthy 值时
+// 会被错误地设为 false(el-switch 默认 boolean, 但若用户传 active-value/inactive-value 自定义值就出 bug)。
+// 后端 model.Coupon.IsEnabled 是 bool, JSON tag is_enabled, 故直接 row.is_enabled = !!value 即可。
+// (后端 toggle 接口接受 status:'active'/'disabled', 仅是请求体的协议转换, 不影响前端 row 的字段类型)
 const toggleStatus = async (row: any, value: boolean | string | number) => {
   const newStatus = value ? 'active' : 'disabled'
   try {
     await request.patch(`/api/v1/admin/coupons/${row.id}/status`, { status: newStatus })
-    row.is_enabled = value === true
+    row.is_enabled = !!value
     ElMessage.success(newStatus === 'active' ? '已启用' : '已禁用')
   } catch {
     // 拦截器已弹错误

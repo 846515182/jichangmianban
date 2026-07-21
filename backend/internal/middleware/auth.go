@@ -69,10 +69,20 @@ func JWTAuth(allowedRoles ...string) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		// token 版本校验(注销所有设备时旧 token 全部失效)
-		if rdb := app.Get().RDB; rdb != nil && claims.TokenVer >= 0 {
+		// P1-MW-AUTH: token 版本校验(注销所有设备时旧 token 全部失效)
+		// - claims.TokenVer > 0: 该用户曾执行过 LogoutAll/ChangePassword, 必须依赖 Redis 实时校验当前版本
+		//   Redis 不可用时 fail-closed 返回 503, 避免被吊销的 token 在 Redis 故障窗口内复活
+		// - claims.TokenVer == 0: 旧 token(从未 bump 过版本), Redis 不可用时放行(向后兼容, 不阻断登录)
+		if claims.TokenVer > 0 {
+			rdb := app.Get().RDB
+			if rdb == nil {
+				response.FailWithHTTP(c, http.StatusServiceUnavailable, response.CodeServerError)
+				c.Abort()
+				return
+			}
 			key := "tokver:" + claims.Role + ":" + claims.UserID
-			if cur, err := rdb.Get(c.Request.Context(), key).Int64(); err == nil && cur > claims.TokenVer {
+			cur, err := rdb.Get(c.Request.Context(), key).Int64()
+			if err == nil && cur > claims.TokenVer {
 				response.Fail(c, response.CodeTokenInvalid)
 				c.Abort()
 				return
@@ -101,6 +111,11 @@ func UserAuth() gin.HandlerFunc {
 // AnyAuth 任意已认证主体
 func AnyAuth() gin.HandlerFunc {
 	return JWTAuth()
+}
+
+// ExtractToken 从请求头提取 Bearer token (P0-A1: 导出供 handler 包复用, 保证登出黑名单 key 与中间件一致)
+func ExtractToken(c *gin.Context) string {
+	return extractToken(c)
 }
 
 // extractToken 从请求头提取 Bearer token

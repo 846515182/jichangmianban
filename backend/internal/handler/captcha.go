@@ -64,7 +64,11 @@ func GetCaptcha(c *gin.Context) {
 		buf[i] = captchaChars[n.Int64()]
 	}
 	code := string(buf)
-	id := randomToken(16)
+	id, err := randomToken(16)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 50001, "msg": "验证码生成失败"})
+		return
+	}
 
 	// 线程安全写入
 	captchaMu.Lock()

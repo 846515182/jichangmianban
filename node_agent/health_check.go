@@ -26,7 +26,10 @@ func (a *Agent) CheckProxyHealth() ProxyHealth {
 		LastCheckTime: time.Now().Unix(),
 	}
 
+	// P0-AG1: effectivePort 读取需持 a.mu.RLock, 防止与 applyConfig 的写并发
+	a.mu.RLock()
 	port := a.effectivePort
+	a.mu.RUnlock()
 	if port == 0 {
 		port = 443
 	}

@@ -7,7 +7,6 @@ import (
 	"log"
 	"math/big"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -98,7 +97,7 @@ func (h *AuthHandler) adminLogin(c *gin.Context, ctx context.Context, req *login
 	if err != nil {
 		// 记录失败(用 admin: 前缀的 key, 不影响 user 账号)
 		middleware.RecordLoginFail(ctx, ip, adminAccKey)
-		h.recordAudit(ctx, "admin", "", ip, ua, false)
+		h.recordAudit(ctx, "admin", "", req.Username, ip, ua, false)
 		response.Fail(c, response.CodeAccountPwdError)
 		return
 	}
@@ -114,7 +113,7 @@ func (h *AuthHandler) adminLogin(c *gin.Context, ctx context.Context, req *login
 	// 校验密码
 	if err := bcrypt.CompareHashAndPassword([]byte(admin.PasswordHash), []byte(req.Password)); err != nil {
 		_, locked := middleware.RecordLoginFail(ctx, ip, adminAccKey)
-		h.recordAudit(ctx, "admin", admin.ID, ip, ua, false)
+		h.recordAudit(ctx, "admin", admin.ID, admin.Username, ip, ua, false)
 		if locked {
 			response.Fail(c, response.CodeAccountLocked)
 			return
@@ -126,7 +125,7 @@ func (h *AuthHandler) adminLogin(c *gin.Context, ctx context.Context, req *login
 	middleware.RecordLoginSuccess(ctx, ip, adminAccKey)
 	now := time.Now()
 	_ = h.adminRepo.UpdateLastLogin(admin.ID, ip, now)
-	h.recordAudit(ctx, "admin", admin.ID, ip, ua, true)
+	h.recordAudit(ctx, "admin", admin.ID, admin.Username, ip, ua, true)
 
 	role := admin.Role
 	if role == "" {
@@ -155,7 +154,7 @@ func (h *AuthHandler) userLogin(c *gin.Context, ctx context.Context, req *loginR
 	user, err := h.userRepo.GetByUsername(req.Username)
 	if err != nil {
 		middleware.RecordLoginFail(ctx, ip, req.Username)
-		h.recordAudit(ctx, "user", "", ip, ua, false)
+		h.recordAudit(ctx, "user", "", req.Username, ip, ua, false)
 		response.Fail(c, response.CodeAccountPwdError)
 		return
 	}
@@ -171,7 +170,7 @@ func (h *AuthHandler) userLogin(c *gin.Context, ctx context.Context, req *loginR
 	isExpired := user.ExpiredAt != nil && user.ExpiredAt.Before(time.Now())
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
 		_, locked := middleware.RecordLoginFail(ctx, ip, req.Username)
-		h.recordAudit(ctx, "user", user.ID, ip, ua, false)
+		h.recordAudit(ctx, "user", user.ID, user.Username, ip, ua, false)
 		if locked {
 			response.Fail(c, response.CodeAccountLocked)
 			return
@@ -184,7 +183,7 @@ func (h *AuthHandler) userLogin(c *gin.Context, ctx context.Context, req *loginR
 		go h.userRepo.UpdateStatus(user.ID, "expired")
 	}
 	middleware.RecordLoginSuccess(ctx, ip, req.Username)
-	h.recordAudit(ctx, "user", user.ID, ip, ua, true)
+	h.recordAudit(ctx, "user", user.ID, user.Username, ip, ua, true)
 
 	ver := getCurrentTokenVersion(c.Request.Context(), user.ID, security.RoleUser)
 	access, refresh, err := h.jwtMgr.GenerateTokenPairWithVer(user.ID, user.Username, security.RoleUser, ver)
@@ -215,51 +214,61 @@ type refreshRequest struct {
 
 // Refresh [2] POST /api/v1/auth/refresh
 // 刷新令牌: 旧 refresh_token 加入 Redis 黑名单(轮换)，签发新的 token 对
+//
+// P0-A2 (TOCTOU 修复): 原实现"Exists 检查 → 生成新 token → Set 写黑名单"非原子,
+// 并发重放可在 Exists 通过后、Set 写入前多次换取新 token。
+// 改为 SetNX 原子占用: 同一 refresh_token 全局只能成功一次, 第二次直接拒绝。
 func (h *AuthHandler) Refresh(c *gin.Context) {
 	var req refreshRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.Fail(c, response.CodeParamError)
 		return
 	}
-	// 检查 refresh_token 是否已在黑名单(已被轮换过)
 	rdb := app.Get().RDB
-	if rdb != nil {
-		if exists, err := rdb.Exists(c.Request.Context(), "jwtblack:"+req.RefreshToken).Result(); err != nil {
-			log.Printf("[Auth] refresh blacklist check error: %v", err)
-		} else if exists > 0 {
-			response.Fail(c, response.CodeTokenInvalid)
-			return
-		}
+	if rdb == nil {
+		// 无 Redis 无法做防重放, fail-closed
+		response.Fail(c, response.CodeServerError)
+		return
 	}
+	ctx := c.Request.Context()
 	claims, err := h.jwtMgr.ValidateRefresh(req.RefreshToken)
 	if err != nil {
 		response.Fail(c, response.CodeTokenInvalid)
 		return
 	}
 	// 修复 P0-1: 校验 token 版本号, 防止用户改密/注销后旧 refresh token 仍可换新 access token
-	// bumpTokenVersion 会在 LogoutAll/ChangePassword 时自增 tokver:<role>:<id>,
-	// 旧 token 中的 claims.TokenVer 与当前版本不一致则拒绝刷新
-	currentVer := getCurrentTokenVersion(c.Request.Context(), claims.UserID, claims.Role)
+	currentVer := getCurrentTokenVersion(ctx, claims.UserID, claims.Role)
 	if claims.TokenVer != currentVer {
 		response.Fail(c, response.CodeTokenInvalid)
 		return
 	}
+	// P0-A2: 用 SetNX 原子化"检查+占用", 避免并发重放
+	// TTL 取 refresh token 剩余有效期, 过期后 key 自动清理(届时 token 也已失效)
+	refreshTTL := time.Until(claims.ExpiresAt.Time)
+	if refreshTTL <= 0 {
+		response.Fail(c, response.CodeTokenInvalid)
+		return
+	}
+	blacklistKey := "jwtblack:" + req.RefreshToken
+	ok, err := rdb.SetNX(ctx, blacklistKey, "1", refreshTTL).Result()
+	if err != nil {
+		log.Printf("[Auth] refresh blacklist SetNX error: %v", err)
+		response.Fail(c, response.CodeServerError)
+		return
+	}
+	if !ok {
+		// 已被使用过(并发重放或重放攻击)
+		response.FailMsg(c, response.CodeTokenInvalid, "refresh token 已使用")
+		return
+	}
 	// 签发新的 token 对(轮换) - 携带当前 token 版本号, 防止注销所有设备后用户用旧 refresh 续命
-	ver := getCurrentTokenVersion(c.Request.Context(), claims.UserID, claims.Role)
-	access, refresh, err := h.jwtMgr.GenerateTokenPairWithVer(claims.UserID, claims.Username, claims.Role, ver)
+	access, refresh, err := h.jwtMgr.GenerateTokenPairWithVer(claims.UserID, claims.Username, claims.Role, currentVer)
 	if err != nil {
 		response.Fail(c, response.CodeServerError)
 		return
 	}
-	// 将旧 refresh_token 加入黑名单，防止重放攻击
-	if rdb != nil {
-		ttl := time.Until(claims.ExpiresAt.Time)
-		if ttl > 0 {
-			if err := rdb.Set(c.Request.Context(), "jwtblack:"+req.RefreshToken, "1", ttl).Err(); err != nil {
-				log.Printf("[Auth] refresh blacklist set error: %v", err)
-			}
-		}
-	}
+	// P0-X2: refresh 成功也记录审计(便于追踪 token 轮换行为)
+	h.recordAudit(ctx, claims.Role, claims.UserID, claims.Username, c.ClientIP(), c.GetHeader("User-Agent"), true)
 	response.OK(c, tokenResponse{
 		AccessToken:  access,
 		RefreshToken: refresh,
@@ -268,27 +277,43 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 	})
 }
 
+// logoutReq Logout 请求体
+// P0-A3: 增加 refresh_token 字段, Logout 时同时吊销 refresh token (避免登出后仍可换新 access token)
+type logoutReq struct {
+	RefreshToken string `json:"refresh_token"`
+}
+
 // Logout [3] POST /api/v1/auth/logout
 // 将当前 access token 加入 Redis 黑名单(剩余有效期内)
+// P0-A1: 复用 middleware.ExtractToken 提取 token, 保证与中间件入黑名单时使用的 key 一致
+//        (原实现手动切片 authHeader[7:] 在大小写/多空格场景下与中间件不一致, 导致黑名单 key 不匹配, 等同未吊销)
+// P0-A3: 同时把请求体中携带的 refresh_token 加入黑名单, 防止登出后旧 refresh token 继续换新 access token
 func (h *AuthHandler) Logout(c *gin.Context) {
+	// 解析请求体(允许为空, 兼容旧前端不传 refresh_token 的场景)
+	var req logoutReq
+	_ = c.ShouldBindJSON(&req)
 	rdb := app.Get().RDB
 	claims := middleware.GetClaims(c)
 	if claims == nil {
 		response.OKMsg(c, "已登出")
 		return
 	}
-	// 从请求头提取纯 token 写入黑名单（与 extractToken 逻辑一致）
-	authHeader := c.GetHeader("Authorization")
-	tokenStr := authHeader
-	if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
-		tokenStr = authHeader[7:]
-	}
+	// P0-A1: 复用中间件 extractToken, 保证黑名单 key 与中间件校验时完全一致
+	tokenStr := middleware.ExtractToken(c)
+	ctx := c.Request.Context()
 	if rdb != nil && tokenStr != "" {
 		ttl := time.Until(claims.ExpiresAt.Time)
 		if ttl > 0 {
-			if err := rdb.Set(c.Request.Context(), "jwtblack:"+tokenStr, "1", ttl).Err(); err != nil {
+			if err := rdb.Set(ctx, "jwtblack:"+tokenStr, "1", ttl).Err(); err != nil {
 				log.Printf("[Auth] blacklist set error: %v", err)
 			}
+		}
+	}
+	// P0-A3: 同时吊销 refresh token (TTL 用 refresh token 自己的剩余有效期, 这里取配置的 refreshTTL 上限)
+	if rdb != nil && req.RefreshToken != "" {
+		refreshTTL := app.Get().Cfg.JWTRefreshTTL
+		if err := rdb.Set(ctx, "jwtblack:"+req.RefreshToken, "1", refreshTTL).Err(); err != nil {
+			log.Printf("[Auth] refresh blacklist set error: %v", err)
 		}
 	}
 	response.OKMsg(c, "已登出")
@@ -308,17 +333,27 @@ func (h *AuthHandler) LoginLogs(c *gin.Context) {
 }
 
 // recordAudit 记录登录审计
-func (h *AuthHandler) recordAudit(ctx context.Context, targetType, targetID, ip, ua string, success bool) {
+// P1-AUTH-04: 失败登录时也记录尝试的用户名, 便于追踪撞库/爆破来源。
+// username 为调用方传入的尝试用户名(成功登录时通常等于真实用户名; 失败时是客户端输入的字符串)。
+//
+// 注: TargetID 列在 DB 中为 UUID 类型(见 001_init.sql), 无法直接存非 UUID 的用户名。
+// 因此当 targetID 为空时(用户不存在), 将 username 记入 Location 字段(原本用于地理位置, 当前未启用),
+// 使审计记录可被 ListAll 的 keyword 搜索命中(IP ILIKE ? OR location ILIKE ?)。
+func (h *AuthHandler) recordAudit(ctx context.Context, targetType, targetID, username, ip, ua string, success bool) {
 	var tid *string
+	location := ""
 	if targetID != "" {
 		tid = &targetID
+	} else if username != "" {
+		// 用户不存在时, 把尝试的用户名记入 Location (TargetID 列为 UUID, 不能存任意字符串)
+		location = username
 	}
 	_ = h.loginAuditRepo.Create(&model.LoginAudit{
 		TargetType: targetType,
 		TargetID:   tid,
 		IP:         ip,
 		UserAgent:  ua,
-		Location:   "",
+		Location:   location,
 		Success:    success,
 	})
 }
@@ -326,7 +361,7 @@ func (h *AuthHandler) recordAudit(ctx context.Context, targetType, targetID, ip,
 // changePasswordRequest 修改密码请求
 type changePasswordRequest struct {
 	OldPassword string `json:"old_password" binding:"required"`
-	NewPassword string `json:"new_password" binding:"required,min=6,max=64"`
+	NewPassword string `json:"new_password" binding:"required,min=8,max=64"` // P1-AUTH-03: 最低 8 位 (原 min=6 偏弱)
 }
 
 // ChangePassword [POST] /api/v1/auth/change-password
@@ -587,14 +622,23 @@ func (h *AuthHandler) ChangeEmail(c *gin.Context) {
 	}
 
 	// 2. 校验验证码(一次性, 校验后立即删除)
+	// P1-AUTH-07: 用 Lua 脚本原子化 "读取+删除+返回", 避免 GET/DEL 之间窗口被并发重放
 	rdb := app.Get().RDB
 	if rdb == nil {
 		response.FailMsg(c, response.CodeServerError, "缓存服务不可用")
 		return
 	}
 	codeKey := "emailcode:change_email:" + req.NewEmail
-	storedCode, err := rdb.Get(ctx, codeKey).Result()
+	// Lua 脚本: 原子地 GET 后 DEL, 返回原值(nil 表示已过期/不存在)
+	verifyScript := `local v = redis.call('GET', KEYS[1]); if v then redis.call('DEL', KEYS[1]) end; return v`
+	res, err := rdb.Eval(ctx, verifyScript, []string{codeKey}).Result()
 	if err != nil {
+		log.Printf("[Auth] change_email verify code eval error: %v", err)
+		response.Fail(c, response.CodeServerError)
+		return
+	}
+	storedCode, _ := res.(string)
+	if storedCode == "" {
 		response.FailMsg(c, response.CodeParamError, "验证码已过期, 请重新获取")
 		return
 	}
@@ -602,8 +646,6 @@ func (h *AuthHandler) ChangeEmail(c *gin.Context) {
 		response.FailMsg(c, response.CodeParamError, "验证码错误")
 		return
 	}
-	// 一次性: 立即删除
-	rdb.Del(ctx, codeKey)
 
 	// 3. 检查新邮箱是否已被占用
 	if existing, err := h.userRepo.GetByEmail(req.NewEmail); err == nil && existing != nil {

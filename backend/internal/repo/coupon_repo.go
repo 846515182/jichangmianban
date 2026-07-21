@@ -97,17 +97,6 @@ func (r *CouponRepo) IncrUsedSafe(id string, now time.Time) error {
 	return nil
 }
 
-// DecrUsedSafe 原子减少优惠券使用次数(取消/退款时回退, 不低于0)
-func (r *CouponRepo) DecrUsedSafe(id string) error {
-	result := r.db.Model(&model.Coupon{}).
-		Where("id = ? AND used_count > 0", id).
-		UpdateColumn("used_count", gorm.Expr("used_count - ?", 1))
-	if result.Error != nil {
-		return result.Error
-	}
-	return nil
-}
-
 // DecrUsedSafeTx 事务内减少优惠券使用次数
 // 修复 P1: 旧版在 RowsAffected==0(used_count 已为 0, 无法再减)时仍返回 nil,
 // 调用方(CancelOrder/ExpireOrders/AdminRefund/AdminCancelOrder)据此认为"已回退成功"

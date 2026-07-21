@@ -58,18 +58,14 @@
           <el-switch v-model="form.pinned" />
         </el-form-item>
         <el-form-item label="内容" prop="content">
-          <!-- 富文本工具栏 -->
-          <div class="rich-toolbar">
-            <el-button-group>
-              <el-button size="small" @click="exec('bold')"><b>B</b></el-button>
-              <el-button size="small" @click="exec('italic')"><i>I</i></el-button>
-              <el-button size="small" @click="exec('underline')"><u>U</u></el-button>
-            </el-button-group>
-            <el-button size="small" @click="exec('insertUnorderedList')">无序列表</el-button>
-            <el-button size="small" @click="exec('insertOrderedList')">有序列表</el-button>
-            <el-button size="small" @click="exec('formatBlock', '<h3>')">标题</el-button>
-          </div>
-          <div ref="editorRef" class="rich-editor" contenteditable="true" @input="onEditorInput"></div>
+          <!-- 修复 P0-FE1: 移除 contenteditable + innerHTML + document.execCommand 富文本编辑器(XSS 风险),
+               改为 textarea + 文本插值展示, 内容以纯文本/Markdown 形式存储与渲染 -->
+          <el-input
+            v-model="form.content"
+            type="textarea"
+            :rows="10"
+            placeholder="支持 Markdown 与纯文本(展示端按文本渲染, 不解析 HTML)"
+          />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -81,7 +77,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, nextTick } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import request from '@/utils/request'
@@ -107,7 +103,6 @@ const stripHtml = (html: string | null | undefined) => (html || '').replace(/<[^
 const dialogVisible = ref(false)
 const editing = ref<AnnouncementRecord | null>(null)
 const formRef = ref<FormInstance>()
-const editorRef = ref<HTMLElement>()
 const form = reactive({ title: '', content: '', pinned: false })
 const rules: FormRules = {
   title: [{ required: true, message: '请输入标题', trigger: 'blur' }],
@@ -122,19 +117,6 @@ const openDialog = (row?: any) => {
     Object.assign(form, { title: '', content: '', pinned: false })
   }
   dialogVisible.value = true
-  nextTick(() => {
-    if (editorRef.value) editorRef.value.innerHTML = form.content
-  })
-}
-
-const onEditorInput = () => {
-  if (editorRef.value) form.content = editorRef.value.innerHTML
-}
-
-const exec = (cmd: string, val?: string) => {
-  document.execCommand(cmd, false, val)
-  onEditorInput()
-  editorRef.value?.focus()
 }
 
 // 修复 P0: 旧版 try{}catch{} 后无条件更新本地状态 + 弹成功, API 失败时用户看到"已发布"
@@ -229,16 +211,6 @@ onMounted(() => {
 .page-title { margin: 0; font-size: 18px; color: var(--np-text); }
 .page-desc { margin: 6px 0 0; font-size: 13px; color: var(--np-text-secondary); }
 .content-preview { color: var(--np-text-secondary); font-size: 13px; }
-
-.rich-toolbar { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
-.rich-editor {
-  min-height: 200px; max-height: 320px; overflow-y: auto; padding: 12px;
-  background: var(--np-bg-soft); border: 1px solid var(--np-border); border-radius: 8px;
-  color: var(--np-text); outline: none; font-size: 14px; line-height: 1.6;
-}
-.rich-editor:focus { border-color: var(--np-primary); }
-.rich-editor :deep(h3) { color: var(--np-primary); margin: 8px 0; }
-.rich-editor :deep(ul), .rich-editor :deep(ol) { padding-left: 24px; }
 
 .pagination-wrap {
   margin-top: 20px;

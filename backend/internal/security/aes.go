@@ -7,7 +7,14 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
+	"log"
+	"strings"
 )
+
+// P1-AES: 加密数据魔数前缀, 用于区分"已加密"与"历史明文"数据
+// - 有前缀: 强制按密文处理, 解密失败返回原文(向后兼容, 调用方拿到的不可用值会自然失败)
+// - 无前缀: 视为历史明文(平滑迁移), 返回原值并记录告警, 下次写入时会被加密带上前缀
+const encPrefix = "enc:v1:"
 
 // AESManager AES-256-GCM 加密/解密器，密钥固定 32 字节
 type AESManager struct {
@@ -82,41 +89,66 @@ func (m *AESManager) DecryptString(encoded string) (string, error) {
 }
 
 // EncryptSecret 使用应用主密钥加密敏感字段(供 settings 表存储用)。
-// 返回 base64 密文; 若 masterKey 为空/无效或加密失败, 返回明文(降级, 不阻断业务)。
-// 调用方应在存储前调用本函数, 读取时配对调用 DecryptSecret。
+// 返回带 "enc:v1:" 前缀的 base64 密文, 与 DecryptSecret 配对使用。
+//
+// P1-AES (fail-closed): masterKey 为空/无效或加密失败时不再静默降级为明文存储,
+// 改为 log.Fatal 终止进程 — AES_MASTER_KEY 在 config.Load 阶段已强制校验,
+// 此处仅为防御性兜底, 避免运行期被清空后写入明文敏感数据。
+// 注: 保持原签名 (返回 string) 不变, 以免改动调用方 (email_service/payment_service/admin_system)。
 func EncryptSecret(masterKey, plaintext string) string {
 	if plaintext == "" {
 		return ""
 	}
+	if masterKey == "" {
+		log.Fatalf("[security] EncryptSecret: master key not configured; refusing to store plaintext secret")
+	}
 	m, err := NewAESManager(masterKey)
 	if err != nil {
-		return plaintext
+		log.Fatalf("[security] EncryptSecret: AES manager init failed: %v", err)
 	}
 	enc, err := m.EncryptString(plaintext)
 	if err != nil {
-		return plaintext
+		log.Fatalf("[security] EncryptSecret: AES encrypt failed: %v", err)
 	}
-	return enc
+	return encPrefix + enc
 }
 
-// DecryptSecret 解密敏感字段, 兼容明文历史数据:
-// 解密失败时认为旧数据是明文, 原样返回(平滑迁移, 不阻断业务)。
-// 这样旧明文配置在升级后仍可读取, 下次 SaveConfig 时会被加密。
+// DecryptSecret 解密敏感字段, 兼容历史数据:
+//   - 有 "enc:v1:" 前缀: 强制按密文解密, 失败返回原文(向后兼容; 调用方拿到不可用值会自然失败, 等效 fail-closed)
+//   - 无前缀: 视为历史明文(平滑迁移), 返回原值并记录告警, 下次 SaveConfig 时会被重新加密带上前缀
+//   - 同时对无前缀数据尝试按旧格式 base64 解密, 兼容旧版 EncryptSecret 写入的密文(未带前缀的历史密文)
 //
-// [安全说明] 此处保留"解密失败返回原文"的迁移行为, 以兼容尚未加密的旧明文配置
-// (旧明文可能是任意字符串, 包括恰好合法 base64 的随机串, 无法与"被篡改密文"可靠区分)。
-// 完整 fail-closed 需先执行一次性迁移脚本将全量明文加密, 再切换为严格模式(待后续配合迁移工具实现)。
+// 注: 保持原签名 (返回 string) 不变, 调用方无法区分"明文"与"密文" — 因此 fail-closed 行为靠
+// "前缀+解密失败返回密文本身"实现 (拿到的值形如 "enc:v1:xxx" 不可用, 业务自然失败, 等同 closed)。
 func DecryptSecret(masterKey, stored string) string {
 	if stored == "" {
 		return ""
 	}
-	m, err := NewAESManager(masterKey)
-	if err != nil {
-		return stored
+	// 有前缀: 严格按密文处理
+	if strings.HasPrefix(stored, encPrefix) {
+		payload := strings.TrimPrefix(stored, encPrefix)
+		m, err := NewAESManager(masterKey)
+		if err != nil {
+			log.Printf("[security] DecryptSecret: AES manager init failed for prefixed data: %v", err)
+			return stored // 返回原文(向后兼容)
+		}
+		plain, err := m.DecryptString(payload)
+		if err != nil {
+			log.Printf("[security] DecryptSecret: AES decrypt failed for prefixed data (returning raw, credential unusable): %v", err)
+			return stored // 解密失败返回原文(向后兼容; 调用方拿到的密文不可用, 业务自然失败)
+		}
+		return plain
 	}
-	plain, err := m.DecryptString(stored)
-	if err != nil {
-		return stored // 解密失败 = 旧明文数据, 原样返回(平滑迁移)
+	// 无前缀: 兼容旧版 EncryptSecret 写入的 base64 密文(历史密文, 未带前缀)
+	// 先尝试按旧格式解密; 成功则返回明文, 失败再视为旧明文
+	if masterKey != "" {
+		if m, err := NewAESManager(masterKey); err == nil {
+			if plain, err := m.DecryptString(stored); err == nil {
+				return plain
+			}
+		}
 	}
-	return plain
+	// 旧明文数据, 返回原值并告警(一次性迁移, 下次写入会被加密带上前缀)
+	log.Printf("[security] DecryptSecret: legacy plaintext data without encPrefix, returning as-is (one-time migration)")
+	return stored
 }

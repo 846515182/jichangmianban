@@ -55,15 +55,19 @@ func getRedis() *redis.Client {
 	return nil
 }
 
-// randomToken 生成 n 位随机 token (被 captcha.go 引用)
-func randomToken(n int) string {
+// randomToken 生成 n 位随机 token (被 captcha.go / email_service.go 引用)
+// P1-ACCT-01: 检查 secureRandInt 错误, 避免忽略 crypto/rand 失败导致 token 不安全
+func randomToken(n int) (string, error) {
 	const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	b := make([]byte, n)
 	for i := 0; i < n; i++ {
-		idx, _ := secureRandInt(len(letters))
+		idx, err := secureRandInt(len(letters))
+		if err != nil {
+			return "", err
+		}
 		b[i] = letters[idx]
 	}
-	return string(b)
+	return string(b), nil
 }
 
 // getFrontendBase 获取前端地址 (被 email_service.go 引用)

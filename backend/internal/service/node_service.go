@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -307,37 +308,47 @@ func (s *NodeService) UpdateNode(id string, in *UpdateNodeInput) (*model.Node, e
 // 1. 软删除节点(is_deleted=true)
 // 2. 清零 online 状态(避免后台显示 stale 在线)
 // 3. 软删除 user_nodes 关联(避免孤儿记录)
-// 4. 清理 Redis 残留 key(心跳/状态/配置版本/用户指纹)
+// 4. 清理 node_plan_bindings(物理删除)
+// 5. 清理 Redis 残留 key(心跳/状态/配置版本/用户指纹)
 // 注意: node-agent 侧在心跳收到 NotFound 后会自行停止 Xray(见 node_agent/main.go handleFatalShutdown)
+//
+// P0-N5: 所有 DB 操作改为单事务包裹, 任一步失败整体回滚, 避免半删状态。
+// Redis 缓存清理放在事务外(事务成功后才清), 防止 DB 回滚但 Redis 已清的不一致。
 func (s *NodeService) DeleteNode(id string) error {
 	// 先查出节点信息(软删除前)，用于清理 SSH host key 指纹
 	node, err := s.repo.GetByID(id)
 	if err != nil {
 		return err
 	}
-	if err := s.repo.SoftDelete(id); err != nil {
+
+	// 单事务包裹所有 DB 操作, 任一步失败整体回滚
+	err = app.Get().DB.Transaction(func(tx *gorm.DB) error {
+		// 1. 软删除节点(is_deleted=true)
+		if err := tx.Model(&model.Node{}).Where("id = ? AND is_deleted = false", id).
+			Update("is_deleted", true).Error; err != nil {
+			return err
+		}
+		// 2. 清零 online(不过滤 is_deleted，因为节点刚被软删除)
+		if err := tx.Model(&model.Node{}).Where("id = ?", id).
+			UpdateColumn("online", false).Error; err != nil {
+			return err
+		}
+		// 3. 软删除 user_nodes 关联(避免孤儿记录)
+		if err := tx.Model(&model.UserNode{}).Where("node_id = ? AND is_deleted = false", id).
+			Update("is_deleted", true).Error; err != nil {
+			return err
+		}
+		// 4. 物理删除 node_plan_bindings(绑定关系不需要软删除保留)
+		if err := tx.Where("node_id = ?", id).Delete(&model.NodePlanBinding{}).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
 		return err
 	}
-	// 清零 online(不过滤 is_deleted，因为节点刚被软删除)
-	if err := s.repo.MarkOffline(id); err != nil {
-		// 非致命，仅记录
-		if logger := app.Get().Logger; logger != nil {
-			logger.Warn("标记节点离线失败", zap.String("node_id", id), zap.Error(err))
-		}
-	}
-	// 清理 user_nodes 关联
-	if err := s.repo.DeleteUserNodesByNodeID(id); err != nil {
-		if logger := app.Get().Logger; logger != nil {
-			logger.Warn("删除节点用户关联失败", zap.String("node_id", id), zap.Error(err))
-		}
-	}
-	// 清理 node_plan_bindings(物理删除，绑定关系不需要软删除保留)
-	if err := s.repo.DeletePlanBindingsByNode(id); err != nil {
-		if logger := app.Get().Logger; logger != nil {
-			logger.Warn("删除节点套餐绑定失败", zap.String("node_id", id), zap.Error(err))
-		}
-	}
-	// 清理 Redis 残留 key
+
+	// Redis 缓存清理(事务外, 仅在 DB 操作成功后执行)
 	if rdb := app.Get().RDB; rdb != nil {
 		ctx := context.Background()
 		keys := []string{
@@ -382,10 +393,20 @@ func (s *NodeService) DeleteNode(id string) error {
 // 修复 P1: 轮换后清 Redis 缓存, 让 agent 下次心跳拉新配置
 // 注意: agent 配置文件里的旧 token 仍会导致注册失败, 必须重新部署 agent
 // (用旧 token 注册失败 30 次 -> log.Fatalf -> docker restart 死循环刷日志)
+//
+// P0-N3: 双 token 宽限期。轮换后旧 token 仍写入 Redis (key=node:old_token:{nodeID},
+// TTL=24h), 供 traffic_service 校验时做宽限期。同时打警告日志提醒运维重新部署 agent,
+// 否则 agent 用旧 token 注册将失败, 流量上报中断。
+//
+// TODO(model): Node model 应新增 PreviousNodeToken + TokenRotatedAt 字段做持久化宽限期,
+// 当前 model 不在修改清单内, 暂用 Redis 兜底 (Redis 重启后宽限期失效, 但 agent 通常
+// 已在 24h 内完成重部署)。
 func (s *NodeService) RotateToken(id string) (string, error) {
-	if _, err := s.repo.GetByID(id); err != nil {
+	node, err := s.repo.GetByID(id)
+	if err != nil {
 		return "", err
 	}
+	oldToken := node.NodeToken
 	tok, err := generateNodeToken()
 	if err != nil {
 		return "", err
@@ -399,6 +420,18 @@ func (s *NodeService) RotateToken(id string) (string, error) {
 		ctx := context.Background()
 		rdb.Del(ctx, "node:configver:"+id)
 		rdb.Del(ctx, "node:usershash:"+id)
+		// 双 token 宽限期: 旧 token 写 Redis, TTL=24h,
+		// 供 traffic_service (不在修改清单) 校验流量上报 token 时做宽限。
+		// 24h 内 agent 旧 token 上报的流量仍被接受, 避免轮换瞬间流量丢失。
+		if oldToken != "" {
+			rdb.Set(ctx, fmt.Sprintf("node:old_token:%s", id), oldToken, 24*time.Hour)
+		}
+	}
+	// 警告: 轮换后必须重新部署 agent, 否则用旧 token 上报将失败
+	if logger := app.Get().Logger; logger != nil {
+		logger.Warn("节点 token 已轮换, 需重新部署 agent 否则流量上报将失败",
+			zap.String("node_id", id),
+			zap.String("note", "旧 token 已写入 Redis 24h 宽限期, 但 agent 配置文件未更新会持续注册失败"))
 	}
 	return tok, nil
 }

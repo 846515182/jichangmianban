@@ -194,28 +194,66 @@ func resolvePanelGrpcAddr() panelGrpcAddrInfo {
 // 修复 START_FAIL-CDN: bbcdtv.top 走 CF CDN, 节点 DNS 解析到 CF IP 无法直达 50051 端口
 // 通过 /etc/hosts 把域名映射到面板真实 IP, 既绕过 CDN 又让 TLS ServerName 匹配证书 SAN
 // [SEC-05] 先清理旧 nexus-panel 映射再写入, 避免面板 IP 变更后解析到错误地址
+//
+// P1-SSH注入: panelRealIP/domain 来自 PANEL_GRPC_HOST/PanelDomain 环境变量,
+// 虽是管理员配置, 仍需防御性校验+转义, 防止配置错误或环境变量被污染时
+// 注入 shell 命令(如 domain="; rm -rf /")。
 func ensureHostsMapping(client *ssh.Client, panelRealIP, domain string) (string, error) {
 	if panelRealIP == "" || domain == "" {
 		return "(skip: 空参数)", nil
 	}
-	// 1. 先清理该域名的所有旧 nexus-panel 映射, 避免 IP 变更后残留
+	// 1. 严格校验 IP/域名格式, 拒绝含 shell 元字符的输入
+	if net.ParseIP(panelRealIP) == nil {
+		return fmt.Sprintf("(skip: 非法 IP %q, 拒绝写 /etc/hosts)", panelRealIP), nil
+	}
+	if !isValidDomain(domain) {
+		return fmt.Sprintf("(skip: 非法域名 %q, 拒绝写 /etc/hosts)", domain), nil
+	}
+	// 2. 先清理该域名的所有旧 nexus-panel 映射, 避免 IP 变更后残留
+	//    domain 已校验只含 [a-zA-Z0-9.-], 不会破坏 sed 正则
 	cleanCmd := fmt.Sprintf("sed -i '/%s\\b.*# nexus-panel/d' /etc/hosts 2>/dev/null; echo 'OK'", domain)
 	sshRun(client, cleanCmd)
-	// 2. 幂等: 检查是否已存在精确映射
+	// 3. 幂等: 检查是否已存在精确映射
 	checkCmd := fmt.Sprintf("grep -c '^%s[[:space:]]\\+%s\\b' /etc/hosts 2>/dev/null || echo 0",
 		panelRealIP, domain)
 	out, err := sshRun(client, checkCmd)
 	if err == nil && strings.TrimSpace(out) != "0" {
 		return fmt.Sprintf("(已存在映射: %s → %s)", panelRealIP, domain), nil
 	}
-	// 3. 追加映射(用 >> 避免覆盖)
-	addCmd := fmt.Sprintf("echo '%s %s  # nexus-panel grpc bypass CDN' >> /etc/hosts && echo OK",
-		panelRealIP, domain)
+	// 4. 追加映射 (用 shellQuote 转义整行内容, 防御性深度防御)
+	lineContent := panelRealIP + " " + domain + "  # nexus-panel grpc bypass CDN"
+	addCmd := fmt.Sprintf("echo %s >> /etc/hosts && echo OK", shellQuote(lineContent))
 	out, err = sshRun(client, addCmd)
 	if err != nil {
 		return out, fmt.Errorf("写 /etc/hosts 失败: %w", err)
 	}
 	return fmt.Sprintf("(已添加映射: %s → %s)", panelRealIP, domain), nil
+}
+
+// shellQuote 安全转义 shell 字符串: 用单引号包裹, 内部单引号转义为 '\''。
+// P1-SSH注入: 防止动态字段插入 shell 命令时被解释为元字符。
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+// isValidDomain 校验字符串是合法域名 (仅允许字母/数字/点/连字符, 每段 1-63, 总长 <=253)。
+// P1-SSH注入: 拒绝含 ;|`$() 等 shell 元字符的输入。
+func isValidDomain(s string) bool {
+	if s == "" || len(s) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(s, ".") {
+		if len(label) == 0 || len(label) > 63 {
+			return false
+		}
+		for _, c := range label {
+			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+				(c >= '0' && c <= '9') || c == '-') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // precheckGRPCTLS 部署前在节点服务器上预检面板 gRPC TLS 连通性
@@ -318,6 +356,23 @@ func (w *sseWriter) eventWithCode(step, status, msg, output, errCode string) {
 		"step": step, "status": status, "msg": msg, "output": output, "errCode": errCode,
 	})
 	w.send("data: " + string(data))
+}
+
+// clientDisconnected 检测 SSE 客户端是否已断开连接。
+// P1-SSE断开: 旧版客户端关闭页面后, 后端继续在远端 SSH 执行 docker build / pull
+// (单次部署可能持续 5+ 分钟), 浪费节点服务器资源且用户无法看到进度。
+// 现在每个 Phase 开始检查 ctx, 断开立即终止并推送 finish 事件(虽客户端可能已收不到,
+// 但日志和 SSE buffer 仍会记录, 便于排查)。返回 true 表示已断开, 调用方应立即 return。
+// opName 用于 finish 事件消息(如 "部署" / "清理"), 让提示语义更准确。
+func clientDisconnected(c *gin.Context, sse *sseWriter, opName string) bool {
+	if c == nil || c.Request == nil {
+		return false
+	}
+	if err := c.Request.Context().Err(); err != nil {
+		sse.event("finish", "warning", opName+"已被取消(客户端断开)", "")
+		return true
+	}
+	return false
 }
 
 // ============================================================
@@ -423,11 +478,10 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	// 清洗服务器地址（去除首尾空格，防止 DNS 解析失败）
 	node.ServerAddress = strings.TrimSpace(node.ServerAddress)
 
-	// 多节点支持: 按节点 ID 前 8 位区分容器名和部署目录
+	// P0-N9: 不再截断 UUID, 用完整 UUID 避免碰撞。
+	// 旧版用 node.ID[:8] 在节点数多时会发生前 8 字符冲突, 导致多个节点共用容器名/目录,
+	// 互相覆盖部署文件, 表现为"部署 A 节点却把 B 节点的 agent 重启了"。
 	shortID := node.ID
-	if len(shortID) > 8 {
-		shortID = shortID[:8]
-	}
 	containerName := "nexus-agent-" + shortID
 	deployDir := "/root/node-agent-" + shortID
 
@@ -447,6 +501,10 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	// ============================================================
 	// Phase 1: 连接服务器
 	// ============================================================
+	// P1-SSE断开: 客户端断开后立即终止, 避免远端 SSH 连接浪费资源
+	if clientDisconnected(c, sse, "部署") {
+		return false, DeployErrUnknown, "客户端断开, 部署已取消"
+	}
 	sse.event(PhaseConnectServer, "running", "正在连接节点服务器 "+node.ServerAddress+":"+strconv.Itoa(port)+"...", "")
 
 	// 构建 SSH 认证方法: 密钥优先, 密码兜底
@@ -578,6 +636,11 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	// ============================================================
 	// Phase 2: 环境检测 — 磁盘/内存/端口/网络 (不含 Docker, 后者在 Phase 3)
 	// ============================================================
+	// P1-SSE断开: Phase 1 已建立 SSH 连接, 若客户端在 Phase 2 开始时已断开,
+	// 后续环境检测命令无意义, 立即终止
+	if clientDisconnected(c, sse, "部署") {
+		return false, DeployErrUnknown, "客户端断开, 部署已取消"
+	}
 	checkResult := preDeployCheck(client, listenPort, healthPort, sse)
 	if !checkResult.OK {
 		// 致命错误直接退出
@@ -597,6 +660,10 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	// ============================================================
 	// Phase 3: 安装/启动 Docker
 	// ============================================================
+	// P1-SSE断开: Docker 安装耗时较长(可能拉镜像), 客户端断开后继续无意义
+	if clientDisconnected(c, sse, "部署") {
+		return false, DeployErrUnknown, "客户端断开, 部署已取消"
+	}
 	sse.event(PhaseInstallDocker, "running", "正在检查并安装 Docker...", "")
 
 	dockerOK, dockerCode, dockerMsg := ensureDocker(client, sse)
@@ -645,6 +712,10 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	// ============================================================
 	// Phase 4: 准备部署文件 (目录 + 源码 + 配置 + 证书)
 	// ============================================================
+	// P1-SSE断开: 此 Phase 推送源码/写配置/推 CA, 网络流量大, 客户端断开后无意义
+	if clientDisconnected(c, sse, "部署") {
+		return false, DeployErrUnknown, "客户端断开, 部署已取消"
+	}
 	sse.event(PhaseInstallDockerFiles, "running", "正在准备部署文件...", "")
 
 	// 4.1 创建远程目录 (兜底: 失败重试 3 次, 间隔递增)
@@ -758,11 +829,23 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 		return false, DeployErrUnknown, "配置文件验证失败"
 	}
 
+	// P1-env权限: .env.node 含 NODE_TOKEN(节点认证凭据) + PANEL_GRPC_ADDR,
+	// 默认 644 任意用户可读 → 同机其它容器/用户可窃取 token 冒充节点注册。
+	// 收紧为 600(仅 owner 可读写); 部署目录 700 防止其它用户进入读取文件列表。
+	chmodEnvOut, _ := sshRun(client, fmt.Sprintf("chmod 600 %s/.env.node && chmod 700 %s && echo CHMOD_OK || echo CHMOD_FAIL", deployDir, deployDir))
+	if !strings.Contains(chmodEnvOut, "CHMOD_OK") {
+		sse.event(PhaseInstallDockerFiles, "warning", ".env.node chmod 600 失败(非致命, 但有凭据泄露风险)", chmodEnvOut)
+	}
+
 	sse.event(PhaseInstallDockerFiles, "done", "部署文件就绪", "目录/源码/配置/证书 全部就绪")
 
 	// ============================================================
 	// Phase 5: 编译并传输二进制
 	// ============================================================
+	// P1-SSE断开: 编译耗时最长(golang 镜像 + go build), 客户端断开后立即终止
+	if clientDisconnected(c, sse, "部署") {
+		return false, DeployErrUnknown, "客户端断开, 部署已取消"
+	}
 	sse.event(PhaseBuild, "running", "正在预编译 node-agent 二进制...", "")
 
 	// [FIX 2026-07-21] 之前硬编码 "/app/node_agent", 导致 NODE_AGENT_PATH 环境变量
@@ -862,6 +945,10 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	// ============================================================
 	// Phase 6: gRPC 连通性预检
 	// ============================================================
+	// P1-SSE断开: 二进制已传输完成, 若客户端断开则无需做 TLS 预检
+	if clientDisconnected(c, sse, "部署") {
+		return false, DeployErrUnknown, "客户端断开, 部署已取消"
+	}
 	grpcAddr := fmt.Sprintf("%s:%s", grpcAddrHost, grpcPortStr)
 	sse.event(PhaseGrpcPrecheck, "running",
 		fmt.Sprintf("预检面板 gRPC 连通性 (%s, TLS=%v)...", grpcAddr, app.Get().Cfg.GRPCTLSEnabled()), "")
@@ -880,6 +967,10 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	// ============================================================
 	// Phase 7: 启动服务
 	// ============================================================
+	// P1-SSE断开: docker compose up 阶段, 客户端断开后立即终止避免无效 build
+	if clientDisconnected(c, sse, "部署") {
+		return false, DeployErrUnknown, "客户端断开, 部署已取消"
+	}
 	sse.event(PhaseStart, "running", "构建镜像并启动 "+containerName+"...", "")
 
 	// 启动前二次确认 Docker 存活 (Phase 4-6 期间 dockerd 可能已被 OOM 杀死)
@@ -950,6 +1041,10 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	// ============================================================
 	// Phase 8: 验证完成
 	// ============================================================
+	// P1-SSE断开: 容器已启动, 验证阶段最多等 120s, 客户端断开后立即终止
+	if clientDisconnected(c, sse, "部署") {
+		return false, DeployErrUnknown, "客户端断开, 部署已取消"
+	}
 	sse.event(PhaseVerify, "running", "检测容器运行状态和日志...", "")
 	time.Sleep(3 * time.Second)
 

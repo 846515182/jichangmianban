@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"nexus-panel/internal/app"
 	"nexus-panel/internal/repo"
 	"nexus-panel/internal/security"
 	"golang.org/x/crypto/ssh"
@@ -47,19 +48,32 @@ var sshUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		// [S4 fix 2026-07-14] WebSocket CheckOrigin whitelist
 		// [P1 fix 2026-07-19] 支持从环境变量配置生产域名, 避免生产环境 403
+		// [P1-SSH fix 2026-07-21] 移除 "u.Host == r.Host" 兜底(可被恶意请求伪造 Host 头绕过),
+		//   改为只校验白名单 + 配置中的 PanelDomain
 		origin := r.Header.Get("Origin")
 		if origin == "" {
-			return false  // [P0#2 2026-07-14] 拒绝空 Origin,防 CSRF 绕过
+			return false // [P0#2 2026-07-14] 拒绝空 Origin,防 CSRF 绕过
 		}
+		// 1) 环境变量白名单 (SSH_TERMINAL_ALLOWED_ORIGINS, 支持带端口的完整 origin)
 		for _, a := range sshAllowedOrigins() {
 			if origin == a || origin == a+":8080" || origin == a+":80" || origin == a+":443" || origin == a+":5173" {
 				return true
 			}
-			// 也允许 origin 直接等于配置项(用户可在环境变量里写完整带端口的 origin)
 		}
-		// 同时允许 origin 的 host 部分等于请求 Host(同源场景, 反向代理后常见)
-		if u, err := url.Parse(origin); err == nil && u.Host == r.Host {
-			return true
+		// 2) 配置中的 PanelDomain (PANEL_DOMAIN 环境变量)
+		//    若 PanelDomain 已配置, 允许 origin 的 host 等于 PanelDomain (含端口变体)
+		if cfg := app.Get(); cfg != nil && cfg.Cfg != nil {
+			panelHost := strings.TrimSpace(cfg.Cfg.PanelDomain)
+			if panelHost != "" {
+				if u, err := url.Parse(origin); err == nil {
+					// 完全匹配 或 常见端口变体
+					if u.Host == panelHost ||
+						u.Host == panelHost+":80" || u.Host == panelHost+":443" ||
+						u.Host == panelHost+":8080" || u.Host == panelHost+":5173" {
+						return true
+					}
+				}
+			}
 		}
 		log.Printf("[ssh_terminal] reject websocket origin=%s remote=%s", origin, r.RemoteAddr)
 		return false
@@ -253,10 +267,27 @@ func (h *SSHTerminalHandler) Terminal(c *gin.Context) {
 		}
 	}()
 
-	err = session.Wait()
-	if err != nil {
-		sc.writeJSON(gin.H{"type": "closed", "msg": "会话结束: " + err.Error()})
-	} else {
-		sc.writeJSON(gin.H{"type": "closed", "msg": "会话已正常结束"})
+	// P1-SSH: session.Wait() 防阻塞
+	// 原实现直接调用 session.Wait(), 客户端断开 WebSocket 时该调用可能无限阻塞,
+	// 导致 goroutine 泄漏 + 节点 SSH 会话残留。改为 select 监听 ctx.Done():
+	//   - ctx.Done (客户端断开/请求取消): 主动关闭 session 触发 Wait 返回, 再读取 waitDone 退出
+	//   - waitDone 先返回: 正常 shell 退出, 走原逻辑
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- session.Wait()
+	}()
+	select {
+	case <-c.Request.Context().Done():
+		// 客户端断开或请求被取消: 主动关闭 session 触发 Wait 返回, 避免 goroutine 泄漏
+		session.Close()
+		<-waitDone // 等 session.Wait 返回, 防止 goroutine 泄漏
+		// 不再向 ws 写消息(连接已断), 直接返回
+	case waitErr := <-waitDone:
+		// 正常结束
+		if waitErr != nil {
+			sc.writeJSON(gin.H{"type": "closed", "msg": "会话结束: " + waitErr.Error()})
+		} else {
+			sc.writeJSON(gin.H{"type": "closed", "msg": "会话已正常结束"})
+		}
 	}
 }

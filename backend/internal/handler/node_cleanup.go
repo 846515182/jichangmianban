@@ -187,6 +187,10 @@ func (h *NodeCleanupHandler) CleanupWithProgress(c *gin.Context) {
 		sse.event(CleanupPhaseConnect, "warning", "未提供 SSH 凭据(密码或私钥), 跳过节点服务器清理, 仅执行面板侧删除", "")
 		return
 	}
+	// P1-SSE断开: 客户端断开后立即终止 SSH 清理, defer 仍会执行 DB 删除
+	if clientDisconnected(c, sse, "清理") {
+		return
+	}
 	// 私钥提前解析, 失败直接报错(避免重试 3 次浪费时间)
 	if privateKey != "" {
 		if _, keyErr := parsePrivateKey(privateKey); keyErr != nil {
@@ -214,26 +218,37 @@ func (h *NodeCleanupHandler) CleanupWithProgress(c *gin.Context) {
 	sse.event(CleanupPhaseConnect, "done", "SSH 连接成功", "")
 
 	// ====== 计算 shortID (与部署时一致) ======
+	// P0-N9: 不再截断 UUID, 用完整 UUID 避免碰撞(与 auto_deploy.go 保持一致),
+	// 否则清理时可能删错同前 8 位的另一个节点的容器/目录。
 	shortID := node.ID
-	if len(shortID) > 8 {
-		shortID = shortID[:8]
-	}
 	containerName := "nexus-agent-" + shortID
 	deployDir := "/root/node-agent-" + shortID
 
 	// ====== Phase 2: 停止并删除 agent 容器 (带超时 + 降级) ======
+	// P1-SSE断开: SSH 已连接, 客户端断开后立即终止后续清理
+	if clientDisconnected(c, sse, "清理") {
+		return
+	}
 	time.Sleep(cleanupStepDelay)
 	sse.event(CleanupPhaseStop, "running", "正在停止并删除 agent 容器 "+containerName+"...", "")
 	time.Sleep(cleanupStepDelay)
 	h.stopAndRemoveContainer(client, containerName, sse)
 
 	// ====== Phase 3: 删除部署目录 (带超时 + 降级) ======
+	// P1-SSE断开: 容器已删, 客户端断开后跳过目录删除(defer 仍执行 DB 删除)
+	if clientDisconnected(c, sse, "清理") {
+		return
+	}
 	time.Sleep(cleanupStepDelay)
 	sse.event(CleanupPhaseDir, "running", "正在删除部署目录 "+deployDir+"...", "")
 	time.Sleep(cleanupStepDelay)
 	h.removeDeployDir(client, deployDir, sse)
 
 	// ====== Phase 4: 删除 docker 镜像 (可选, 带超时) ======
+	// P1-SSE断开: 目录已删, 客户端断开后跳过镜像删除(defer 仍执行 DB 删除)
+	if clientDisconnected(c, sse, "清理") {
+		return
+	}
 	time.Sleep(cleanupStepDelay)
 	if req.RemoveImg {
 		sse.event(CleanupPhaseImage, "running", "正在删除 agent 镜像 nexus-node-agent:latest...", "")

@@ -309,7 +309,9 @@ const start = async () => {
       },
       body: JSON.stringify({
         password: authMode.value === 'password' ? password.value : '',
-        privateKey: authMode.value === 'key' ? privateKey.value : '',
+        // 修复 P1-FE4: 旧版字段名 privateKey(camelCase), 后端 Go struct JSON tag 是 private_key(snake_case),
+        // 导致 SSH 密钥部署时后端 ShouldBindJSON 解析不出私钥, 走密码分支报错"认证失败"。
+        private_key: authMode.value === 'key' ? privateKey.value : '',
         username: username.value,
         port: port.value,
         removeImg: removeImg.value,

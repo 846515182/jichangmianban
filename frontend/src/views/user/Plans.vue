@@ -415,7 +415,8 @@ const openPayUrl = () => {
     ElMessage.warning('暂无可跳转的支付页')
     return
   }
-  window.open(lastPayUrl.value, '_blank')
+  // 修复 P1-FE1: 加 'noopener,noreferrer' 防止支付页通过 window.opener 反向操作原页面
+  window.open(lastPayUrl.value, '_blank', 'noopener,noreferrer')
 }
 
 // 开始轮询订单状态
