@@ -25,7 +25,7 @@ service.interceptors.request.use(
     const auth = useAuthStore()
     if (auth.token && config.headers) {
       // 设置 Bearer token
-      (config.headers as any).Authorization = `Bearer ${auth.token}`
+      (config.headers as any).Authorization = 'Bearer ' + auth.token
     }
     return config
   },
@@ -70,7 +70,7 @@ service.interceptors.response.use(
           requestsQueue.forEach((cb) => cb(newToken))
           requestsQueue = []
           // 将新的 token 写入原始请求并重试
-          (config.headers as any).Authorization = `Bearer ${newToken}`
+          (config.headers as any).Authorization = 'Bearer ' + newToken
           return service(config)
         } catch (refreshErr) {
           isRefreshing = false
@@ -84,7 +84,7 @@ service.interceptors.response.use(
         return new Promise((resolve) => {
           requestsQueue.push((token: string) => {
             // 当刷新完成时，队列请求将得到新的 token
-            (config.headers as any).Authorization = `Bearer ${token}`
+            (config.headers as any).Authorization = 'Bearer ' + token
             resolve(service(config))
           })
         })
