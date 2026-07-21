@@ -1479,7 +1479,7 @@ func runDockerFixScript(client *ssh.Client, sse *sseWriter) bool {
 		sse.event(PhaseInstallDocker, "log", "", fmt.Sprintf("写入修复脚本失败: %v", err))
 		return false
 	}
-	out, err := sshRun(client, fmt.Sprintf("bash %s 2>&1 || echo 'EXIT_CODE=$?'", scriptPath))
+	out, _ := sshRun(client, fmt.Sprintf("bash %s 2>&1 || echo 'EXIT_CODE=$?'", scriptPath))
 	sshRun(client, "rm -f "+scriptPath+" 2>/dev/null; true")
 	if strings.Contains(out, "DOCKER_OK") {
 		sse.event(PhaseInstallDocker, "log", "", "修复脚本执行成功, Docker 已启动")
