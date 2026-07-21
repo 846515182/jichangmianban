@@ -1,5 +1,5 @@
 <template>
-  <el-dialog v-model="visible" title="一键自动部署" width="780px" top="5vh" class="deploy-progress-dialog" :close-on-click-modal="false" :show-close="!running">
+  <el-dialog v-model="visible" title="一键自动部署" width="auto" top="5vh" class="deploy-progress-dialog" :close-on-click-modal="false" :show-close="!running">
     <div class="dp-container">
       <!-- 未开始：认证方式选择 -->
       <div v-if="!started" class="dp-pwd-bar">
@@ -80,7 +80,7 @@
         </div>
 
         <!-- 详细事件流 -->
-        <div class="dp-events">
+        <div ref="eventsRef" class="dp-events">
           <div v-for="(ev, i) in events" :key="i" class="dp-event" :class="ev.status">
             <div class="dp-ev-head">
               <span class="dp-ev-icon">
@@ -105,7 +105,7 @@
 
         <div v-if="running" class="dp-loading">
           <el-icon class="is-loading"><Loading /></el-icon>
-          正在执行部署 (失败将自动重试, 最多 3 次)...
+          正在执行部署 (各阶段独立处理重试)...
         </div>
         <div v-else-if="finished" class="dp-done">
           <el-button type="primary" @click="close">完成</el-button>
@@ -116,7 +116,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, computed } from 'vue'
+import { ref, watch, computed, nextTick } from 'vue'
 import { ElIcon, ElMessage } from 'element-plus'
 import { VideoPlay, Loading } from '@element-plus/icons-vue'
 import type { UploadFile } from 'element-plus'
@@ -167,6 +167,16 @@ const onKeyFileChange = (file: UploadFile) => {
 const running = ref(false)
 const finished = ref(false)
 const events = ref<Array<{step: string; status: string; msg: string; output: string; errCode?: string}>>([])
+const eventsRef = ref<HTMLElement | null>(null)
+
+// 事件流自动滚到底，用户不用手动滑
+const scrollToBottom = async () => {
+  await nextTick()
+  if (eventsRef.value) {
+    eventsRef.value.scrollTop = eventsRef.value.scrollHeight
+  }
+}
+watch(() => events.value.length, scrollToBottom)
 
 // 8 步阶段定义 (每步仅做一件事)
 const phaseSteps = [
@@ -409,7 +419,7 @@ const close = () => {
 </script>
 
 <style scoped>
-.dp-container { min-height: 120px; }
+.dp-container { min-height: 120px; min-width: 580px; }
 .dp-pwd-bar { padding: 8px 0; }
 .dp-progress { max-height: 60vh; overflow-y: auto; }
 
@@ -509,5 +519,6 @@ const close = () => {
 </style>
 
 <style>
+.deploy-progress-dialog { min-width: 640px; max-width: 90vw; }
 .deploy-progress-dialog .el-dialog__body { padding: 16px 20px; }
 </style>
