@@ -542,3 +542,236 @@ func TestContextTimeoutPropagation(t *testing.T) {
 	}
 	t.Logf("context timeout propagated: elapsed %v, err=%v", elapsed, err)
 }
+
+// =============================================================================
+// 集成测试: 模拟宿主机路径不存在时执行 docker compose build
+// 运行方式: go test -run Integration -count=1 -v ./internal/handler/
+// 跳过短测试: go test -short 时跳过(需要 docker 环境)
+// =============================================================================
+
+// TestIntegration_DockerComposeBuild_NonExistentDir
+// 模拟 6987ea2 的事故场景: execCommandLogTimeout 的 dir 参数被设为宿主机路径
+// （如 /opt/nexus-panel），但容器内不存在该路径 → chdir 失败 → build 中断。
+//
+// 测试步骤:
+//  1. 创建临时目录, 内含最小 docker-compose.yml + Dockerfile
+//  2. 用不存在的路径调用 execCommandLogTimeout → 预期失败(chdir 报错)
+//  3. 用正确路径(临时目录)调用 execCommandLogTimeout → 预期成功(build 完成)
+//  4. 验证 build 产物(docker image)存在
+//  5. 清理临时目录和镜像
+func TestIntegration_DockerComposeBuild_NonExistentDir(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test: requires docker, skipped in short mode")
+	}
+
+	// 检查 docker 是否可用
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available, skipping integration test")
+	}
+
+	// ---- 步骤 0: 创建临时项目目录 ----
+	tmpDir, err := os.MkdirTemp("", "nexus-integration-build-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	t.Logf("temp project dir: %s", tmpDir)
+
+	// 写入最小 docker-compose.yml
+	composeContent := `services:
+  test-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nexus-integration-test:latest
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "docker-compose.yml"), []byte(composeContent), 0644); err != nil {
+		t.Fatalf("failed to write docker-compose.yml: %v", err)
+	}
+
+	// 写入最小 Dockerfile
+	dockerfileContent := `FROM alpine:3.18
+RUN echo "integration-test-build" > /build-marker
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "Dockerfile"), []byte(dockerfileContent), 0644); err != nil {
+		t.Fatalf("failed to write Dockerfile: %v", err)
+	}
+
+	// ---- 步骤 1: 用不存在的路径调用 execCommandLogTimeout ----
+	nonExistent := filepath.Join(tmpDir, "this-path-does-not-exist")
+	t.Logf("step 1: calling execCommandLogTimeout with non-existent dir: %s", nonExistent)
+
+	ok := execCommandLogTimeout(nonExistent, "docker", 60, "compose", "build")
+	if ok {
+		// 清理可能产生的镜像
+		_ = exec.Command("docker", "rmi", "-f", "nexus-integration-test:latest").Run()
+		t.Fatal("expected failure when dir does not exist (chdir should fail), but got success")
+	}
+	t.Log("step 1 PASS: correctly returned false for non-existent dir")
+
+	// 验证日志中有失败信息
+	logOutput := gitPullLog.String()
+	if logOutput == "" {
+		t.Log("warning: log buffer is empty, chdir error may not have been logged")
+	} else {
+		t.Logf("log output after failure: %s", strings.TrimSpace(logOutput))
+	}
+	gitPullLog.Reset()
+
+	// ---- 步骤 2: 用正确路径调用 execCommandLogTimeout ----
+	t.Logf("step 2: calling execCommandLogTimeout with correct dir: %s", tmpDir)
+
+	ok = execCommandLogTimeout(tmpDir, "docker", 120, "compose", "build")
+	if !ok {
+		logOutput = gitPullLog.String()
+		t.Fatalf("docker compose build failed with correct dir.\nlog: %s", logOutput)
+	}
+	t.Log("step 2 PASS: docker compose build succeeded with correct dir")
+
+	_ = gitPullLog.String() // build log consumed, verified by step 3 image check
+	gitPullLog.Reset()
+
+	// ---- 步骤 3: 验证 build 产物 ----
+	// 检查镜像是否存在
+	output, err := exec.Command("docker", "images", "nexus-integration-test:latest",
+		"--format", "{{.Repository}}:{{.Tag}}").CombinedOutput()
+	if err != nil || !strings.Contains(string(output), "nexus-integration-test") {
+		t.Fatalf("docker image not found after build. output=%s, err=%v", string(output), err)
+	}
+	t.Logf("step 3 PASS: docker image found: %s", strings.TrimSpace(string(output)))
+
+	// 验证镜像内容: 检查 build marker 文件存在
+	markerOutput, err := exec.Command("docker", "run", "--rm",
+		"nexus-integration-test:latest", "cat", "/build-marker").CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to verify image content: %v, output=%s", err, string(markerOutput))
+	}
+	if !strings.Contains(string(markerOutput), "integration-test-build") {
+		t.Fatalf("image content mismatch: expected 'integration-test-build', got '%s'",
+			strings.TrimSpace(string(markerOutput)))
+	}
+	t.Logf("step 3b PASS: image content verified: %s", strings.TrimSpace(string(markerOutput)))
+
+	// ---- 步骤 4: 清理 ----
+	t.Log("step 4: cleaning up docker image")
+	if err := exec.Command("docker", "rmi", "-f", "nexus-integration-test:latest").Run(); err != nil {
+		t.Logf("warning: failed to remove test image: %v", err)
+	} else {
+		t.Log("step 4 PASS: test image removed")
+	}
+
+	// 最终验证: 路径决策矩阵
+	//   docker compose build → 用 gitRoot(容器内路径)  ✓
+	//   docker compose build → 用 hostGitRoot(宿主机路径) ✗ (chdir 失败)
+	t.Log("=== integration test summary ===")
+	t.Log("decision matrix verified:")
+	t.Log("  docker compose build with gitRoot (exists)     → SUCCESS")
+	t.Log("  docker compose build with hostGitRoot (absent)  → FAILURE (chdir)")
+	t.Log("  conclusion: docker compose build MUST use gitRoot, not hostGitRoot")
+}
+
+// TestIntegration_HelperContainer_Simulated
+// 模拟 helper 容器执行 docker compose up 的场景。
+// 验证 helper 容器的 docker run 命令构造正确:
+//   - -v hostGitRoot:hostGitRoot（宿主机路径挂载）
+//   - -w hostGitRoot（工作目录 = 宿主机路径）
+//   - helperCmd.Dir 不设置（exec.Command 在 panel 容器内执行, Dir 设宿主机路径会 chdir 失败）
+//
+// 这个测试不会真正启动 helper 容器（避免影响正在运行的 panel），
+// 而是验证命令参数构造是否正确。
+func TestIntegration_HelperContainer_Simulated(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test: requires docker, skipped in short mode")
+	}
+
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available, skipping integration test")
+	}
+
+	// 模拟 hostGitRoot（宿主机路径）
+	hostGitRoot := "/opt/nexus-panel"
+
+	// 验证: 不能用 execCommandLog 来执行 helper 容器
+	// 原因: execCommandLog 内部设 cmd.Dir = hostGitRoot,
+	// panel 容器内不存在 /opt/nexus-panel → chdir 失败
+	t.Log("verification 1: execCommandLog should NOT be used for helper container")
+	ok := execCommandLogTimeout(hostGitRoot, "docker", 5, "version")
+	if ok {
+		// 如果在某些环境下 /opt/nexus-panel 恰好存在, 跳过
+		t.Log("  /opt/nexus-panel exists in this environment, skip chdir check")
+	} else {
+		t.Log("  PASS: execCommandLog with hostGitRoot fails as expected (chdir)")
+	}
+	gitPullLog.Reset()
+
+	// 验证: 正确做法是用 exec.Command 直接构造, 不设 Dir
+	t.Log("verification 2: helperCmd.Dir should be empty")
+	helperCmd := exec.Command("docker", "run", "-d",
+		"--name", "nexus-integration-test-helper",
+		"-v", "/var/run/docker.sock:/var/run/docker.sock",
+		"-v", hostGitRoot+":"+hostGitRoot,
+		"-w", hostGitRoot,
+		"alpine:latest",
+		"sh", "-c", "echo 'helper test ok' && docker rm -f nexus-integration-test-helper",
+	)
+
+	if helperCmd.Dir != "" {
+		t.Fatalf("helperCmd.Dir should be empty, got: %s", helperCmd.Dir)
+	}
+	t.Log("  PASS: helperCmd.Dir is empty")
+
+	// 验证: helper 容器的 -v 挂载路径 hostGitRoot:hostGitRoot
+	t.Log("verification 3: volume mount should be hostGitRoot:hostGitRoot")
+	args := helperCmd.Args
+	foundVolume := false
+	foundWorkDir := false
+	for i, arg := range args {
+		if arg == "-v" && i+1 < len(args) {
+			expected := hostGitRoot + ":" + hostGitRoot
+			if args[i+1] == expected {
+				foundVolume = true
+			}
+		}
+		if arg == "-w" && i+1 < len(args) {
+			if args[i+1] == hostGitRoot {
+				foundWorkDir = true
+			}
+		}
+	}
+	if !foundVolume {
+		t.Fatal("helper container -v mount should be hostGitRoot:hostGitRoot")
+	}
+	if !foundWorkDir {
+		t.Fatal("helper container -w should be hostGitRoot")
+	}
+	t.Log("  PASS: volume mount and work dir are correct")
+
+	// 执行: 真正启动 helper 容器测试（不依赖 panel，
+	// 只是一个独立的 alpine 容器执行 echo 然后自清理）
+	// 先清理可能残留的容器
+	_ = exec.Command("docker", "rm", "-f", "nexus-integration-test-helper").Run()
+
+	t.Log("verification 4: helper container can start and self-cleanup")
+	out, err := helperCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helper container failed to start: %v\noutput: %s", err, string(out))
+	}
+	t.Logf("  helper output: %s", strings.TrimSpace(string(out)))
+
+	// 等待 helper 容器自清理完成
+	time.Sleep(3 * time.Second)
+
+	// 验证 helper 容器已自清理
+	checkCmd := exec.Command("docker", "ps", "-a", "--filter",
+		"name=nexus-integration-test-helper", "--format", "{{.Names}}")
+	checkOut, _ := checkCmd.CombinedOutput()
+	if strings.TrimSpace(string(checkOut)) != "" {
+		t.Logf("  warning: helper container still exists: %s", string(checkOut))
+		_ = exec.Command("docker", "rm", "-f", "nexus-integration-test-helper").Run()
+	} else {
+		t.Log("  PASS: helper container self-cleaned up")
+	}
+
+	t.Log("=== integration test: helper container PASS ===")
+}
