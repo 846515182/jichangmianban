@@ -1,4 +1,4 @@
-﻿package config
+package config
 
 import (
 	"crypto"
@@ -102,7 +102,7 @@ func Load() (*Config, error) {
 		RateSub:          getEnvInt("RATE_SUB", 10),
 		LoginMaxFail:     getEnvInt("LOGIN_MAX_FAIL", 10),
 		LoginLockWindow:  getEnvDuration("LOGIN_LOCK_WINDOW", 15*time.Minute),
-		SubSigTTL:        getEnvDuration("SUB_SIG_TTL", 5*time.Minute),
+		SubSigTTL:        getEnvDuration("SUB_SIG_TTL", 24*time.Hour),
 		IPBanTTL:         getEnvDuration("IP_BAN_TTL", time.Hour),
 		GRPCTLSCert:      getEnv("GRPC_TLS_CERT", ""),
 		GRPCTLSKey:       getEnv("GRPC_TLS_KEY", ""),
