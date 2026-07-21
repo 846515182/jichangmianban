@@ -1425,6 +1425,12 @@ if [ -z "$DOCKERD_PATH" ]; then
     curl -fsSL https://get.docker.com | sh
     DOCKERD_PATH=$(which dockerd 2>/dev/null || echo "/usr/bin/dockerd")
 fi
+# 路径校验与软链接兜底: dockerd 在 /usr/local/bin 但 systemd 期望 /usr/bin
+if [ ! -f /usr/bin/dockerd ] && [ -f /usr/local/bin/dockerd ]; then
+    ln -sf /usr/local/bin/dockerd /usr/bin/dockerd
+    DOCKERD_PATH="/usr/bin/dockerd"
+    systemctl daemon-reload
+fi
 if [ ! -f /etc/systemd/system/docker.service ] && [ ! -f /usr/lib/systemd/system/docker.service ]; then
     cat > /etc/systemd/system/docker.service << EOF
 [Unit]
@@ -1521,6 +1527,9 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 		}
 		// 启动 Docker
 		sse.event(PhaseInstallDocker, "log", "", "Docker 已安装, 尝试启动...")
+		// 路径校验与软链接兜底: dockerd 在 /usr/local/bin 但 systemd 期望 /usr/bin
+		sshRun(client, "if [ ! -f /usr/bin/dockerd ] && [ -f /usr/local/bin/dockerd ]; then "+
+			"ln -sf /usr/local/bin/dockerd /usr/bin/dockerd && systemctl daemon-reload; fi; true")
 		// 修复: 静态安装的 systemd 可能指向错误的 dockerd 路径
 		sshRun(client, "if systemctl cat docker 2>/dev/null | grep -q 'ExecStart=/usr/bin/dockerd' "+
 			"&& [ ! -x /usr/bin/dockerd ] && [ -x /usr/local/bin/dockerd ]; then "+
