@@ -925,7 +925,7 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 					"sleep 5; true")
 				// 再等一轮 verify
 				if !verifyDockerReady(client, sse) {
-					sse.event(PhaseStart, "error", "Docker daemon 修复失败(重试中无法启动docker)", "", DeployErrDockerNotInstalled)
+					sse.eventWithCode(PhaseStart, "error", "Docker daemon 修复失败(重试中无法启动docker)", "", DeployErrDockerNotInstalled)
 					return false, DeployErrDockerNotInstalled, "Docker daemon 修复失败"
 				}
 			}
