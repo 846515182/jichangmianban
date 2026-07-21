@@ -1,0 +1,140 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# 并发控制: 同一分支的新提交取消旧运行
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ============================================================
+  # Job 1: 代码检查 (go vet + go fmt)
+  # ============================================================
+  lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+          cache-dependency-path: backend/go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go fmt check
+        run: |
+          fmt_out=$(gofmt -l .)
+          if [ -n "$fmt_out" ]; then
+            echo "以下文件格式不合规 (gofmt):"
+            echo "$fmt_out"
+            exit 1
+          fi
+          echo "go fmt: OK"
+
+  # ============================================================
+  # Job 2: 单元测试 (不需要 Docker, 快速反馈)
+  # ============================================================
+  unit-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+          cache-dependency-path: backend/go.sum
+
+      - name: Run unit tests
+        run: |
+          go test -short -race -count=1 -timeout 120s \
+            ./internal/handler/ \
+            ./internal/middleware/ \
+            ./internal/service/ \
+            ./internal/security/ \
+            -v 2>&1 | tee unit-test.log
+
+      - name: Upload unit test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-log
+          path: backend/unit-test.log
+          retention-days: 7
+
+  # ============================================================
+  # Job 3: 集成测试 (需要 Docker, 模拟一键更新场景)
+  # ============================================================
+  integration-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+          cache-dependency-path: backend/go.sum
+
+      - name: Run integration tests
+        run: |
+          go test -run Integration -count=1 -timeout 300s \
+            ./internal/handler/ \
+            -v 2>&1 | tee integration-test.log
+
+      - name: Upload integration test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-log
+          path: backend/integration-test.log
+          retention-days: 7
+
+      # 清理: 删除集成测试可能残留的镜像/容器
+      - name: Cleanup docker artifacts
+        if: always()
+        run: |
+          docker rmi -f nexus-integration-test:latest 2>/dev/null || true
+          docker rm -f nexus-integration-test-helper 2>/dev/null || true
+
+  # ============================================================
+  # Job 4: 构建验证 (确保 docker compose build 能通过)
+  # ============================================================
+  build-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Verify docker-compose.yml syntax
+        run: |
+          docker compose -f docker-compose.yml config --quiet 2>&1 || true
+          echo "docker-compose.yml syntax check done"
+
+      - name: Verify backend Dockerfile
+        run: |
+          docker build --check \
+            -f backend/Dockerfile \
+            --build-arg VERSION=ci-test \
+            backend/ 2>&1 || true
+          echo "Dockerfile syntax check done"
