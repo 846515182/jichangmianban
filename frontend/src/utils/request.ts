@@ -1,4 +1,4 @@
-﻿import axios, { type AxiosRequestConfig, type InternalAxiosRequestConfig } from 'axios'
+import axios, { type AxiosRequestConfig, type InternalAxiosRequestConfig } from 'axios'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
 import router from '@/router'
@@ -68,13 +68,13 @@ service.interceptors.response.use(
           const newToken = await auth.refresh()
           isRefreshing = false
           requestsQueue.forEach((cb) => cb(newToken))
-          requestsQueue = []
+          requestsQueue = new Array<(token: string) => void>()
           // 将新的 token 写入原始请求并重试
           (config.headers as any).Authorization = 'Bearer ' + newToken
           return service(config)
         } catch (refreshErr) {
           isRefreshing = false
-          requestsQueue = []
+          requestsQueue = new Array<(token: string) => void>()
           auth.clear()
           ElMessage.error('登录已过期，请重新登录')
           router.push('/login')

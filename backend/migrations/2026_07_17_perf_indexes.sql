@@ -23,5 +23,9 @@ CREATE INDEX IF NOT EXISTS idx_subscriptions_created_at
 
 -- 修复 PERF-IDX-04: admin_actions 无 created_at 索引, 审计日志无限增长后深分页慢
 -- admin_actions 由 GORM AutoMigrate 创建, 无任何索引。
-CREATE INDEX IF NOT EXISTS idx_admin_actions_created_at
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'admin_actions') THEN
+        CREATE INDEX IF NOT EXISTS idx_admin_actions_created_at
     ON admin_actions (created_at DESC);
+    END IF;
+END $$;
