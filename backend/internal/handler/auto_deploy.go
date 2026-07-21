@@ -1409,6 +1409,86 @@ func unmaskDockerService(client *ssh.Client, sse *sseWriter) bool {
 	return false
 }
 
+// dockerFixScript 一键 Docker 修复脚本（嵌入到部署流程中作为最后兜底）
+// 覆盖: dockerd 不在预期路径 / 全盘搜索 / 重建 service / unmask / daemon.json / 启动
+const dockerFixScript = `#!/bin/bash
+set -e
+DOCKERD_PATH=""
+for p in /usr/bin/dockerd /usr/local/bin/dockerd /usr/sbin/dockerd /snap/bin/dockerd; do
+    if [ -f "$p" ]; then DOCKERD_PATH="$p"; break; fi
+done
+if [ -z "$DOCKERD_PATH" ]; then
+    DOCKERD_PATH=$(find / -name "dockerd" -type f 2>/dev/null | head -1)
+fi
+if [ -z "$DOCKERD_PATH" ]; then
+    systemctl stop docker 2>/dev/null || true
+    curl -fsSL https://get.docker.com | sh
+    DOCKERD_PATH=$(which dockerd 2>/dev/null || echo "/usr/bin/dockerd")
+fi
+if [ ! -f /etc/systemd/system/docker.service ] && [ ! -f /usr/lib/systemd/system/docker.service ]; then
+    cat > /etc/systemd/system/docker.service << EOF
+[Unit]
+Description=Docker Application Container Engine
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=notify
+ExecStart=${DOCKERD_PATH} -H fd:// --containerd=/run/containerd/containerd.sock
+ExecReload=/bin/kill -s HUP \$MAINPID
+Restart=always
+RestartSec=5
+LimitNOFILE=infinity
+LimitNPROC=infinity
+LimitCORE=infinity
+[Install]
+WantedBy=multi-user.target
+EOF
+fi
+for f in /etc/systemd/system/docker.service /usr/lib/systemd/system/docker.service; do
+    if [ -f "$f" ]; then
+        if grep -q "/usr/local/bin/dockerd" "$f" && [ "$DOCKERD_PATH" != "/usr/local/bin/dockerd" ]; then
+            sed -i "s|/usr/local/bin/dockerd|${DOCKERD_PATH}|g" "$f"
+        fi
+    fi
+done
+ln -sf "$DOCKERD_PATH" /usr/local/bin/dockerd 2>/dev/null || true
+systemctl unmask docker 2>/dev/null || true
+systemctl unmask docker.socket 2>/dev/null || true
+systemctl daemon-reload
+mkdir -p /etc/docker
+cat > /etc/docker/daemon.json << 'EOF'
+{"storage-driver":"overlay2","log-driver":"json-file","log-opts":{"max-size":"10m","max-file":"3"},"live-restore":true}
+EOF
+systemctl enable docker 2>/dev/null || true
+systemctl restart docker
+for i in $(seq 1 15); do
+    if docker info >/dev/null 2>&1; then echo "DOCKER_OK"; exit 0; fi
+    sleep 1
+done
+echo "DOCKER_FAIL"
+exit 1`
+
+// runDockerFixScript 在节点上执行一键 Docker 修复脚本，返回是否成功
+func runDockerFixScript(client *ssh.Client, sse *sseWriter) bool {
+	sse.event(PhaseInstallDocker, "log", "", "执行一键修复脚本(fix_docker)...")
+	// 分块写入脚本到远程临时文件后执行，避免单行命令过长
+	scriptPath := "/tmp/fix_docker_$$.sh"
+	writeCmd := fmt.Sprintf("cat > %s << 'FIXEOF'\n%s\nFIXEOF\nchmod +x %s",
+		scriptPath, dockerFixScript, scriptPath)
+	if _, err := sshRun(client, writeCmd); err != nil {
+		sse.event(PhaseInstallDocker, "log", "", fmt.Sprintf("写入修复脚本失败: %v", err))
+		return false
+	}
+	out, err := sshRun(client, fmt.Sprintf("bash %s 2>&1 || echo 'EXIT_CODE=$?'", scriptPath))
+	sshRun(client, "rm -f "+scriptPath+" 2>/dev/null; true")
+	if strings.Contains(out, "DOCKER_OK") {
+		sse.event(PhaseInstallDocker, "log", "", "修复脚本执行成功, Docker 已启动")
+		return true
+	}
+	sse.event(PhaseInstallDocker, "log", "", fmt.Sprintf("修复脚本执行未完全成功: %s", strings.TrimSpace(out)))
+	return false
+}
+
 // ensureDocker 检查并安装 Docker; 已安装则跳过
 // 兜底: get.docker.com 不可用时自动回退到阿里云镜像源安装
 // 修复: 已安装但启动失败时, 先做全面内核诊断, 如果内核不支持则直接报错不重试;
@@ -1574,10 +1654,23 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 				}
 			}
 			if !dockerStarted {
-				// dockerd 启动失败, 做全面内核兼容性诊断
+				// dockerd 启动失败, 尝试一键修复脚本作为最后兜底
+				sse.event(PhaseInstallDocker, "log", "", "Docker 启动失败, 执行一键修复脚本(fix_docker)...")
+				for fixRetry := 0; fixRetry < 2; fixRetry++ {
+					if runDockerFixScript(client, sse) {
+						dockerStarted = true
+						break
+					}
+					sse.event(PhaseInstallDocker, "log", "", fmt.Sprintf("一键修复第 %d 次未生效, 重试...", fixRetry+1))
+					time.Sleep(5 * time.Second)
+				}
+			}
+			if !dockerStarted {
+				// 修复失败, 做全面内核兼容性诊断
 				diag := diagnoseDockerFailure(client, sse)
 				return false, DeployErrDockerNotInstalled, fmt.Sprintf("Docker 已安装但 daemon 无法启动 - %s", diag.reason)
 			}
+			sse.event(PhaseInstallDocker, "done", "Docker 一键修复脚本执行成功", "")
 		}
 	}
 
@@ -1632,6 +1725,11 @@ func verifyDockerReady(client *ssh.Client, sse *sseWriter) bool {
 			"rm -f /var/run/docker.pid /run/docker.pid /var/run/docker.sock /run/docker.sock; "+
 			"systemctl restart containerd docker 2>/dev/null; sleep 5; true")
 		time.Sleep(5 * time.Second)
+	}
+	// 兜底: 轮询超时, 尝试一键修复脚本
+	sse.event(PhaseInstallDocker, "log", "", "Docker daemon 轮询超时, 执行一键修复脚本(fix_docker)...")
+	if runDockerFixScript(client, sse) {
+		return true
 	}
 	return false
 }
