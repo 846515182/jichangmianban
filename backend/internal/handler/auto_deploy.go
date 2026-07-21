@@ -190,21 +190,25 @@ func resolvePanelGrpcAddr() panelGrpcAddrInfo {
 }
 
 // ensureHostsMapping 在节点 /etc/hosts 添加 panelRealIP → domain 映射, 绕过 CDN
-// 幂等: 已存在映射则跳过
+// 幂等: 已存在映射则跳过; 旧映射(不同 IP)先清理再写入
 // 修复 START_FAIL-CDN: bbcdtv.top 走 CF CDN, 节点 DNS 解析到 CF IP 无法直达 50051 端口
 // 通过 /etc/hosts 把域名映射到面板真实 IP, 既绕过 CDN 又让 TLS ServerName 匹配证书 SAN
+// [SEC-05] 先清理旧 nexus-panel 映射再写入, 避免面板 IP 变更后解析到错误地址
 func ensureHostsMapping(client *ssh.Client, panelRealIP, domain string) (string, error) {
 	if panelRealIP == "" || domain == "" {
 		return "(skip: 空参数)", nil
 	}
-	// 幂等: 先检查是否已存在映射
+	// 1. 先清理该域名的所有旧 nexus-panel 映射, 避免 IP 变更后残留
+	cleanCmd := fmt.Sprintf("sed -i '/%s\\b.*# nexus-panel/d' /etc/hosts 2>/dev/null; echo 'OK'", domain)
+	sshRun(client, cleanCmd)
+	// 2. 幂等: 检查是否已存在精确映射
 	checkCmd := fmt.Sprintf("grep -c '^%s[[:space:]]\\+%s\\b' /etc/hosts 2>/dev/null || echo 0",
 		panelRealIP, domain)
 	out, err := sshRun(client, checkCmd)
 	if err == nil && strings.TrimSpace(out) != "0" {
 		return fmt.Sprintf("(已存在映射: %s → %s)", panelRealIP, domain), nil
 	}
-	// 追加映射(用 >> 避免覆盖)
+	// 3. 追加映射(用 >> 避免覆盖)
 	addCmd := fmt.Sprintf("echo '%s %s  # nexus-panel grpc bypass CDN' >> /etc/hosts && echo OK",
 		panelRealIP, domain)
 	out, err = sshRun(client, addCmd)
@@ -514,9 +518,10 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	if dialErr != nil {
 		errStr := dialErr.Error()
 		code := classifySSHError(errStr)
+		sanitizedErr := sanitizeSSHError(errStr)
 		sse.eventWithCode(PhaseConnectServer, "error",
-			"SSH 连接失败(重试3次): "+errStr+diagnoseSSHError(dialErr, port), "", code)
-		return false, code, "SSH 连接失败: " + errStr
+			"SSH 连接失败(重试3次): "+sanitizedErr+diagnoseSSHError(dialErr, port), "", code)
+		return false, code, "SSH 连接失败: " + sanitizedErr
 	}
 	defer client.Close()
 	sse.event(PhaseConnectServer, "done", "SSH 连接成功", "")
@@ -533,7 +538,8 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	//   3 次重试间若上次失败留下了脏 .env.node / 半截 agent 二进制 / 旧 xray-cache,
 	//   下次部署 mkdir -p 不会删旧文件, 可能与新版本冲突(xray-cache 版本不匹配等)。
 	//   现在重试前先 docker compose down + rm -rf 部署目录, 确保每次部署都是干净状态。
-	sse.event(PhaseConnectServer, "running", "正在清理旧部署残留(容器+目录+端口)...", "")
+	// [SEC-05] 增强清理: 网络残留 + gRPC端口 + swap + /etc/hosts + systemd 配置恢复
+	sse.event(PhaseConnectServer, "running", "正在清理旧部署残留(容器+目录+端口+网络+swap)...", "")
 	// 兜底: 清理命令逐条执行, 每条独立容错, 避免一条失败导致后续不执行
 	cleanSteps := []struct {
 		desc string
@@ -542,8 +548,12 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 		{"docker compose down", fmt.Sprintf("cd %s 2>/dev/null && docker compose -f docker-compose.node.yml down --timeout 10 2>/dev/null; true", deployDir)},
 		{"停止旧容器", fmt.Sprintf("docker stop %s 2>/dev/null; true", containerName)},
 		{"删除旧容器", fmt.Sprintf("docker rm -f %s 2>/dev/null; true", containerName)},
-		{"释放端口进程", fmt.Sprintf("fuser -k %d/tcp 2>/dev/null; fuser -k %d/tcp 2>/dev/null; true", listenPort, healthPort)},
-		{"删除旧目录", fmt.Sprintf("rm -rf %s 2>/dev/null; true", deployDir)},
+		{"释放端口进程(代理+健康检查+gRPC)", fmt.Sprintf("fuser -k %d/tcp 2>/dev/null; fuser -k %d/tcp 2>/dev/null; fuser -k %s/tcp 2>/dev/null; true", listenPort, healthPort, grpcPortStr)},
+		{"清理 Docker 网络残留", fmt.Sprintf("docker network ls --filter name=node-agent --format '{{.Name}}' 2>/dev/null | xargs -r docker network rm 2>/dev/null; true")},
+		{"清理 swap 文件残留", fmt.Sprintf("swapoff /swapfile_np_* 2>/dev/null; rm -f /swapfile_np_* 2>/dev/null; true")},
+		{"清理 /etc/hosts 旧映射", "sed -i '/# nexus-panel grpc bypass CDN/d' /etc/hosts 2>/dev/null; sed -i '/# nexus-panel/d' /etc/hosts 2>/dev/null; true"},
+		{"恢复 systemd Docker 配置", "if [ -f /etc/systemd/system/docker.service.bak ]; then cp /etc/systemd/system/docker.service.bak /etc/systemd/system/docker.service && systemctl daemon-reload; fi; true"},
+		{"删除旧部署目录", fmt.Sprintf("chmod -R +w %s 2>/dev/null; rm -rf %s 2>/dev/null; true", deployDir, deployDir)},
 	}
 	var cleanLines []string
 	for _, step := range cleanSteps {
@@ -560,6 +570,8 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	sshRun(client, fmt.Sprintf("docker rm -f %s 2>/dev/null; true", containerName))
 	// 兜底: 清理可能残留的 Docker 网络 (旧 compose 项目可能留下网络冲突)
 	sshRun(client, fmt.Sprintf("docker network prune -f 2>/dev/null; true"))
+	// 兜底: 清理可能残留的旧版 nexus 映射
+	sshRun(client, "sed -i '/# nexus-panel/d' /etc/hosts 2>/dev/null; true")
 	cleanLines = append(cleanLines, "CLEANED")
 	sse.event(PhaseConnectServer, "done", "旧残留清理完成", strings.Join(cleanLines, "\n"))
 
@@ -754,15 +766,21 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	sse.event(PhaseBuild, "running", "正在预编译 node-agent 二进制...", "")
 
 	localNodeAgentPath := "/app/node_agent"
+	// [SEC-05] 缓存校验: 不仅看时间, 还比对源码 hash, 防止源码更新后误用旧二进制
+	sourceHashCmd := fmt.Sprintf(
+		"find %s -name '*.go' -o -name 'go.mod' -o -name 'go.sum' 2>/dev/null | sort | xargs md5sum 2>/dev/null | md5sum | cut -d' ' -f1",
+		localNodeAgentPath)
+	sourceHash, _ := sshRunLocal(sourceHashCmd)
+	sourceHash = strings.TrimSpace(sourceHash)
 	checkBinCmd := fmt.Sprintf(
-		"if [ -f %s/agent ]; then "+
-			"if find %s/agent -mmin -1440 >/dev/null 2>&1; then echo 'EXISTS_AND_RECENT'; "+
-			"else echo 'EXISTS_OLD'; fi; "+
+		"if [ -f %s/agent ] && [ -f %s/agent.hash ]; then "+
+			"if [ \"$(cat %s/agent.hash 2>/dev/null)\" = '%s' ]; then echo 'EXISTS_AND_MATCH'; "+
+			"else echo 'EXISTS_HASH_MISMATCH'; fi; "+
 			"else echo 'NOT_EXISTS'; fi",
-		localNodeAgentPath, localNodeAgentPath)
+		localNodeAgentPath, localNodeAgentPath, localNodeAgentPath, sourceHash)
 	binStatus, _ := sshRunLocal(checkBinCmd)
-	if strings.Contains(binStatus, "EXISTS_AND_RECENT") {
-		sse.event(PhaseBuild, "done", "使用缓存的 node-agent 二进制(24小时内编译)", binStatus)
+	if strings.Contains(binStatus, "EXISTS_AND_MATCH") {
+		sse.event(PhaseBuild, "done", "使用缓存的 node-agent 二进制(源码 hash 匹配)", binStatus)
 	} else {
 		var buildErr error
 		var buildOut string
@@ -794,6 +812,9 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 			sse.eventWithCode(PhaseBuild, "error", "二进制预编译失败(重试2次): "+buildErr.Error(), buildOut, DeployErrBuild)
 			return false, DeployErrBuild, "编译失败: " + buildErr.Error()
 		}
+		// [SEC-05] 保存源码 hash 到文件, 供下次缓存校验
+		saveHashCmd := fmt.Sprintf("echo '%s' > %s/agent.hash 2>/dev/null; echo 'HASH_SAVED'", sourceHash, localNodeAgentPath)
+		sshRunLocal(saveHashCmd)
 		sse.event(PhaseBuild, "done", "二进制预编译完成", buildOut)
 	}
 
@@ -1181,18 +1202,26 @@ func preDeployCheck(client *ssh.Client, listenPort, healthPort int, sse *sseWrit
 }
 
 // parseAvailGB 从 "df -BG" 输出解析可用空间 GB
+// 格式: Filesystem 1G-blocks Used Available Use% Mounted on
+//        /dev/sda1  50G      20G   30G       40%  /
+// 不依赖固定列索引, 找倒数第 3 个含 G 后缀的数字 (Available = 倒数第 3 列)
 func parseAvailGB(s string) int {
-	// 格式: /dev/sda1  50G  20G  30G  40% /
 	fields := strings.Fields(s)
-	for i, f := range fields {
+	var gValues []int
+	for _, f := range fields {
 		if strings.HasSuffix(f, "G") {
 			if v, err := strconv.Atoi(strings.TrimSuffix(f, "G")); err == nil {
-				// 通常第 4 列是可用空间 (Filesystem Size Used Avail Use% Mounted)
-				if i == 3 {
-					return v
-				}
+				gValues = append(gValues, v)
 			}
 		}
+	}
+	// Available 通常是倒数第 3 个 G 值 (Size/Used/Available)
+	if len(gValues) >= 3 {
+		return gValues[len(gValues)-3]
+	}
+	// 兜底: 如果只有 1 个 G 值(异常输出), 直接返回
+	if len(gValues) == 1 {
+		return gValues[0]
 	}
 	return -1
 }
@@ -1588,6 +1617,17 @@ func verifyDockerReady(client *ssh.Client, sse *sseWriter) bool {
 	return false
 }
 
+// sanitizeSSHError 过滤 SSH 错误信息中的敏感内容（IP/密码痕迹等）
+func sanitizeSSHError(errStr string) string {
+	s := errStr
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", "")
+	if len(s) > 200 {
+		s = s[:200] + "..."
+	}
+	return s
+}
+
 // classifySSHError 分类 SSH 错误码
 func classifySSHError(errStr string) string {
 	switch {
@@ -1914,8 +1954,11 @@ func parsePrivateKey(pemData string) (ssh.Signer, error) {
 
 // sshRunLocal 在面板服务器本地执行 shell 命令(用于预编译镜像)
 func sshRunLocal(cmd string) (string, error) {
-	parts := []string{"-c", cmd}
-	out, err := exec.Command("sh", parts...).CombinedOutput()
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+	out, err := exec.Command(shell, "-c", cmd).CombinedOutput()
 	return string(out), err
 }
 
@@ -2021,8 +2064,12 @@ func sshWriteFile(client *ssh.Client, path, content string) error {
 	}
 
 	safeGo(func() {
-		stdin.Write([]byte(content))
-		stdin.Close()
+		if _, err := stdin.Write([]byte(content)); err != nil {
+			log.Printf("[AUTO_DEPLOY] sshWriteFile 写入失败: %v", err)
+		}
+		if err := stdin.Close(); err != nil {
+			log.Printf("[AUTO_DEPLOY] sshWriteFile 关闭 stdin 失败: %v", err)
+		}
 	})
 
 	return session.Wait()
