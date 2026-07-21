@@ -273,6 +273,13 @@ func probeTLSServer(host, port string) bool {
 		return false
 	}
 	errStr := err.Error()
+	// 修复 TLS-DETECT-FALSEPOS: "tls: first record does not look like a TLS handshake"
+	// 虽然包含 "tls:" 和 "handshake", 但实际含义是"对面不是 TLS 服务端"(明文 gRPC 回了非 TLS 数据)
+	// 旧版因为匹配 "tls:" 前缀而误判为 TLS 服务端, 导致 agent 用 TLS 连明文端口, 永久注册失败
+	if strings.Contains(errStr, "first record") {
+		log.Printf("[INFO] TLS 探测: %s:%s 非 TLS(对面回复非 TLS 数据: %v), 用明文", host, port, err)
+		return false
+	}
 	if strings.Contains(errStr, "tls:") || strings.Contains(errStr, "handshake") ||
 		strings.Contains(errStr, "certificate") || strings.Contains(errStr, "alert") {
 		// TLS 协议层错误(如证书校验失败/alert), 说明对面确实是 TLS 服务端

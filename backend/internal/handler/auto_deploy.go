@@ -50,14 +50,14 @@ const (
 
 // ====== 部署阶段常量（8 步，每步仅做一件事） ======
 const (
-	PhaseConnectServer = "connect_server" // 1. 连接服务器
-	PhaseEnvCheck      = "env_check"      // 2. 环境检测(磁盘/内存/端口/网络)
-	PhaseInstallDocker = "install_docker" // 3. 安装/启动 Docker
-	PhaseInstallDockerFiles  = "prepare_files"  // 4. 准备部署文件(目录/源码/配置/证书)
-	PhaseBuild         = "build"          // 5. 编译并传输二进制
-	PhaseGrpcPrecheck  = "grpc_precheck"  // 6. gRPC 连通性预检
-	PhaseStart         = "start"          // 7. 启动服务
-	PhaseVerify        = "verify"         // 8. 验证完成
+	PhaseConnectServer      = "connect_server" // 1. 连接服务器
+	PhaseEnvCheck           = "env_check"      // 2. 环境检测(磁盘/内存/端口/网络)
+	PhaseInstallDocker      = "install_docker" // 3. 安装/启动 Docker
+	PhaseInstallDockerFiles = "prepare_files"  // 4. 准备部署文件(目录/源码/配置/证书)
+	PhaseBuild              = "build"          // 5. 编译并传输二进制
+	PhaseGrpcPrecheck       = "grpc_precheck"  // 6. gRPC 连通性预检
+	PhaseStart              = "start"          // 7. 启动服务
+	PhaseVerify             = "verify"         // 8. 验证完成
 )
 
 // AutoDeployHandler 一键自动部署：面板 SSH 到节点服务器，自动推送文件、装 Docker、启动、验证
@@ -230,7 +230,7 @@ func ensureHostsMapping(client *ssh.Client, panelRealIP, domain string) (string,
 	return fmt.Sprintf("(已添加映射: %s → %s)", panelRealIP, domain), nil
 }
 
-// shellQuote 安全转义 shell 字符串: 用单引号包裹, 内部单引号转义为 '\''。
+// shellQuote 安全转义 shell 字符串: 用单引号包裹, 内部单引号转义为 '\”。
 // P1-SSH注入: 防止动态字段插入 shell 命令时被解释为元字符。
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
@@ -985,14 +985,16 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	var startErr error
 	for retry := 1; retry <= 2; retry++ {
 		if retry > 1 {
-			sse.event(PhaseStart, "log", "", fmt.Sprintf("启动失败, 第 %d 次重试 (先清理旧容器)...", retry))
-			sshRun(client, fmt.Sprintf("cd %s 2>/dev/null && docker compose -f docker-compose.node.yml --env-file .env.node down --timeout 5 2>/dev/null; docker rm -f %s 2>/dev/null; true", deployDir, containerName))
+			sse.event(PhaseStart, "log", "", fmt.Sprintf("启动失败, 第 %d 次重试 (先清理旧容器+旧镜像)...", retry))
+			// 修复: 重试时不仅清理容器, 还要清理可能损坏的半截镜像
+			// 旧版只 docker compose down + docker rm, 残留的 nexus-node-agent:latest 镜像
+			// 可能是上次 build 中途 OOM/网络中断产生的损坏镜像, 导致下次 build 缓存命中错误层
+			sshRun(client, fmt.Sprintf(
+				"cd %s 2>/dev/null && docker compose -f docker-compose.node.yml --env-file .env.node down --timeout 5 2>/dev/null; "+
+					"docker rm -f %s 2>/dev/null; "+
+					"docker rmi -f nexus-node-agent:latest 2>/dev/null; "+
+					"docker builder prune -f 2>/dev/null; true", deployDir, containerName))
 			if !verifyDockerReady(client, sse) {
-				// 修复 P0-REDEPLOY: 旧版这里 `systemctl stop docker` 会杀掉节点上所有容器
-				// (包括第一个节点的容器). 改为只清理 stale PID/sock 文件 + reset-failed
-				// 状态 + restart (live-restore 模式下 restart 不杀容器).
-				// 不再调 createDockerSystemdService — verifyDockerReady 守卫已保证只在
-				// docker 真没就绪时进入这里, 此时 service 文件通常是好的, 重启即可.
 				sse.event(PhaseStart, "log", "", "Docker daemon 已挂, 尝试通过 systemd restart 拉起 (不杀容器)...")
 				sshRun(client, "systemctl reset-failed docker docker.socket containerd 2>/dev/null; "+
 					"rm -f /var/run/docker.pid /run/docker.pid /var/run/docker.sock /run/docker.sock; "+
@@ -1004,7 +1006,8 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 			}
 			time.Sleep(3 * time.Second)
 		}
-		startOut, startErr = sshStream(client, fmt.Sprintf(
+		// 修复: compose up 设置 5 分钟超时, 防止网络问题拉取镜像时永久卡住
+		startOut, startErr = sshStreamWithTimeout(client, fmt.Sprintf(
 			"cd %s && docker compose -f docker-compose.node.yml --env-file .env.node up -d --build 2>&1",
 			deployDir), func(line string) {
 			trimmed := strings.TrimSpace(line)
@@ -1027,14 +1030,29 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 				strings.Contains(trimmed, "Extracting") {
 				sse.event(PhaseStart, "log", "", line)
 			}
-		})
+		}, 5*time.Minute)
 		if startErr == nil {
+			// 修复: compose up 返回成功后验证镜像和容器是否真正存在
+			// docker compose up 在某些场景(如 build 成功但容器创建失败)返回 exit 0
+			// 但实际没有容器在运行
+			imageCheck, _ := sshRun(client, "docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -q 'nexus-node-agent:latest' && echo 'IMAGE_OK' || echo 'IMAGE_MISSING'")
+			if strings.Contains(imageCheck, "IMAGE_MISSING") {
+				sse.event(PhaseStart, "log", "", "compose up 返回成功但镜像不存在, 可能 build 被跳过, 检查容器状态...")
+				startErr = fmt.Errorf("镜像构建失败: nexus-node-agent:latest 不存在")
+				continue
+			}
+			containerCheck, _ := sshRun(client, fmt.Sprintf("docker ps -a --filter name=%s --format '{{.Status}}' 2>/dev/null", containerName))
+			if strings.TrimSpace(containerCheck) == "" {
+				sse.event(PhaseStart, "log", "", "compose up 返回成功但容器未创建, 可能配置错误")
+				startErr = fmt.Errorf("容器未创建: %s 不存在", containerName)
+				continue
+			}
 			break
 		}
 	}
 
 	if startErr != nil {
-		diagOut, _ := sshRun(client, fmt.Sprintf("cd %s 2>/dev/null && docker compose -f docker-compose.node.yml --env-file .env.node config 2>&1 | tail -20; echo '---'; docker ps -a 2>&1 | head -10", deployDir))
+		diagOut, _ := sshRun(client, fmt.Sprintf("cd %s 2>/dev/null && docker compose -f docker-compose.node.yml --env-file .env.node config 2>&1 | tail -20; echo '---'; docker ps -a 2>&1 | head -10; echo '---'; docker images 2>&1 | head -10", deployDir))
 		sse.eventWithCode(PhaseStart, "error", "启动失败(重试2次): "+startErr.Error(), startOut+"\n\n诊断信息:\n"+diagOut, DeployErrStart)
 		return false, DeployErrStart, "启动失败: " + startErr.Error()
 	}
@@ -1170,10 +1188,11 @@ func preDeployCheck(client *ssh.Client, listenPort, healthPort int, sse *sseWrit
 		lines = append(lines, "[警告] 无法检测内存, 跳过此检查")
 		sse.event(PhaseEnvCheck, "warning", "无法检测内存信息, 跳过此检查", memOut)
 	} else {
-		if availMB := parseAvailMB(memOut); availMB >= 0 && availMB < 768 {
-			// 可用内存 <768MB 时自动创建 swap, 防止 Docker 构建时 OOM 杀死 dockerd
+		if availMB := parseAvailMB(memOut); availMB >= 0 && availMB < 1024 {
+			// 可用内存 <1024MB 时自动创建 swap, 防止 Docker 构建时 OOM 杀死 dockerd
 			// 低配 VPS (如 1GB 内存) dockerd + containerd + docker build 易耗尽内存
-			sse.event(PhaseEnvCheck, "warning", fmt.Sprintf("可用内存 %dMB, 低于 768MB 建议值, 尝试自动创建 swap...", availMB), memOut)
+			// 修复: 阈值从 768 提高到 1024, 因为 docker build golang 镜像峰值可达 800MB+
+			sse.event(PhaseEnvCheck, "warning", fmt.Sprintf("可用内存 %dMB, 低于 1024MB 建议值, 尝试自动创建 swap...", availMB), memOut)
 			diskForSwap, _ := sshRun(client, "df -BG / 2>/dev/null | tail -1 || df -h / 2>/dev/null | tail -1 || echo '0G'")
 			if availGB := parseAvailGB(diskForSwap); availGB >= 1 {
 				swapFile := fmt.Sprintf("/swapfile_np_%d", time.Now().UnixNano()%100000)
@@ -1202,9 +1221,9 @@ func preDeployCheck(client *ssh.Client, listenPort, healthPort int, sse *sseWrit
 					memOut2, _ := sshRun(client, "free -m 2>/dev/null | head -2 || cat /proc/meminfo 2>/dev/null | head -3")
 					lines = append(lines, memOut2)
 					availMB2 := parseAvailMB(memOut2)
-					if availMB2 >= 768 {
-						sse.event(PhaseEnvCheck, "done", fmt.Sprintf("内存达标, swap 生效后可用 %dMB >= 768MB", availMB2), memOut2)
-						lines = append(lines, fmt.Sprintf("[通过] swap 生效, 可用内存 %dMB >= 768MB", availMB2))
+					if availMB2 >= 1024 {
+						sse.event(PhaseEnvCheck, "done", fmt.Sprintf("内存达标, swap 生效后可用 %dMB >= 1024MB", availMB2), memOut2)
+						lines = append(lines, fmt.Sprintf("[通过] swap 生效, 可用内存 %dMB >= 1024MB", availMB2))
 					} else {
 						lines = append(lines, fmt.Sprintf("[警告] swap 生效后仍仅 %dMB, 但继续尝试部署", availMB2))
 						sse.event(PhaseEnvCheck, "warning", fmt.Sprintf("内存仍偏低(%dMB), 但继续部署", availMB2), memOut2)
@@ -1217,8 +1236,8 @@ func preDeployCheck(client *ssh.Client, listenPort, healthPort int, sse *sseWrit
 				lines = append(lines, fmt.Sprintf("[警告] 磁盘空间不足(%dGB), 无法创建 swap, 继续尝试部署", availGB))
 				sse.event(PhaseEnvCheck, "warning", fmt.Sprintf("内存仅 %dMB 且磁盘不足无法创建 swap, 继续部署", availMB), diskForSwap)
 			}
-		} else if availMB := parseAvailMB(memOut); availMB >= 768 && availMB < 1024 {
-			// 768-1024MB: 偏低但不阻断, 仅警告 (有 swap 兜底, dockerd 被 OOM kill 后 systemd 自动重启)
+		} else if availMB := parseAvailMB(memOut); availMB >= 1024 && availMB < 1536 {
+			// 1024-1536MB: 偏低但不阻断, 仅警告 (有 swap 兜底, dockerd 被 OOM kill 后 systemd 自动重启)
 			sse.event(PhaseEnvCheck, "warning", fmt.Sprintf("可用内存偏低(%dMB), 有 swap 兜底", availMB), memOut)
 			lines = append(lines, fmt.Sprintf("[警告] 可用内存 %dMB 偏低, 但已有 swap + systemd 自动重启兜底", availMB))
 		} else {
@@ -1305,7 +1324,9 @@ func preDeployCheck(client *ssh.Client, listenPort, healthPort int, sse *sseWrit
 
 // parseAvailGB 从 "df -BG" 输出解析可用空间 GB
 // 格式: Filesystem 1G-blocks Used Available Use% Mounted on
-//        /dev/sda1  50G      20G   30G       40%  /
+//
+//	/dev/sda1  50G      20G   30G       40%  /
+//
 // 不依赖固定列索引, 找倒数第 3 个含 G 后缀的数字 (Available = 倒数第 3 列)
 func parseAvailGB(s string) int {
 	fields := strings.Fields(s)
@@ -2404,6 +2425,13 @@ func sshWriteFile(client *ssh.Client, path, content string) error {
 
 // sshStream 执行命令，实时回调每一行输出
 func sshStream(client *ssh.Client, cmd string, onLine func(string)) (string, error) {
+	return sshStreamWithTimeout(client, cmd, onLine, 10*time.Minute)
+}
+
+// sshStreamWithTimeout 执行命令并实时回调输出, 带超时控制
+// 防止 docker compose up/build 等命令因网络问题或镜像拉取卡住而永久阻塞
+// 超时后发送 SIGKILL 终止远程命令, 返回超时错误
+func sshStreamWithTimeout(client *ssh.Client, cmd string, onLine func(string), timeout time.Duration) (string, error) {
 	session, err := client.NewSession()
 	if err != nil {
 		return "", err
@@ -2433,10 +2461,24 @@ func sshStream(client *ssh.Client, cmd string, onLine func(string)) (string, err
 		close(done)
 	})
 
-	err = session.Wait()
-	pw.Close()
-	<-done
-	return buf.String(), err
+	// 超时控制: session.Wait 在独立 goroutine 等待, 主 select 同时监听超时
+	waitDone := make(chan error, 1)
+	safeGo(func() {
+		waitDone <- session.Wait()
+	})
+
+	select {
+	case err := <-waitDone:
+		pw.Close()
+		<-done
+		return buf.String(), err
+	case <-time.After(timeout):
+		// 超时: 终止远程命令并关闭管道
+		session.Signal(ssh.SIGKILL)
+		pw.Close()
+		<-done
+		return buf.String(), fmt.Errorf("命令执行超时 (%v), 可能因网络问题或资源不足导致卡住", timeout)
+	}
 }
 
 // uploadNodeAgent 打包 node_agent 目录并通过 SSH stdin 传输到远程指定目录
