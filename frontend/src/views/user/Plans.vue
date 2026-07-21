@@ -137,13 +137,13 @@
             <span>¥ {{ currentPlan ? (currentPlan.price_cents / 100).toFixed(2) : '0.00' }}</span>
           </div>
           <div v-if="couponApplied" class="amount-row discount">
-            <span>优惠减免</span>
-            <span>- ¥ {{ discountAmount.toFixed(2) }}</span>
+            <span>优惠码已应用</span>
+            <span class="coupon-applied-text">最终金额以订单为准</span>
           </div>
           <el-divider class="amount-divider" />
           <div class="amount-row total">
             <span>实付金额</span>
-            <span class="total-price">¥ {{ finalAmount.toFixed(2) }}</span>
+            <span class="total-price">¥ {{ currentPlan ? (currentPlan.price_cents / 100).toFixed(2) : '0.00' }}</span>
           </div>
         </div>
       </div>
@@ -214,14 +214,6 @@ interface Plan {
   is_enabled: boolean
 }
 
-// 优惠码验证结果
-interface CouponResult {
-  valid: boolean
-  discount: number
-  type: 'percent' | 'fixed'
-  message?: string
-}
-
 const router = useRouter()
 const loading = ref(false)
 const planList = ref<Plan[]>([])
@@ -249,29 +241,12 @@ const purchaseVisible = ref(false)
 const currentPlan = ref<Plan | null>(null)
 const creating = ref(false)
 
-// 优惠码
-const verifyingCoupon = ref(false)
+// 优惠码验证结果(仅标记有效, 不在前端计算折扣金额, 以后端订单返回为准)
 const couponApplied = ref(false)
-const couponResult = ref<CouponResult | null>(null)
 
 const payForm = reactive({
   paymentMethod: 'epay_alipay',
   couponCode: '',
-})
-
-// 优惠减免金额(基于套餐价格，分→元换算)
-const discountAmount = computed(() => {
-  if (!couponApplied.value || !couponResult.value || !currentPlan.value) return 0
-  const priceYuan = currentPlan.value.price_cents / 100
-  // discount 已是元, 钳制在套餐价格内
-  return Math.min(couponResult.value.discount, priceYuan)
-})
-
-// 实付金额
-const finalAmount = computed(() => {
-  if (!currentPlan.value) return 0
-  const priceYuan = currentPlan.value.price_cents / 100
-  return Math.max(0, +(priceYuan - discountAmount.value).toFixed(2))
 })
 
 // 支付二维码对话框
@@ -295,11 +270,11 @@ const openPurchase = (plan: Plan) => {
   payForm.paymentMethod = 'epay_alipay'
   payForm.couponCode = ''
   couponApplied.value = false
-  couponResult.value = null
   purchaseVisible.value = true
 }
 
-// 验证优惠码
+// 验证优惠码(仅校验有效性, 不显示折扣金额, 避免与后端实际扣减产生竞态)
+const verifyingCoupon = ref(false)
 const verifyCoupon = async () => {
   if (!payForm.couponCode.trim()) {
     ElMessage.warning('请输入优惠码')
@@ -311,14 +286,10 @@ const verifyCoupon = async () => {
       code: payForm.couponCode,
       amount_cents: currentPlan.value ? currentPlan.value.price_cents : 0,
     })
-    // 兼容多种返回结构
     const data = res?.data || res
     if (data && data.valid) {
-      // discount_cents 是分, 转换为元
-      const discountYuan = (data.discount_cents || 0) / 100
-      couponResult.value = { valid: true, discount: discountYuan, type: data.type }
       couponApplied.value = true
-      ElMessage.success(`优惠码已应用，减免 ¥${discountAmount.value.toFixed(2)}`)
+      ElMessage.success('优惠码已应用，最终金额以订单为准')
     } else {
       ElMessage.error(data?.message || '优惠码无效')
     }
@@ -332,7 +303,6 @@ const verifyCoupon = async () => {
 // 取消优惠码
 const removeCoupon = () => {
   couponApplied.value = false
-  couponResult.value = null
   payForm.couponCode = ''
 }
 
@@ -385,7 +355,8 @@ const requestPay = async (orderId: string, orderNo: string) => {
     const payUrl = data?.pay_url || ''
     lastOrderId.value = orderId
     lastOrderNo.value = orderNo
-    lastOrderAmount.value = finalAmount.value
+    // 金额以后端返回为准, 避免前端折扣计算与后端不一致
+    lastOrderAmount.value = data?.amount_cents ? data.amount_cents / 100 : (currentPlan.value ? currentPlan.value.price_cents / 100 : 0)
     lastPayUrl.value = payUrl
     // 生成二维码：优先使用 pay_url，否则用订单号
     await generateQR(payUrl || orderNo)
@@ -714,6 +685,7 @@ onBeforeUnmount(() => {
   padding: 4px 0;
 }
 .amount-row.discount { color: var(--np-primary); }
+.coupon-applied-text { font-size: 12px; color: var(--np-text-secondary); }
 .amount-divider { margin: 8px 0; }
 .amount-row.total {
   font-size: 15px;
