@@ -110,12 +110,22 @@ jobs:
           path: backend/integration-test.log
           retention-days: 7
 
-      # 清理: 删除集成测试可能残留的镜像/容器
+      # 兜底清理: 防止测试中途崩溃导致残留
+      # 三层清理: 已知容器 → 已知镜像 → dangling 镜像 + 构建缓存
       - name: Cleanup docker artifacts
         if: always()
         run: |
-          docker rmi -f nexus-integration-test:latest 2>/dev/null || true
+          echo "=== 清理测试容器 ==="
           docker rm -f nexus-integration-test-helper 2>/dev/null || true
+          echo "=== 清理测试镜像 ==="
+          docker rmi -f nexus-integration-test:latest 2>/dev/null || true
+          echo "=== 清理 dangling 镜像 ==="
+          docker image prune -f 2>/dev/null || true
+          echo "=== 清理构建缓存 ==="
+          docker builder prune -f 2>/dev/null || true
+          echo "=== 最终状态 ==="
+          docker ps -a --format "table {{.Names}}|{{.Status}}" 2>/dev/null || true
+          docker images --format "table {{.Repository}}|{{.Tag}}|{{.Size}}" 2>/dev/null || true
 
   # ============================================================
   # Job 4: 构建验证 (确保 docker compose build 能通过)

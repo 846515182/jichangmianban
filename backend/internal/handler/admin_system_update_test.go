@@ -576,6 +576,15 @@ func TestIntegration_DockerComposeBuild_NonExistentDir(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
+	// 兜底清理: 无论测试成功还是失败, 确保镜像和容器都不残留
+	// defer 按 LIFO 顺序执行, 这个 defer 在 os.RemoveAll 之后注册, 先执行
+	defer func() {
+		_ = exec.Command("docker", "rmi", "-f", "nexus-integration-test:latest").Run()
+		_ = exec.Command("docker", "rm", "-f", "nexus-integration-test-helper").Run()
+		// 清理 docker compose build 可能产生的中间层 dangling 镜像
+		_ = exec.Command("docker", "image", "prune", "-f").Run()
+	}()
+
 	t.Logf("temp project dir: %s", tmpDir)
 
 	// 写入最小 docker-compose.yml
@@ -653,14 +662,6 @@ RUN echo "integration-test-build" > /build-marker
 	}
 	t.Logf("step 3b PASS: image content verified: %s", strings.TrimSpace(string(markerOutput)))
 
-	// ---- 步骤 4: 清理 ----
-	t.Log("step 4: cleaning up docker image")
-	if err := exec.Command("docker", "rmi", "-f", "nexus-integration-test:latest").Run(); err != nil {
-		t.Logf("warning: failed to remove test image: %v", err)
-	} else {
-		t.Log("step 4 PASS: test image removed")
-	}
-
 	// 最终验证: 路径决策矩阵
 	//   docker compose build → 用 gitRoot(容器内路径)  ✓
 	//   docker compose build → 用 hostGitRoot(宿主机路径) ✗ (chdir 失败)
@@ -669,6 +670,7 @@ RUN echo "integration-test-build" > /build-marker
 	t.Log("  docker compose build with gitRoot (exists)     → SUCCESS")
 	t.Log("  docker compose build with hostGitRoot (absent)  → FAILURE (chdir)")
 	t.Log("  conclusion: docker compose build MUST use gitRoot, not hostGitRoot")
+	// 清理由 defer 自动完成, 包括镜像、容器、dangling 镜像和临时目录
 }
 
 // TestIntegration_HelperContainer_Simulated
@@ -688,6 +690,13 @@ func TestIntegration_HelperContainer_Simulated(t *testing.T) {
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("docker not available, skipping integration test")
 	}
+
+	// 兜底清理: 无论测试成功还是失败, 确保 helper 容器不残留
+	// 即使 helper 容器自清理失败(如 docker rm 在容器内执行失败),
+	// 这个 defer 在宿主机上执行清理, 保证 CI 环境干净
+	defer func() {
+		_ = exec.Command("docker", "rm", "-f", "nexus-integration-test-helper").Run()
+	}()
 
 	// 模拟 hostGitRoot（宿主机路径）
 	hostGitRoot := "/opt/nexus-panel"
@@ -767,8 +776,7 @@ func TestIntegration_HelperContainer_Simulated(t *testing.T) {
 		"name=nexus-integration-test-helper", "--format", "{{.Names}}")
 	checkOut, _ := checkCmd.CombinedOutput()
 	if strings.TrimSpace(string(checkOut)) != "" {
-		t.Logf("  warning: helper container still exists: %s", string(checkOut))
-		_ = exec.Command("docker", "rm", "-f", "nexus-integration-test-helper").Run()
+		t.Logf("  warning: helper container self-cleanup failed, defer will clean up")
 	} else {
 		t.Log("  PASS: helper container self-cleaned up")
 	}
