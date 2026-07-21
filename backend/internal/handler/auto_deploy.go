@@ -606,6 +606,28 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	pullOut, _ := sshRun(client, "docker pull alpine:3.19 2>&1 | tail -5")
 	sse.event(PhaseInstallDocker, "log", "", pullOut)
 
+	// 检查 pull 结果: 如果连不上 daemon, 说明 dockerd 刚启动即崩溃,
+	// 此时 Phase 7 也必然失败, 不能"继续部署"
+	if strings.Contains(pullOut, "Cannot connect") {
+		sse.event(PhaseInstallDocker, "log", "", "Docker daemon 刚启动即崩溃, 尝试修复...")
+		// 重新检查并启动 dockerd (含 systemd 停服 + containerd 等待)
+		if !verifyDockerReady(client, sse) {
+			sse.eventWithCode(PhaseInstallDocker, "error",
+				"Docker daemon 就绪失败(安装后反复崩溃)",
+				"", DeployErrDockerNotInstalled)
+			return false, DeployErrDockerNotInstalled, "Docker daemon 反复崩溃"
+		}
+		// 重试拉取
+		pullOut, _ = sshRun(client, "docker pull alpine:3.19 2>&1 | tail -5")
+		sse.event(PhaseInstallDocker, "log", "", pullOut)
+		if strings.Contains(pullOut, "Cannot connect") {
+			sse.eventWithCode(PhaseInstallDocker, "error",
+				"Docker daemon 修复后仍无法使用",
+				"", DeployErrDockerNotInstalled)
+			return false, DeployErrDockerNotInstalled, "Docker daemon 修复后仍无法使用"
+		}
+	}
+
 	sse.event(PhaseInstallDocker, "done", "Docker 已就绪", "")
 
 	// ============================================================
