@@ -20,33 +20,35 @@ SET TIME ZONE 'UTC';
 -- 1. 类型转换 + 数据迁移
 --    USING 子句把 SMALLINT 值映射为字符串
 -- ============================================================
-ALTER TABLE admins
-    ALTER COLUMN status TYPE VARCHAR(16)
-    USING CASE
-        WHEN status = 1 THEN 'active'
-        WHEN status = 0 THEN 'disabled'
-        ELSE 'active'
-    END;
+-- 修复 P0-MIGRATION-005: GORM AutoMigrate 先于 SQL 迁移执行,
+-- 用最新 model 创建 admins 表时 status 已经是 VARCHAR(model 中是 string)。
+-- 旧版无条件执行 ALTER TYPE ... USING CASE WHEN status = 1 会报
+-- "operator does not exist: character varying = integer"(VARCHAR 列不能和
+-- integer 1 比较)。用 DO 块 + information_schema 检查列类型,
+-- 只在 status 还是 smallint 时执行类型转换, 已是 VARCHAR 则跳过。
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'admins' AND column_name = 'status' AND data_type = 'smallint'
+    ) THEN
+        ALTER TABLE admins
+            ALTER COLUMN status TYPE VARCHAR(16)
+            USING CASE
+                WHEN status = 1 THEN 'active'
+                WHEN status = 0 THEN 'disabled'
+                ELSE 'active'
+            END;
 
--- ============================================================
--- 2. 修正默认值
---    ALTER TYPE 后 PostgreSQL 会尝试保留旧默认值 (1),
---    1 强转为 VARCHAR 会得到 '1', 不是 'active', 必须显式重置
--- ============================================================
-ALTER TABLE admins ALTER COLUMN status SET DEFAULT 'active';
+        -- 修正默认值: ALTER TYPE 后旧默认值(1)强转为 VARCHAR 得 '1', 需显式重置
+        ALTER TABLE admins ALTER COLUMN status SET DEFAULT 'active';
+        ALTER TABLE admins ALTER COLUMN status SET NOT NULL;
 
--- ============================================================
--- 3. 确认 NOT NULL 约束保留
--- ============================================================
-ALTER TABLE admins ALTER COLUMN status SET NOT NULL;
-
--- ============================================================
--- 4. 索引重建
---    001_init.sql 中有 idx_admins_status, 类型变更后需重建
---    使用 IF NOT EXISTS 避免重复创建
--- ============================================================
-DROP INDEX IF EXISTS idx_admins_status;
-CREATE INDEX idx_admins_status ON admins (status) WHERE is_deleted = FALSE;
+        -- 索引重建: 001_init.sql 中 idx_admins_status 因类型变更失效
+        DROP INDEX IF EXISTS idx_admins_status;
+        CREATE INDEX idx_admins_status ON admins (status) WHERE is_deleted = FALSE;
+    END IF;
+END $$;
 
 -- ============================================================
 -- 验证: 查看转换后的数据分布

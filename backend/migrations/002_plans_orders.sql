@@ -113,16 +113,23 @@ ON CONFLICT (key) DO NOTHING;
 --    VIP版(200GB/30天/¥39.9/等级3)
 --    价格单位: 分  流量单位: 字节
 -- ============================================================
-INSERT INTO plans (name, description, traffic_limit, duration_days, price_cents, original_price_cents, node_level, device_limit, sort_order, is_enabled)
-SELECT '基础版', '10GB 流量 / 30 天 / 基础节点', 10737418240, 30, 990, 1290, 1, 3, 1, TRUE
+-- 修复 P0-MIGRATION-002: GORM AutoMigrate 先于 SQL 迁移执行,
+-- 用最新 model 创建 plans 表时无 node_level 列(model 已删除该字段)。
+-- 旧版 INSERT 显式列出 node_level 列会报 "column node_level of relation
+-- plans does not exist"。从 INSERT 中移除 node_level 引用:
+--   - 全新库(GORM 创建, 无 node_level): OK
+--   - 历史库(002 创建, 有 node_level): INSERT 不赋值 → DEFAULT 1,
+--     后续 2026_07_16 迁移会删除该列, 不影响最终状态
+INSERT INTO plans (name, description, traffic_limit, duration_days, price_cents, original_price_cents, device_limit, sort_order, is_enabled)
+SELECT '基础版', '10GB 流量 / 30 天 / 基础节点', 10737418240, 30, 990, 1290, 3, 1, TRUE
 WHERE NOT EXISTS (SELECT 1 FROM plans WHERE name = '基础版' AND is_deleted = FALSE);
 
-INSERT INTO plans (name, description, traffic_limit, duration_days, price_cents, original_price_cents, node_level, device_limit, sort_order, is_enabled)
-SELECT '标准版', '50GB 流量 / 30 天 / 标准节点', 53687091200, 30, 1990, 2590, 2, 5, 2, TRUE
+INSERT INTO plans (name, description, traffic_limit, duration_days, price_cents, original_price_cents, device_limit, sort_order, is_enabled)
+SELECT '标准版', '50GB 流量 / 30 天 / 标准节点', 53687091200, 30, 1990, 2590, 5, 2, TRUE
 WHERE NOT EXISTS (SELECT 1 FROM plans WHERE name = '标准版' AND is_deleted = FALSE);
 
-INSERT INTO plans (name, description, traffic_limit, duration_days, price_cents, original_price_cents, node_level, device_limit, sort_order, is_enabled)
-SELECT 'VIP版', '200GB 流量 / 30 天 / VIP 节点', 214748364800, 30, 3990, 5990, 3, 10, 3, TRUE
+INSERT INTO plans (name, description, traffic_limit, duration_days, price_cents, original_price_cents, device_limit, sort_order, is_enabled)
+SELECT 'VIP版', '200GB 流量 / 30 天 / VIP 节点', 214748364800, 30, 3990, 5990, 10, 3, TRUE
 WHERE NOT EXISTS (SELECT 1 FROM plans WHERE name = 'VIP版' AND is_deleted = FALSE);
 
 -- ============================================================

@@ -35,14 +35,27 @@ CREATE INDEX IF NOT EXISTS idx_npb_node ON node_plan_bindings (node_id);
 --    映射规则: 节点 level=N → 绑定 sort_order >= N 的全部启用套餐
 --    (sort_order 1=基础, 2=标准, 3=VIP，与 node_level 语义对齐)
 -- ============================================================
-INSERT INTO node_plan_bindings (node_id, plan_id)
-SELECT n.id, p.id
-FROM nodes n
-JOIN plans p ON p.is_deleted = FALSE AND p.sort_order >= n.node_level
-WHERE n.is_deleted = FALSE
-  AND NOT EXISTS (
-    SELECT 1 FROM node_plan_bindings b WHERE b.node_id = n.id AND b.plan_id = p.id
-  );
+-- 修复 P0-MIGRATION-003: GORM AutoMigrate 先于 SQL 迁移执行,
+-- 用最新 model 创建 nodes 表时无 node_level 列(model 已删除该字段)。
+-- 旧版直接引用 n.node_level 会报 "column n.node_level does not exist"。
+-- 用 DO 块 + information_schema 检查列是否存在, 不存在则跳过数据迁移
+-- (全新库无历史 node_level 数据需要迁移, 跳过是正确的)。
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'nodes' AND column_name = 'node_level'
+    ) THEN
+        INSERT INTO node_plan_bindings (node_id, plan_id)
+        SELECT n.id, p.id
+        FROM nodes n
+        JOIN plans p ON p.is_deleted = FALSE AND p.sort_order >= n.node_level
+        WHERE n.is_deleted = FALSE
+          AND NOT EXISTS (
+            SELECT 1 FROM node_plan_bindings b WHERE b.node_id = n.id AND b.plan_id = p.id
+          );
+    END IF;
+END $$;
 
 -- ============================================================
 -- 结束: 003_node_plan_bindings.sql
