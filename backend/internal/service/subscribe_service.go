@@ -1,10 +1,7 @@
 package service
 
 import (
-	"context"
-	"crypto/rand"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,22 +38,16 @@ func NewSubscribeService(s *repo.SubscriptionRepo, n *repo.NodeRepo, u *repo.Use
 }
 
 // GenerateSignedURL 为用户生成带签名的订阅链接(有效期由配置决定)
-// 修复 P0-17: 签名加入 nonce 防重放, Redis 记录已用 nonce 阻断重复使用
+// 修复 P0-NONCE: 移除 nonce 防重放 — Clash/V2RayN 等客户端会缓存订阅 URL 并定期自动更新,
+// nonce 防重放导致第二次更新被拒绝(ErrSubSigExpired), 用户看到节点不更新/新节点不出现。
+// 订阅链接的 TTL 过期机制已足够防止长期重放(默认 24h), 无需 nonce。
 func (s *SubscribeService) GenerateSignedURL(userID, baseURL, clientIP string) (string, error) {
 	sub, err := s.subRepo.GetByUserID(userID)
 	if err != nil {
 		return "", err
 	}
 	hmacMgr := security.NewHMACManager(app.Get().Cfg.HMACSubSecret)
-	_, exp := hmacMgr.SignWithTTL(sub.SubToken, userID, app.Get().Cfg.SubSigTTL)
-	// 修复 P0-17: 生成随机 nonce 并嵌入签名, 防止链接在 TTL 窗口内被重复使用
-	nonceBytes := make([]byte, 8)
-	if _, err := rand.Read(nonceBytes); err != nil {
-		return "", err
-	}
-	nonce := hex.EncodeToString(nonceBytes)
-	sigWithNonce := hmacMgr.SignWithNonce(sub.SubToken, userID, exp, nonce)
-	sigStr := hmacMgr.BuildSigStrWithNonce(exp, nonce, sigWithNonce)
+	sigStr, _ := hmacMgr.SignWithTTL(sub.SubToken, userID, app.Get().Cfg.SubSigTTL)
 
 	u, err := url.Parse(strings.TrimRight(baseURL, "/") + "/api/v1/subscribe")
 	if err != nil {
@@ -80,7 +71,10 @@ type FetchResult struct {
 
 // Fetch 获取订阅内容
 // subType 为空时按 User-Agent 识别客户端
-// sig 格式: exp.signature (旧) 或 exp.nonce.signature (新, P0-17 防重放)
+// sig 格式: exp.signature
+// 修复 P0-NONCE: 移除 nonce 防重放验证 — 允许同一签名在 TTL 窗口内多次使用,
+// 解决 Clash/V2RayN 等客户端自动更新订阅时第二次请求被拒绝的问题。
+// TTL 过期机制(默认 24h)已足够防止长期重放。
 func (s *SubscribeService) Fetch(userID, subType, sig, userAgent, clientIP string) (*FetchResult, error) {
 	// 1. 校验签名（仅校验时间有效期，不绑定 IP）
 	sub, err := s.subRepo.GetByUserID(userID)
@@ -90,29 +84,6 @@ func (s *SubscribeService) Fetch(userID, subType, sig, userAgent, clientIP strin
 	hmacMgr := security.NewHMACManager(app.Get().Cfg.HMACSubSecret)
 	if err := hmacMgr.VerifySigStr(sub.SubToken, userID, sig); err != nil {
 		return nil, ErrSubSigExpired
-	}
-	// 修复 P0-17: nonce 防重放 - 同一签名只允许使用一次
-	// 提取 nonce, 若存在则在 Redis 中标记已用(过期时间与签名 TTL 一致)
-	// 修复 P0-X1: Redis 不可用时改为 fail-closed, 拒绝而非放行
-	// (放行会让 nonce 防重放完全失效, 签名被截获后可无限重放)
-	nonce := hmacMgr.ExtractNonce(sig)
-	if nonce != "" {
-		rdb := app.Get().RDB
-		if rdb == nil {
-			// Redis 不可用时 fail-closed, 拒绝而非放行
-			return nil, errors.New("订阅服务暂不可用(Redis 不可用)")
-		}
-		ctx := context.Background()
-		key := "subnonce:" + nonce
-		ok, err := rdb.SetNX(ctx, key, "1", app.Get().Cfg.SubSigTTL).Result()
-		if err != nil {
-			// Redis 操作异常也 fail-closed
-			return nil, errors.New("订阅服务暂不可用(Redis 异常)")
-		}
-		if !ok {
-			// nonce 已被使用, 拒绝重放
-			return nil, ErrSubSigExpired
-		}
 	}
 
 	// 2. 校验用户状态: 账号禁用 / 已到期 / 流量耗尽时返回空订阅(避免客户端报错)
@@ -359,7 +330,7 @@ func (s *SubscribeService) generateSingBoxJSON(nodes []model.Node, userID string
 	})
 
 	doc := map[string]interface{}{
-		"log": map[string]interface{}{"level": "info"},
+		"log":       map[string]interface{}{"level": "info"},
 		"outbounds": outbounds,
 		"route": map[string]interface{}{
 			"rules": []map[string]interface{}{
@@ -404,7 +375,7 @@ func buildSingBoxOutbound(n model.Node, c *nodeConfig) map[string]interface{} {
 					shortID = sid
 				}
 				tls["reality"] = map[string]interface{}{
-					"enabled":   true,
+					"enabled":    true,
 					"public_key": pk,
 					"short_id":   shortID,
 				}
@@ -471,9 +442,9 @@ func buildV2RayURI(n model.Node, c *nodeConfig) string {
 	case "vmess":
 		// vmess://base64(json)
 		obj := map[string]interface{}{
-			"v":   "2",
-			"ps":  n.Name,
-			"add": c.ServerAddress,
+			"v":    "2",
+			"ps":   n.Name,
+			"add":  c.ServerAddress,
 			"port": c.Port,
 			"id":   c.UUID,
 			"aid":  c.AlterID,

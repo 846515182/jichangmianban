@@ -48,7 +48,7 @@
             <div class="card-title">订阅链接</div>
             <el-radio-group v-model="format" @change="updateUrl" size="small">
               <el-radio-button value="clash">Clash</el-radio-button>
-              <el-radio-button value="singbox">Sing-Box</el-radio-button>
+              <el-radio-button value="sing-box">Sing-Box</el-radio-button>
               <el-radio-button value="v2ray">V2Ray</el-radio-button>
             </el-radio-group>
           </div>
@@ -376,7 +376,7 @@ const buildNodeShareUrl = (n: NodeItem): string => {
       v: '2', ps: n.name, add: n.server_address, port: n.port,
       id: c.uuid, aid: 0, scy: c.method || 'auto', net: 'tcp',
     }
-    return `vmess://${btoa(JSON.stringify(obj))}`
+    return `vmess://${btoa(unescape(encodeURIComponent(JSON.stringify(obj))))}`
   }
   if (proto === 'trojan') {
     return `trojan://${c.password}@${n.server_address}:${n.port}?sni=${c.sni || ''}#${encodeURIComponent(n.name)}`
