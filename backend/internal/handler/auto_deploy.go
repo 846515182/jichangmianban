@@ -1580,12 +1580,16 @@ func verifyDockerReady(client *ssh.Client, sse *sseWriter) bool {
 	}
 
 	// 轮询 docker info, 最多 6 次(每次 5s = 30s, 覆盖低配 VPS 场景)
+	// 修复: 此前用 head -3 截断 "Cannot connect to Docker daemon" — docker info 在
+	// daemon 不可用时先输出 Client 段(3-6 行)才输出 "Cannot connect",
+	// head -3 恰好在错误信息之前截断, 误判为"其他错误"反复杀进程, 而非走等待重试。
+	// 改为 grep 精准匹配: 只取 "Server:" 或 "Cannot connect" 行, 不受行数截断影响。
 	for i := 0; i < 6; i++ {
-		out, _ := sshRun(client, "timeout 5 docker info 2>&1 | head -3")
-		if strings.Contains(out, "Server Version") || strings.Contains(out, "Containers") {
+		out, _ := sshRun(client, "timeout 5 docker info 2>&1 | grep -E '^(Server:|Cannot connect)' | head -1")
+		if strings.HasPrefix(strings.TrimSpace(out), "Server:") {
 			return true
 		}
-		if strings.Contains(out, "Cannot connect") || strings.Contains(out, "deadline") || out == "" {
+		if strings.Contains(out, "Cannot connect") || out == "" {
 			elapsed := (i + 1) * 5
 			sse.event(PhasePrepare, "log", "", fmt.Sprintf("等待 Docker daemon 就绪... (%ds/%ds)", elapsed, 30))
 			time.Sleep(5 * time.Second)
