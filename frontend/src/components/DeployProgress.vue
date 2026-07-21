@@ -1,5 +1,5 @@
 <template>
-  <el-dialog v-model="visible" title="一键自动部署" width="auto" top="5vh" class="deploy-progress-dialog" :close-on-click-modal="false" :show-close="!running">
+  <el-dialog v-model="visible" title="一键自动部署" :width="dialogWidth" top="5vh" class="deploy-progress-dialog" :close-on-click-modal="false" :show-close="!running">
     <div class="dp-container">
       <!-- 未开始：认证方式选择 -->
       <div v-if="!started" class="dp-pwd-bar">
@@ -8,28 +8,28 @@
         </el-alert>
 
         <!-- 认证方式切换 -->
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
-          <span style="font-size:13px;color:#606266">认证方式:</span>
+        <div class="dp-auth-row">
+          <span class="dp-auth-label">认证方式:</span>
           <el-radio-group v-model="authMode" size="small">
             <el-radio-button value="password">密码</el-radio-button>
             <el-radio-button value="key">SSH 密钥</el-radio-button>
           </el-radio-group>
-          <el-input v-model="username" placeholder="用户" style="width:90px" />
-          <el-input-number v-model="port" :min="1" :max="65535" controls-position="right" style="width:110px" />
+          <el-input v-model="username" placeholder="用户" class="dp-input-user" />
+          <el-input-number v-model="port" :min="1" :max="65535" controls-position="right" class="dp-input-port" />
           <el-button type="primary" :disabled="!canStart" @click="start">
             <el-icon><VideoPlay /></el-icon> 开始部署
           </el-button>
         </div>
 
         <!-- 密码模式 -->
-        <div v-if="authMode === 'password'" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-          <el-input v-model="password" type="password" show-password placeholder="节点服务器密码" style="width:260px" @keyup.enter="start" autocomplete="new-password" name="deploy-pwd" />
-          <span style="font-size:12px;color:#909399">输入 root 或其他 sudo 用户的密码</span>
+        <div v-if="authMode === 'password'" class="dp-pwd-row">
+          <el-input v-model="password" type="password" show-password placeholder="节点服务器密码" class="dp-input-pwd" @keyup.enter="start" autocomplete="new-password" name="deploy-pwd" />
+          <span class="dp-pwd-hint">输入 root 或其他 sudo 用户的密码</span>
         </div>
 
         <!-- SSH 密钥模式 -->
-        <div v-if="authMode === 'key'" style="display:flex;flex-direction:column;gap:8px">
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <div v-if="authMode === 'key'" class="dp-key-col">
+          <div class="dp-key-row">
             <el-upload
               :auto-upload="false"
               :show-file-list="false"
@@ -39,7 +39,7 @@
             >
               <el-button size="small" type="primary" plain>选择私钥文件</el-button>
             </el-upload>
-            <span style="font-size:12px;color:#909399">或直接粘贴私钥内容</span>
+            <span class="dp-pwd-hint">或直接粘贴私钥内容</span>
             <el-button size="small" link type="primary" @click="showKeyHelp = !showKeyHelp">
               {{ showKeyHelp ? '收起' : '如何获取私钥?' }}
             </el-button>
@@ -49,7 +49,7 @@
             type="textarea"
             :rows="5"
             placeholder="粘贴 SSH 私钥内容 (PEM 格式)&#10;-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"
-            style="font-family:monospace;font-size:12px"
+            class="dp-key-textarea"
           />
           <el-alert v-if="showKeyHelp" type="info" :closable="false" style="margin-top:4px">
             <template #title>
@@ -64,44 +64,59 @@
         </div>
       </div>
 
-      <!-- 进行中/完成：6 步进度展示 -->
+      <!-- 进行中/完成：8 步进度展示 -->
       <div v-else class="dp-progress">
-        <!-- 6 步进度条 -->
-        <div class="dp-steps-bar">
-          <div
-            v-for="(step, i) in phaseSteps"
-            :key="step.key"
-            class="dp-step-bar"
-            :class="getStepBarClass(step.key)"
-          >
-            <div class="dp-step-num">{{ i + 1 }}</div>
-            <div class="dp-step-name">{{ step.name }}</div>
-          </div>
+        <!-- 8 步进度条 (已到达的步骤才显示, 配合 Transition 淡入) -->
+        <div class="dp-steps-bar" :class="{ 'dp-steps-vertical': isMobile }">
+          <TransitionGroup name="dp-step">
+            <div
+              v-for="step in visibleSteps"
+              :key="step.key"
+              class="dp-step-bar"
+              :class="getStepBarClass(step.key)"
+            >
+              <div class="dp-step-num">{{ step.index + 1 }}</div>
+              <div class="dp-step-name">{{ step.name }}</div>
+            </div>
+          </TransitionGroup>
         </div>
 
-        <!-- 详细事件流 -->
-        <div ref="eventsRef" class="dp-events">
-          <div v-for="(ev, i) in events" :key="i" class="dp-event" :class="ev.status">
-            <div class="dp-ev-head">
-              <span class="dp-ev-icon">
-                <span v-if="ev.status === 'running'" class="dp-spin">⟳</span>
-                <span v-else-if="ev.status === 'done'">✓</span>
-                <span v-else-if="ev.status === 'error'">✗</span>
-                <span v-else-if="ev.status === 'warning'">⚠</span>
-                <span v-else-if="ev.status === 'log'">›</span>
-                <span v-else>·</span>
-              </span>
-              <span class="dp-ev-step">{{ stepName(ev.step) }}</span>
-              <el-tag v-if="ev.status === 'done'" size="small" type="success">完成</el-tag>
-              <el-tag v-else-if="ev.status === 'error'" size="small" type="danger">失败</el-tag>
-              <el-tag v-else-if="ev.status === 'running'" size="small" type="warning">进行中</el-tag>
-              <el-tag v-else-if="ev.status === 'warning'" size="small" type="warning" effect="dark">警告</el-tag>
-              <el-tag v-else-if="ev.status === 'log'" size="small" type="info" effect="plain">日志</el-tag>
+        <!-- 详细事件流 (渐进式渲染, 智能滚动) -->
+        <div
+          ref="eventsRef"
+          class="dp-events"
+          @scroll="onEventsScroll"
+        >
+          <TransitionGroup name="dp-ev" tag="div">
+            <div v-for="(ev, i) in displayedEvents" :key="(ev as any)._id || i" class="dp-event" :class="ev.status">
+              <div class="dp-ev-head">
+                <span class="dp-ev-icon">
+                  <span v-if="ev.status === 'running'" class="dp-spin">⟳</span>
+                  <span v-else-if="ev.status === 'done'">✓</span>
+                  <span v-else-if="ev.status === 'error'">✗</span>
+                  <span v-else-if="ev.status === 'warning'">⚠</span>
+                  <span v-else-if="ev.status === 'log'">›</span>
+                  <span v-else>·</span>
+                </span>
+                <span class="dp-ev-step">{{ stepName(ev.step) }}</span>
+                <el-tag v-if="ev.status === 'done'" size="small" type="success">完成</el-tag>
+                <el-tag v-else-if="ev.status === 'error'" size="small" type="danger">失败</el-tag>
+                <el-tag v-else-if="ev.status === 'running'" size="small" type="warning">进行中</el-tag>
+                <el-tag v-else-if="ev.status === 'warning'" size="small" type="warning" effect="dark">警告</el-tag>
+                <el-tag v-else-if="ev.status === 'log'" size="small" type="info" effect="plain">日志</el-tag>
+              </div>
+              <div v-if="ev.msg" class="dp-ev-msg">{{ ev.msg }}</div>
+              <pre v-if="ev.output" class="dp-ev-output">{{ ev.output }}</pre>
             </div>
-            <div v-if="ev.msg" class="dp-ev-msg">{{ ev.msg }}</div>
-            <pre v-if="ev.output" class="dp-ev-output">{{ ev.output }}</pre>
-          </div>
+          </TransitionGroup>
         </div>
+
+        <!-- 滚动到底部提示 (用户向上滚查看历史时显示) -->
+        <Transition name="dp-fade">
+          <div v-if="userScrolledUp && running" class="dp-scroll-hint" @click="scrollToBottom(true)">
+            ↓ 新日志到达, 点击回到最新
+          </div>
+        </Transition>
 
         <div v-if="running" class="dp-loading">
           <el-icon class="is-loading"><Loading /></el-icon>
@@ -116,12 +131,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, computed, nextTick } from 'vue'
+import { ref, watch, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import { ElIcon, ElMessage } from 'element-plus'
 import { VideoPlay, Loading } from '@element-plus/icons-vue'
 import type { UploadFile } from 'element-plus'
 import request from '@/utils/request'
 import { useAuthStore } from '@/stores/auth'
+
+interface Ev { step: string; status: string; msg: string; output: string; errCode?: string; _id?: number }
 
 const props = defineProps<{
   modelValue: boolean
@@ -135,6 +152,15 @@ const emit = defineEmits<{ (e: 'update:modelValue', v: boolean): void; (e: 'done
 const visible = ref(props.modelValue)
 watch(() => props.modelValue, (v) => { visible.value = v; resetIfClosed(v) })
 watch(visible, (v) => emit('update:modelValue', v))
+
+// 响应式断点: 监听 resize, 横竖屏切换时更新
+const isMobile = ref(typeof window !== 'undefined' && window.innerWidth < 768)
+const onResize = () => { isMobile.value = window.innerWidth < 768 }
+onMounted(() => window.addEventListener('resize', onResize))
+onUnmounted(() => window.removeEventListener('resize', onResize))
+
+// 对话框宽度: PC 固定 720px, 手机 95vw
+const dialogWidth = computed(() => (isMobile.value ? '95%' : '720px'))
 
 // 认证模式: password | key
 const authMode = ref<'password' | 'key'>('password')
@@ -166,17 +192,30 @@ const onKeyFileChange = (file: UploadFile) => {
 }
 const running = ref(false)
 const finished = ref(false)
-const events = ref<Array<{step: string; status: string; msg: string; output: string; errCode?: string}>>([])
+const events = ref<Ev[]>([])
+const displayedEvents = ref<Ev[]>([])
 const eventsRef = ref<HTMLElement | null>(null)
 
-// 事件流自动滚到底，用户不用手动滑
-const scrollToBottom = async () => {
+// 智能滚动: 用户向上滚查看历史时, 不强制拉回底部
+const userScrolledUp = ref(false)
+let revealTimer: ReturnType<typeof setInterval> | null = null
+let eventIdCounter = 0
+
+const onEventsScroll = () => {
+  if (!eventsRef.value) return
+  const { scrollTop, scrollHeight, clientHeight } = eventsRef.value
+  // 距离底部 > 50px 视为"用户在查看历史"
+  userScrolledUp.value = scrollHeight - scrollTop - clientHeight > 50
+}
+
+const scrollToBottom = async (force = false) => {
+  if (!force && userScrolledUp.value) return  // 不打断用户查看历史
   await nextTick()
   if (eventsRef.value) {
     eventsRef.value.scrollTop = eventsRef.value.scrollHeight
+    userScrolledUp.value = false
   }
 }
-watch(events, scrollToBottom, { deep: true })
 
 // 8 步阶段定义 (每步仅做一件事)
 const phaseSteps = [
@@ -190,8 +229,15 @@ const phaseSteps = [
   { key: 'verify', name: '验证完成' },
 ]
 
-// 当前活跃的阶段 (用于进度条高亮)
+// 当前活跃的阶段 (用于进度条高亮 + "已到达才显示"判断)
 const activePhase = ref<string>('')
+
+// 只渲染已到达的步骤 (currentIdx >= thisIdx), 配合 TransitionGroup 淡入
+const visibleSteps = computed(() => {
+  const currentIdx = phaseSteps.findIndex(s => s.key === activePhase.value)
+  if (currentIdx < 0) return []
+  return phaseSteps.slice(0, currentIdx + 1).map((s, i) => ({ ...s, index: i }))
+})
 
 // 步骤名称映射 (兼容旧名 + 新名)
 const stepNames: Record<string, string> = {
@@ -218,6 +264,20 @@ const stepNames: Record<string, string> = {
 }
 const stepName = (s: string) => stepNames[s] || s
 
+// step → phase 映射 (旧 step 名 → 新 phase 名, 用于推进 activePhase)
+const stepToPhase: Record<string, string> = {
+  connect: 'connect_server',
+  preflight: 'env_check',
+  prepare: 'prepare_files',
+  cleanup: 'prepare_files',
+  mkdir: 'prepare_files',
+  upload: 'prepare_files',
+  env: 'prepare_files',
+  docker: 'install_docker',
+  transfer: 'build',
+  healthcheck: 'verify',
+}
+
 // 根据 phase 顺序确定步骤条状态
 const getStepBarClass = (key: string) => {
   const currentIdx = phaseSteps.findIndex(s => s.key === activePhase.value)
@@ -237,11 +297,14 @@ const resetIfClosed = (v: boolean) => {
       running.value = false
       finished.value = false
       events.value = []
+      displayedEvents.value = []
       activePhase.value = ''
+      userScrolledUp.value = false
       // 安全: 关闭弹窗时清除密码/密钥, 避免缓存残留导致下次部署用错凭证
       password.value = ''
       privateKey.value = ''
       showKeyHelp.value = false
+      stopReveal()
     }, 300)
   }
 }
@@ -253,6 +316,49 @@ watch(visible, (v) => {
     start()
   }
 })
+
+// 渐进式渲染: 每 60ms push 一条事件到 displayedEvents, 避免"刷"地一下全蹦出来
+const startReveal = () => {
+  stopReveal()
+  let idx = 0
+  revealTimer = setInterval(() => {
+    if (idx < events.value.length) {
+      displayedEvents.value.push(events.value[idx])
+      idx++
+      scrollToBottom()
+    } else {
+      // 当前已无积压, 检查是否已结束
+      if (!running.value) {
+        // 结束后保持原节奏推完剩余 (不再一次性 dump, 避免最后一批"刷"地蹦出)
+        if (idx >= events.value.length) {
+          stopReveal()
+        }
+      }
+    }
+  }, 60)
+}
+
+const stopReveal = () => {
+  if (revealTimer) {
+    clearInterval(revealTimer)
+    revealTimer = null
+  }
+}
+
+const addEvent = (ev: Ev) => {
+  ev._id = ++eventIdCounter
+  events.value.push(ev)
+  // 推进 activePhase (兼容旧 step 名)
+  if (ev.step) {
+    let phase = ''
+    if (phaseSteps.some(s => s.key === ev.step)) {
+      phase = ev.step
+    } else if (stepToPhase[ev.step]) {
+      phase = stepToPhase[ev.step]
+    }
+    if (phase) activePhase.value = phase
+  }
+}
 
 // 检查节点实际在线状态（SSE断开时调用）
 const checkNodeStatus = async (): Promise<boolean> => {
@@ -269,14 +375,17 @@ const checkNodeStatus = async (): Promise<boolean> => {
 
 // SSE 断开后轮询节点状态，最多等待 180 秒(后端部署不因断开终止，仍会完成)
 const waitForNodeOnline = async () => {
-  events.value.push({ step: 'verify', status: 'running', msg: '连接断开，但部署仍在后台继续执行，正在检查节点实际状态...', output: '' })
+  addEvent({ step: 'verify', status: 'running', msg: '连接断开，但部署仍在后台继续执行，正在检查节点实际状态...', output: '' })
   for (let i = 0; i < 36; i++) {
     await new Promise(r => setTimeout(r, 5000))
     const online = await checkNodeStatus()
     if (online) {
-      events.value[events.value.length - 1].status = 'done'
-      events.value[events.value.length - 1].msg = '节点已在线，部署成功！'
-      events.value.push({ step: 'finish', status: 'done', msg: '一键部署完成！请返回节点列表查看在线状态', output: '' })
+      const last = events.value[events.value.length - 1]
+      if (last) {
+        last.status = 'done'
+        last.msg = '节点已在线，部署成功！'
+      }
+      addEvent({ step: 'finish', status: 'done', msg: '一键部署完成！请返回节点列表查看在线状态', output: '' })
       running.value = false
       finished.value = true
       emit('done')
@@ -285,8 +394,11 @@ const waitForNodeOnline = async () => {
     }
   }
   // 180秒后仍未在线
-  events.value[events.value.length - 1].status = 'warning'
-  events.value[events.value.length - 1].msg = '连接断开且 180 秒内节点未上线。部署可能仍在后台执行，请稍后刷新节点列表查看在线状态，或查看面板日志确认部署进度。'
+  const last = events.value[events.value.length - 1]
+  if (last) {
+    last.status = 'warning'
+    last.msg = '连接断开且 180 秒内节点未上线。部署可能仍在后台执行，请稍后刷新节点列表查看在线状态，或查看面板日志确认部署进度。'
+  }
   running.value = false
   finished.value = true
   return false
@@ -298,7 +410,10 @@ const start = async () => {
   running.value = true
   finished.value = false
   events.value = []
+  displayedEvents.value = []
   activePhase.value = 'connect_server'
+  userScrolledUp.value = false
+  startReveal()
 
   const auth = useAuthStore()
 
@@ -312,7 +427,7 @@ const start = async () => {
     // refresh 失败说明凭证已完全失效，需要用户重新登录
     running.value = false
     finished.value = true
-    events.value.push({
+    addEvent({
       step: 'connect_server',
       status: 'error',
       msg: '登录状态已过期，请关闭窗口后刷新页面重新登录',
@@ -345,11 +460,11 @@ const start = async () => {
     if (!resp.ok && resp.status !== 200) {
       const txt = await resp.text()
       if (resp.status === 401) {
-        events.value.push({ step: 'connect_server', status: 'error', msg: '登录状态已过期，请关闭窗口后刷新页面重新登录', output: '' })
+        addEvent({ step: 'connect_server', status: 'error', msg: '登录状态已过期，请关闭窗口后刷新页面重新登录', output: '' })
       } else if (resp.status === 403) {
-        events.value.push({ step: 'connect_server', status: 'error', msg: '无权限执行部署操作（需要超级管理员权限）', output: '' })
+        addEvent({ step: 'connect_server', status: 'error', msg: '无权限执行部署操作（需要超级管理员权限）', output: '' })
       } else {
-        events.value.push({ step: 'connect_server', status: 'error', msg: '请求失败: ' + resp.status + ' ' + txt, output: '' })
+        addEvent({ step: 'connect_server', status: 'error', msg: '请求失败: ' + resp.status + ' ' + txt, output: '' })
       }
       running.value = false
       finished.value = true
@@ -358,7 +473,7 @@ const start = async () => {
 
     const reader = resp.body?.getReader()
     if (!reader) {
-      events.value.push({ step: 'connect_server', status: 'error', msg: '无法读取响应流', output: '' })
+      addEvent({ step: 'connect_server', status: 'error', msg: '无法读取响应流', output: '' })
       running.value = false
       finished.value = true
       return
@@ -371,33 +486,30 @@ const start = async () => {
       const { done, value } = await reader.read()
       if (done) break
       buffer += decoder.decode(value, { stream: true })
-      const blocks = buffer.split('\n\n')
-      buffer = blocks.pop() || ''
-      for (const block of blocks) {
-        const line = block.trim()
-        if (line.startsWith('data: ')) {
-          try {
-            const ev = JSON.parse(line.slice(6))
-            events.value.push(ev)
-            // 更新当前活跃 phase (用于进度条)
-            if (ev.step && phaseSteps.some(s => s.key === ev.step)) {
-              activePhase.value = ev.step
+      // SSE 事件以 \n\n 分隔, 用 indexOf 循环 slice (比 split 更标准)
+      let sepIdx
+      while ((sepIdx = buffer.indexOf('\n\n')) >= 0) {
+        const raw = buffer.slice(0, sepIdx)
+        buffer = buffer.slice(sepIdx + 2)
+        const line = raw.trim()
+        if (!line.startsWith('data: ')) continue
+        try {
+          const ev = JSON.parse(line.slice(6))
+          addEvent(ev)
+          if (ev.step === 'finish' || ev.status === 'error') {
+            gotFinishOrError = true
+            running.value = false
+            finished.value = true
+            if (ev.status === 'done' || ev.step === 'finish') {
+              emit('done')
+              ElMessage.success('部署完成')
+            } else {
+              // 错误提示 (含错误码)
+              const errCode = ev.errCode ? ` [${ev.errCode}]` : ''
+              ElMessage.error(`部署失败${errCode}: ${ev.msg || '请查看日志'}`)
             }
-            if (ev.step === 'finish' || ev.status === 'error') {
-              gotFinishOrError = true
-              running.value = false
-              finished.value = true
-              if (ev.status === 'done' || ev.step === 'finish') {
-                emit('done')
-                ElMessage.success('部署完成')
-              } else {
-                // 错误提示 (含错误码)
-                const errCode = ev.errCode ? ` [${ev.errCode}]` : ''
-                ElMessage.error(`部署失败${errCode}: ${ev.msg || '请查看日志'}`)
-              }
-            }
-          } catch { /* ignore */ }
-        }
+          }
+        } catch { /* ignore */ }
       }
     }
     // 正常结束（reader done），如果没有收到 finish/error，检查节点状态
@@ -419,28 +531,42 @@ const close = () => {
 </script>
 
 <style scoped>
-.dp-container { min-height: 120px; min-width: 580px; }
+.dp-container { min-height: 120px; min-width: 0; width: 100%; }
 .dp-pwd-bar { padding: 8px 0; }
-.dp-progress { max-height: 60vh; overflow-y: auto; }
+.dp-progress { max-height: 80vh; display: flex; flex-direction: column; }
 
-/* 6 步进度条 */
+/* 认证行: 使用 flex-wrap, 窄屏自然换行 */
+.dp-auth-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px;
+}
+.dp-auth-label { font-size: 13px; color: var(--np-text-secondary, #606266); }
+.dp-input-user { width: 90px; flex: 0 0 auto; }
+.dp-input-port { width: 110px; flex: 0 0 auto; }
+.dp-pwd-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.dp-input-pwd { width: 260px; flex: 1 1 220px; min-width: 0; }
+.dp-pwd-hint { font-size: 12px; color: var(--np-text-muted, #909399); }
+.dp-key-col { display: flex; flex-direction: column; gap: 8px; }
+.dp-key-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.dp-key-textarea {
+  font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px;
+}
+
+/* 8 步进度条 */
 .dp-steps-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 8px 16px;
-  margin-bottom: 12px;
-  background: #fafbfc;
-  border-radius: 6px;
-  border: 1px solid #ebeef5;
+  display: flex; align-items: flex-start; justify-content: space-between;
+  padding: 12px 8px 16px; margin-bottom: 12px;
+  background: var(--np-card, #131822);
+  border-radius: 8px;
+  border: 1px solid var(--np-border, #1e2a3a);
+  min-height: 76px;
 }
 .dp-step-bar {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  position: relative;
-  text-align: center;
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  position: relative; text-align: center; min-width: 0; padding: 0 2px;
 }
 .dp-step-bar:not(:last-child)::after {
   content: '';
@@ -449,76 +575,133 @@ const close = () => {
   left: 60%;
   right: -40%;
   height: 2px;
-  background: #ebeef5;
+  background: var(--np-border, #1e2a3a);
   z-index: 0;
 }
-.dp-step-bar.done:not(:last-child)::after { background: #67c23a; }
+.dp-step-bar.done:not(:last-child)::after { background: var(--np-success, #00f5d4); }
 .dp-step-num {
-  width: 28px;
-  height: 28px;
-  line-height: 28px;
-  text-align: center;
-  border-radius: 50%;
-  background: #fff;
-  border: 2px solid #dcdfe6;
-  color: #909399;
-  font-size: 13px;
-  font-weight: 600;
-  z-index: 1;
-  position: relative;
+  width: 28px; height: 28px; line-height: 28px;
+  text-align: center; border-radius: 50%;
+  background: var(--np-bg-soft, #0e1320);
+  border: 2px solid var(--np-border-strong, #2a3a4f);
+  color: var(--np-text-muted, #5a6878);
+  font-size: 13px; font-weight: 600; z-index: 1; position: relative;
 }
 .dp-step-bar.active .dp-step-num {
-  background: #409eff;
-  border-color: #409eff;
-  color: #fff;
-  box-shadow: 0 0 0 4px rgba(64, 158, 255, 0.2);
+  background: var(--np-primary, #00f5d4);
+  border-color: var(--np-primary, #00f5d4);
+  color: var(--np-bg, #0a0e17);
+  box-shadow: 0 0 0 4px var(--np-primary-dim, rgba(0, 245, 212, 0.15));
 }
 .dp-step-bar.done .dp-step-num {
-  background: #67c23a;
-  border-color: #67c23a;
-  color: #fff;
+  background: var(--np-success, #00f5d4);
+  border-color: var(--np-success, #00f5d4);
+  color: var(--np-bg, #0a0e17);
 }
 .dp-step-name {
-  margin-top: 6px;
-  font-size: 12px;
-  color: #606266;
-  white-space: nowrap;
+  margin-top: 6px; font-size: 12px;
+  color: var(--np-text-secondary, #8b98a9);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 100%;
 }
-.dp-step-bar.active .dp-step-name { color: #409eff; font-weight: 600; }
-.dp-step-bar.done .dp-step-name { color: #67c23a; }
+.dp-step-bar.active .dp-step-name { color: var(--np-primary, #00f5d4); font-weight: 600; }
+.dp-step-bar.done .dp-step-name { color: var(--np-success, #00f5d4); }
 
-/* 事件流 */
-.dp-events { height: 360px; overflow-y: auto; padding-right: 4px; }
-.dp-event {
-  padding: 10px 12px;
-  margin-bottom: 8px;
-  border-radius: 6px;
-  border-left: 3px solid #dcdfe6;
-  background: #fafbfc;
+/* 步骤淡入动画 (已到达才显示) */
+.dp-step-enter-active { transition: all 0.4s ease-out; }
+.dp-step-enter-from { opacity: 0; transform: translateY(-8px) scale(0.8); }
+
+/* 事件流: 使用 vh 自适应高度, 避免双层滚动 */
+.dp-events {
+  height: 50vh; min-height: 200px; max-height: 480px;
+  overflow-y: auto; padding-right: 4px;
+  background: var(--np-bg-soft, #0e1320);
+  border: 1px solid var(--np-border, #1e2a3a);
+  border-radius: 8px; padding: 8px;
 }
-.dp-event.done { border-left-color: #67c23a; background: #f0f9eb; }
-.dp-event.error { border-left-color: #f56c6c; background: #fef0f0; }
-.dp-event.running { border-left-color: #e6a23c; background: #fdf6ec; }
-.dp-event.warning { border-left-color: #e6a23c; background: #fefce8; }
-.dp-event.log { border-left-color: #909399; background: #f4f4f5; padding: 4px 12px; }
+.dp-event {
+  padding: 10px 12px; margin-bottom: 8px; border-radius: 6px;
+  border-left: 3px solid var(--np-border-strong, #2a3a4f);
+  background: var(--np-card, #131822);
+  transition: all 0.3s;
+}
+.dp-event.done { border-left-color: var(--np-success, #00f5d4); background: rgba(0, 245, 212, 0.05); }
+.dp-event.error { border-left-color: var(--np-danger, #ff006e); background: rgba(255, 0, 110, 0.05); }
+.dp-event.running { border-left-color: var(--np-warning, #ffbe0b); background: rgba(255, 190, 11, 0.05); }
+.dp-event.warning { border-left-color: var(--np-warning, #ffbe0b); background: rgba(255, 190, 11, 0.08); }
+.dp-event.log { border-left-color: var(--np-text-muted, #5a6878); background: var(--np-bg-soft, #0e1320); padding: 4px 12px; }
 .dp-ev-head { display: flex; align-items: center; gap: 8px; }
-.dp-ev-icon { font-size: 14px; width: 16px; text-align: center; }
+.dp-ev-icon { font-size: 14px; width: 16px; text-align: center; color: var(--np-text-secondary, #8b98a9); }
+.dp-event.done .dp-ev-icon { color: var(--np-success, #00f5d4); }
+.dp-event.error .dp-ev-icon { color: var(--np-danger, #ff006e); }
+.dp-event.running .dp-ev-icon { color: var(--np-warning, #ffbe0b); }
+.dp-event.warning .dp-ev-icon { color: var(--np-warning, #ffbe0b); }
 .dp-spin { display: inline-block; animation: dp-rot 1s linear infinite; }
 @keyframes dp-rot { to { transform: rotate(360deg); } }
-.dp-ev-step { font-size: 13px; font-weight: 600; color: #303133; flex: 1; }
-.dp-ev-msg { font-size: 12px; color: #606266; margin: 4px 0 0 24px; }
+.dp-ev-step { font-size: 13px; font-weight: 600; color: var(--np-text, #e6edf3); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dp-ev-msg { font-size: 12px; color: var(--np-text-secondary, #8b98a9); margin: 4px 0 0 24px; word-break: break-all; }
 .dp-ev-output {
   margin: 6px 0 0 24px;
-  background: #1e1e1e; color: #d4d4d4;
+  background: var(--np-bg, #0a0e17);
+  color: var(--np-text, #e6edf3);
   padding: 8px 10px; border-radius: 4px;
-  font-size: 11px; font-family: 'SFMono-Regular', Consolas, monospace;
-  white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto;
+  border: 1px solid var(--np-border, #1e2a3a);
+  font-size: 11px; font-family: 'JetBrains Mono', Consolas, monospace;
+  white-space: pre-wrap; word-break: break-all; max-height: 180px; overflow-y: auto;
 }
-.dp-loading { padding: 12px; color: #e6a23c; font-size: 13px; display: flex; align-items: center; gap: 6px; }
+.dp-loading {
+  padding: 12px; color: var(--np-warning, #ffbe0b);
+  font-size: 13px; display: flex; align-items: center; gap: 6px;
+}
 .dp-done { padding: 12px; text-align: center; }
+
+/* 事件淡入滑入动画 (渐进式渲染) */
+.dp-ev-enter-active { transition: all 0.3s ease-out; }
+.dp-ev-enter-from { opacity: 0; transform: translateY(-8px); }
+
+/* 滚动提示条 */
+.dp-scroll-hint {
+  position: sticky; bottom: 0; left: 0; right: 0;
+  background: var(--np-primary, #00f5d4);
+  color: var(--np-bg, #0a0e17);
+  padding: 6px 12px; text-align: center;
+  font-size: 12px; font-weight: 600;
+  cursor: pointer; border-radius: 4px; margin-top: 4px;
+  z-index: 10;
+}
+.dp-fade-enter-active, .dp-fade-leave-active { transition: opacity 0.2s; }
+.dp-fade-enter-from, .dp-fade-leave-to { opacity: 0; }
+
+/* 窄屏: 步骤条改为竖向, 避免挤成一团 */
+@media (max-width: 768px) {
+  .dp-steps-vertical {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+    padding: 8px;
+  }
+  .dp-steps-vertical .dp-step-bar {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    text-align: left;
+    padding: 4px 8px;
+  }
+  .dp-steps-vertical .dp-step-bar:not(:last-child)::after {
+    top: auto; bottom: -4px; left: 22px; right: auto;
+    width: 2px; height: 4px;
+  }
+  .dp-steps-vertical .dp-step-name {
+    margin-top: 0; white-space: nowrap;
+  }
+  .dp-events {
+    height: 40vh; min-height: 160px;
+  }
+  .dp-input-pwd { width: 100%; }
+  .dp-auth-row .el-button { width: 100%; }
+}
 </style>
 
 <style>
-.deploy-progress-dialog { min-width: 640px; max-width: 90vw; }
 .deploy-progress-dialog .el-dialog__body { padding: 16px 20px; }
 </style>
