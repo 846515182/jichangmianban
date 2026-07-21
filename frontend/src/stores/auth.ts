@@ -72,14 +72,16 @@ export const useAuthStore = defineStore('auth', {
     },
 
     async login(username: string, password: string) {
+      const unwrap = (r: any) => (r && r.data !== undefined ? r.data : r)
       try {
         const res = await request.post('/api/v1/auth/login', { username, password, target: 'user' })
-        this.token = res.data.access_token
-        this.refreshToken = res.data.refresh_token
-        this.role = res.data.role
+        const payload = unwrap(res)
+        this.token = payload?.access_token || ''
+        this.refreshToken = payload?.refresh_token || ''
+        this.role = payload?.role || null
         try {
           const info = await request.get('/api/v1/user/info')
-          this.userInfo = info.data
+          this.userInfo = unwrap(info) || null
         } catch {
           this.userInfo = null
         }
@@ -92,11 +94,13 @@ export const useAuthStore = defineStore('auth', {
     },
 
     async loginAdmin(username: string, password: string) {
+      const unwrap = (r: any) => (r && r.data !== undefined ? r.data : r)
       try {
         const res = await request.post('/api/v1/auth/login', { username, password, target: 'admin' })
-        this.token = res.data.access_token
-        this.refreshToken = res.data.refresh_token
-        this.role = (res.data.role === 'super_admin' || res.data.role === 'admin') ? 'admin' : res.data.role
+        const payload = unwrap(res)
+        this.token = payload?.access_token || ''
+        this.refreshToken = payload?.refresh_token || ''
+        this.role = (payload?.role === 'super_admin' || payload?.role === 'admin') ? 'admin' : payload?.role
         this.persist()
         return this.role as UserRole
       } catch (e) {
@@ -107,15 +111,17 @@ export const useAuthStore = defineStore('auth', {
 
     async loginAuto(username: string, password: string) {
       let lastErr: any
+      const unwrap = (r: any) => (r && r.data !== undefined ? r.data : r)
       try {
         const resp = await rawAxios.post('/api/v1/auth/login', { username, password, target: 'admin' })
         const res = resp.data
         if (res.code !== 0) {
           throw new Error(res.msg || 'login failed')
         }
-        this.token = res.data.access_token
-        this.refreshToken = res.data.refresh_token
-        this.role = (res.data.role === 'super_admin' || res.data.role === 'admin') ? 'admin' : res.data.role
+        const payload = unwrap(res)
+        this.token = payload?.access_token || ''
+        this.refreshToken = payload?.refresh_token || ''
+        this.role = (payload?.role === 'super_admin' || payload?.role === 'admin') ? 'admin' : payload?.role
         this.persist()
         return this.role as UserRole
       } catch (adminErr: any) {
@@ -127,12 +133,13 @@ export const useAuthStore = defineStore('auth', {
         if (res.code !== 0) {
           throw new Error(res.msg || 'login failed')
         }
-        this.token = res.data.access_token
-        this.refreshToken = res.data.refresh_token
-        this.role = res.data.role
+        const payload = unwrap(res)
+        this.token = payload?.access_token || ''
+        this.refreshToken = payload?.refresh_token || ''
+        this.role = payload?.role
         try {
           const info = await request.get('/api/v1/user/info')
-          this.userInfo = info.data
+          this.userInfo = unwrap(info) || null
         } catch {
           this.userInfo = null
         }
@@ -145,15 +152,18 @@ export const useAuthStore = defineStore('auth', {
 
     async refresh() {
       if (!this.refreshToken) throw new Error('no refresh token')
+      const unwrap = (r: any) => (r && r.data !== undefined ? r.data : r)
       // silent: true 避免重复错误提示 — 调用方（如 axios 401 拦截器、DeployProgress）自行处理失败逻辑
       const res = await request.post('/api/v1/auth/refresh', { refresh_token: this.refreshToken }, { silent: true })
-      this.token = res.data.access_token
-      if (res.data.refresh_token) {
-        this.refreshToken = res.data.refresh_token
+      const payload = unwrap(res)
+      this.token = payload?.access_token || this.token
+      if (payload?.refresh_token) {
+        this.refreshToken = payload.refresh_token
       }
       this.persist()
       return this.token
     },
+
 
     async logout() {
       try {

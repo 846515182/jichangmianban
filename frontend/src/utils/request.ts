@@ -1,4 +1,4 @@
-import axios, { type AxiosRequestConfig, type InternalAxiosRequestConfig } from 'axios'
+﻿import axios, { type AxiosRequestConfig, type InternalAxiosRequestConfig } from 'axios'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
 import router from '@/router'
@@ -24,7 +24,8 @@ service.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
     const auth = useAuthStore()
     if (auth.token && config.headers) {
-      config.headers.Authorization = `Bearer ${auth.token}`
+      // 设置 Bearer token
+      (config.headers as any).Authorization = `Bearer ${auth.token}`
     }
     return config
   },
@@ -68,7 +69,8 @@ service.interceptors.response.use(
           isRefreshing = false
           requestsQueue.forEach((cb) => cb(newToken))
           requestsQueue = []
-          config.headers.Authorization = `Bearer ${newToken}`
+          // 将新的 token 写入原始请求并重试
+          (config.headers as any).Authorization = `Bearer ${newToken}`
           return service(config)
         } catch (refreshErr) {
           isRefreshing = false
@@ -81,7 +83,8 @@ service.interceptors.response.use(
       } else {
         return new Promise((resolve) => {
           requestsQueue.push((token: string) => {
-            config.headers.Authorization = `Bearer ${token}`
+            // 当刷新完成时，队列请求将得到新的 token
+            (config.headers as any).Authorization = `Bearer ${token}`
             resolve(service(config))
           })
         })
