@@ -1456,39 +1456,93 @@ func diagnoseDockerFailure(client *ssh.Client, sse *sseWriter) dockerDiag {
 
 // createDockerSystemdService 为静态安装的 Docker 创建 systemd 服务文件,
 // 确保 dockerd/containerd 由 systemd 管理 (自动重启, 不依赖 SSH 会话, OOM 后自动恢复)
+//
+// 修复 P0-DOCKER-203 (2026-07-21 真机排查):
+// 旧版写死 ExecStart=/usr/local/bin/dockerd (和 containerd), 但 apt/yum 官方仓库
+// 标准安装路径是 /usr/bin/dockerd. 当 docker 被 mask 触发 unmaskDockerService
+// → createDockerSystemdService 时, 写入的覆盖文件路径不对, systemd 启动失败
+// status=203/EXEC, 死循环重启(节点 38.59.246.203 重启计数 1686 次).
+//
+// 修复: 动态探测 dockerd/containerd 实际路径, 用真实路径写入 service 文件.
+// 探测顺序: /usr/bin → /usr/local/bin → /usr/sbin → which → find / 兜底.
+// 同时校验文件存在且可执行, 找不到则 fail-closed 不写覆盖文件(避免把好的覆盖坏).
 func createDockerSystemdService(client *ssh.Client) {
-	sshRun(client, `
-cat > /etc/systemd/system/containerd.service << 'CTR_EOF'
+	sshRun(client, `#!/bin/bash
+# 动态探测 dockerd 实际路径
+DOCKERD_PATH=""
+for p in /usr/bin/dockerd /usr/local/bin/dockerd /usr/sbin/dockerd /snap/bin/dockerd; do
+    if [ -x "$p" ]; then DOCKERD_PATH="$p"; break; fi
+done
+if [ -z "$DOCKERD_PATH" ]; then
+    DOCKERD_PATH=$(which dockerd 2>/dev/null || true)
+fi
+if [ -z "$DOCKERD_PATH" ]; then
+    DOCKERD_PATH=$(find / -name "dockerd" -type f -executable 2>/dev/null | head -1)
+fi
+
+# 动态探测 containerd 实际路径
+CTR_PATH=""
+for p in /usr/bin/containerd /usr/local/bin/containerd /usr/sbin/containerd; do
+    if [ -x "$p" ]; then CTR_PATH="$p"; break; fi
+done
+if [ -z "$CTR_PATH" ]; then
+    CTR_PATH=$(which containerd 2>/dev/null || true)
+fi
+if [ -z "$CTR_PATH" ]; then
+    CTR_PATH=$(find / -name "containerd" -type f -executable 2>/dev/null | head -1)
+fi
+
+# fail-closed: 找不到二进制就不写覆盖文件, 避免把好的 /lib/systemd/system/ 覆盖坏
+if [ -z "$DOCKERD_PATH" ] || [ -z "$CTR_PATH" ]; then
+    echo "WARN: dockerd=$DOCKERD_PATH containerd=$CTR_PATH 路径探测失败, 跳过 service 文件写入" >&2
+    exit 0
+fi
+
+# 只在 /lib/systemd/system/ 没有标准 service 文件时才写 /etc/systemd/system/ 覆盖
+# (官方 apt/yum 安装会自带 /lib/systemd/system/docker.service, 不需要我们写)
+if [ -f /lib/systemd/system/docker.service ] && [ -f /lib/systemd/system/containerd.service ]; then
+    # 标准文件已存在, 仅确保 enable, 不写覆盖文件
+    systemctl daemon-reload
+    systemctl enable containerd docker 2>/dev/null || true
+    exit 0
+fi
+
+# 标准文件缺失(静态二进制安装场景), 写自定义 service 文件用探测到的真实路径
+if [ ! -f /lib/systemd/system/containerd.service ]; then
+    cat > /etc/systemd/system/containerd.service << CTR_EOF
 [Unit]
 Description=containerd container runtime
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/containerd
+ExecStart=$CTR_PATH
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 CTR_EOF
+fi
 
-cat > /etc/systemd/system/docker.service << 'DKR_EOF'
+if [ ! -f /lib/systemd/system/docker.service ]; then
+    cat > /etc/systemd/system/docker.service << DKR_EOF
 [Unit]
 Description=Docker Application Container Engine
 After=network.target containerd.service
 Requires=containerd.service
 
 [Service]
-ExecStart=/usr/local/bin/dockerd
+ExecStart=$DOCKERD_PATH
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 DKR_EOF
+fi
 
 systemctl daemon-reload
-systemctl enable containerd docker 2>/dev/null
+systemctl enable containerd docker 2>/dev/null || true
 `)
 }
 
