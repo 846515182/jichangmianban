@@ -328,7 +328,7 @@ const close = () => {
 }
 
 .cp-events {
-  max-height: 360px; overflow-y: auto;
+  height: 360px; overflow-y: auto;
   background: var(--np-bg, #1a1a1a);
   border: 1px solid var(--np-border, #303030);
   border-radius: 8px; padding: 8px;

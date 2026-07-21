@@ -176,7 +176,7 @@ const scrollToBottom = async () => {
     eventsRef.value.scrollTop = eventsRef.value.scrollHeight
   }
 }
-watch(() => events.value.length, scrollToBottom)
+watch(events, scrollToBottom, { deep: true })
 
 // 8 步阶段定义 (每步仅做一件事)
 const phaseSteps = [
@@ -488,7 +488,7 @@ const close = () => {
 .dp-step-bar.done .dp-step-name { color: #67c23a; }
 
 /* 事件流 */
-.dp-events { max-height: 360px; overflow-y: auto; padding-right: 4px; }
+.dp-events { height: 360px; overflow-y: auto; padding-right: 4px; }
 .dp-event {
   padding: 10px 12px;
   margin-bottom: 8px;
