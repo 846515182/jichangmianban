@@ -3,12 +3,14 @@ package handler
 import (
 	"fmt"
 	"net/http"
+	"strings"
 
-	"github.com/gin-gonic/gin"
 	"nexus-panel/internal/app"
 	"nexus-panel/internal/repo"
 	"nexus-panel/internal/response"
 	"nexus-panel/internal/service"
+
+	"github.com/gin-gonic/gin"
 )
 
 // AdminSubscriptionHandler 管理端订阅管理
@@ -69,6 +71,11 @@ func (h *AdminSubscriptionHandler) GetByUserID(c *gin.Context) {
 // getBaseURL 从请求头或配置获取面板 baseURL
 func getBaseURL(c *gin.Context) string {
 	if domain := app.Get().Cfg.PanelDomain; domain != "" {
+		domain = strings.TrimRight(domain, "/")
+		// 自动补全协议前缀
+		if !strings.Contains(domain, "://") {
+			domain = "https://" + domain
+		}
 		return domain
 	}
 	scheme := "http"

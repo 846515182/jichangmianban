@@ -258,7 +258,12 @@ func getRequestBaseURL(c *gin.Context) string {
 	if domain := app.Get().Cfg.PanelDomain; domain != "" {
 		lower := strings.ToLower(domain)
 		if !strings.Contains(lower, "127.0.0.1") && !strings.Contains(lower, "localhost") {
-			return strings.TrimRight(domain, "/")
+			domain = strings.TrimRight(domain, "/")
+			// 自动补全协议前缀: PANEL_DOMAIN 可能配置为 "bbcdtv.top" 而非 "https://bbcdtv.top"
+			if !strings.Contains(domain, "://") {
+				domain = "https://" + domain
+			}
+			return domain
 		}
 	}
 	scheme := "http"
