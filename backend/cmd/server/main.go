@@ -333,7 +333,8 @@ func initDB(cfg *config.Config, logger *zap.Logger) (*gorm.DB, error) {
 	gormCfg := &gorm.Config{
 		Logger: gormlogger.Default.LogMode(gormlogger.Warn),
 	}
-	db, err := gorm.Open(postgres.Open(cfg.DSN()), gormCfg)
+	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s TimeZone=UTC", cfg.DBHost, cfg.DBPort, cfg.DBUser, cfg.DBPass, cfg.DBName, cfg.DBSSlMode)
+	db, err := gorm.Open(postgres.Open(connStr), gormCfg)
 	if err != nil {
 		return nil, err
 	}

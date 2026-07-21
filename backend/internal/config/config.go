@@ -1,4 +1,4 @@
-package config
+﻿package config
 
 import (
 	"crypto"
@@ -82,7 +82,7 @@ func Load() (*Config, error) {
 		DBHost:          getEnv("DB_HOST", "127.0.0.1"),
 		DBPort:          getEnv("DB_PORT", "5432"),
 		DBUser:          getEnv("DB_USER", "nexus"),
-		DBPass:          getEnv("DB_PASS", ""),
+		DBPass:          getEnv("DB_PASSWORD", ""),
 		DBName:          getEnv("DB_NAME", "nexus_panel"),
 		DBSSlMode:       getEnv("DB_SSLMODE", "disable"),
 		RedisAddr:       getEnv("REDIS_ADDR", "127.0.0.1:6379"),
@@ -120,19 +120,19 @@ func Load() (*Config, error) {
 	cfg.JWTRefreshTTL = getEnvDuration("JWT_REFRESH_TTL", 7*24*time.Hour)
 
 	if cfg.DBPass == "" {
-		return nil, fmt.Errorf("环境变量 DB_PASSWORD 未设置, 请在 .env 中配置 PostgreSQL 密码")
+		return nil, fmt.Errorf("环境变量 DB_PASSWORD 未设�? 请在 .env 中配�?PostgreSQL 密码")
 	}
 	if cfg.JWTSecret == "" {
-		return nil, fmt.Errorf("环境变量 JWT_SECRET 未设置")
+		return nil, fmt.Errorf("环境变量 JWT_SECRET 未设�?)
 	}
 	if cfg.AESMasterKey == "" {
-		return nil, fmt.Errorf("环境变量 AES_MASTER_KEY 未设置")
+		return nil, fmt.Errorf("环境变量 AES_MASTER_KEY 未设�?)
 	}
 	if cfg.HMACSubSecret == "" {
-		return nil, fmt.Errorf("环境变量 HMAC_SUB_SECRET 未设置")
+		return nil, fmt.Errorf("环境变量 HMAC_SUB_SECRET 未设�?)
 	}
-	// 修复 F-06: 密钥强度校验, 防止弱密钥导致签名可被暴力破解
-	// JWTSecret / HMACSubSecret 均要求 >= 32 字节(256 bit), 与 HS256 安全强度对齐
+	// 修复 F-06: 密钥强度校验, 防止弱密钥导致签名可被暴力破�?
+	// JWTSecret / HMACSubSecret 均要�?>= 32 字节(256 bit), �?HS256 安全强度对齐
 	if len(cfg.JWTSecret) < 32 {
 		return nil, fmt.Errorf("JWT_SECRET 长度不足: 当前 %d 字节, 要求 >= 32 字节(使用 openssl rand -hex 32 生成)", len(cfg.JWTSecret))
 	}
@@ -142,12 +142,12 @@ func Load() (*Config, error) {
 	if decoded, err := base64.StdEncoding.DecodeString(cfg.AESMasterKey); err == nil && len(decoded) == 32 {
 		cfg.AESMasterKey = string(decoded)
 	} else if len(cfg.AESMasterKey) != 32 {
-		return nil, fmt.Errorf("AES_MASTER_KEY 必须为 32 字节(使用 openssl rand -base64 32 生成)")
+		return nil, fmt.Errorf("AES_MASTER_KEY 必须�?32 字节(使用 openssl rand -base64 32 生成)")
 	}
 
-	// 兜底: CA 私钥存在但 CA 证书缺失时, 自动从私钥生成自签名 CA 证书。
-	// 场景: 一键部署面板 gRPC TLS 需要将 CA 证书推送到节点 agent,
-	// 但 deployments/tls/ 只有 ca.key 没有 ca.crt 会导致部署崩溃。
+	// 兜底: CA 私钥存在�?CA 证书缺失�? 自动从私钥生成自签名 CA 证书�?
+	// 场景: 一键部署面�?gRPC TLS 需要将 CA 证书推送到节点 agent,
+	// �?deployments/tls/ 只有 ca.key 没有 ca.crt 会导致部署崩溃�?
 	ensureCACert(cfg)
 
 	return cfg, nil
@@ -156,10 +156,6 @@ func Load() (*Config, error) {
 func (c *Config) DSN() string {
 	return fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s TimeZone=UTC",
 		c.DBHost, c.DBPort, c.DBUser, c.DBPass, c.DBName, c.DBSSlMode)
-}
-
-func (c *Config) GRPCTLSEnabled() bool {
-	return c.GRPCTLSCert != "" && c.GRPCTLSKey != ""
 }
 
 func (c *Config) LoadGRPCTLSConfig() (*tls.Config, error) {
@@ -175,15 +171,15 @@ func (c *Config) LoadGRPCTLSConfig() (*tls.Config, error) {
 		MinVersion:   tls.VersionTLS12,
 	}
 	if c.GRPCTLSCA != "" {
-		// mTLS: 加载客户端 CA 并强制校验客户端证书(仅当配置了 CA 时启用)
-		// 节点须持有由该 CA 签发的有效客户端证书方可连接, 防止未授权节点接入
+		// mTLS: 加载客户�?CA 并强制校验客户端证书(仅当配置�?CA 时启�?
+		// 节点须持有由�?CA 签发的有效客户端证书方可连接, 防止未授权节点接�?
 		caPEM, err := os.ReadFile(c.GRPCTLSCA)
 		if err != nil {
-			return nil, fmt.Errorf("加载 gRPC 客户端 CA 失败: %w", err)
+			return nil, fmt.Errorf("加载 gRPC 客户�?CA 失败: %w", err)
 		}
 		clientCAs := x509.NewCertPool()
 		if !clientCAs.AppendCertsFromPEM(caPEM) {
-			return nil, fmt.Errorf("gRPC 客户端 CA 证书解析失败")
+			return nil, fmt.Errorf("gRPC 客户�?CA 证书解析失败")
 		}
 		tlsCfg.ClientCAs = clientCAs
 		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
@@ -239,23 +235,23 @@ func getEnvDuration(key string, fallback time.Duration) time.Duration {
 	return fallback
 }
 
-// ensureCACert 若 GRPC_TLS_CA 指向的文件不存在但同目录下 ca.key 存在,
-// 则用 Go 标准库从 ca.key 自动生成自签名 CA 证书(不依赖 openssl)。
-// 解决面板部署节点时 os.ReadFile(ca.crt) 失败的崩溃问题。
+// ensureCACert �?GRPC_TLS_CA 指向的文件不存在但同目录�?ca.key 存在,
+// 则用 Go 标准库从 ca.key 自动生成自签�?CA 证书(不依�?openssl)�?
+// 解决面板部署节点�?os.ReadFile(ca.crt) 失败的崩溃问题�?
 func ensureCACert(cfg *Config) {
 	if cfg.GRPCTLSCA == "" {
 		return
 	}
 	if _, err := os.Stat(cfg.GRPCTLSCA); err == nil {
-		return // ca.crt 已存在
+		return // ca.crt 已存�?
 	}
 
-	// 推导 CA 私钥路径: ca.crt → ca.key (同目录)
+	// 推导 CA 私钥路径: ca.crt �?ca.key (同目�?
 	ext := filepath.Ext(cfg.GRPCTLSCA)
 	caKey := cfg.GRPCTLSCA[:len(cfg.GRPCTLSCA)-len(ext)] + ".key"
 	keyData, err := os.ReadFile(caKey)
 	if err != nil {
-		return // 无 CA 私钥可生成, 不阻断启动(可能使用公信 CA)
+		return // �?CA 私钥可生�? 不阻断启�?可能使用公信 CA)
 	}
 
 	privKey, err := parsePrivateKey(keyData)
@@ -266,7 +262,7 @@ func ensureCACert(cfg *Config) {
 
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[config] 生成 CA 序列号失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[config] 生成 CA 序列号失�? %v\n", err)
 		return
 	}
 
@@ -276,7 +272,7 @@ func ensureCACert(cfg *Config) {
 			CommonName: "Nexus-Panel-Root-CA",
 		},
 		NotBefore:             time.Now(),
-		NotAfter:              time.Now().Add(3650 * 24 * time.Hour), // 10 年
+		NotAfter:              time.Now().Add(3650 * 24 * time.Hour), // 10 �?
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true,
 		IsCA:                  true,
@@ -284,7 +280,7 @@ func ensureCACert(cfg *Config) {
 		MaxPathLenZero:        true,
 	}
 	if _, ok := privKey.(*ecdsa.PrivateKey); ok {
-		// ECDSA CA: 签名用证书私钥即可, 无需额外限制
+		// ECDSA CA: 签名用证书私钥即�? 无需额外限制
 	}
 
 	certDER, err := x509.CreateCertificate(
@@ -301,14 +297,14 @@ func ensureCACert(cfg *Config) {
 		fmt.Fprintf(os.Stderr, "[config] 写入 CA 证书失败(%s): %v\n", cfg.GRPCTLSCA, err)
 		return
 	}
-	fmt.Fprintf(os.Stderr, "[config] 已自动生成 CA 证书: %s (RSA CA from %s)\n", cfg.GRPCTLSCA, caKey)
+	fmt.Fprintf(os.Stderr, "[config] 已自动生�?CA 证书: %s (RSA CA from %s)\n", cfg.GRPCTLSCA, caKey)
 }
 
-// parsePrivateKey 解析 PEM 编码的私钥, 支持 PKCS#1/PKCS#8/EC 格式
+// parsePrivateKey 解析 PEM 编码的私�? 支持 PKCS#1/PKCS#8/EC 格式
 func parsePrivateKey(der []byte) (crypto.PrivateKey, error) {
 	block, _ := pem.Decode(der)
 	if block == nil {
-		return nil, fmt.Errorf("不是有效的 PEM 数据")
+		return nil, fmt.Errorf("不是有效�?PEM 数据")
 	}
 	// 尝试各种格式
 	if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
@@ -338,3 +334,5 @@ func publicKeyFor(priv crypto.PrivateKey) crypto.PublicKey {
 		return nil
 	}
 }
+
+
