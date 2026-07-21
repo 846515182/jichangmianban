@@ -66,10 +66,9 @@ func trustOnFirstUse(prefix string) ssh.HostKeyCallback {
 	}
 }
 
-// FingerprintSHA256Equal 比较两个 SHA256 指纹
-func FingerprintSHA256Equal(a, b string) bool {
-	return a == b
-}
+// [FIX 2026-07-21] 删除遗留的 FingerprintSHA256Equal 死代码:
+//   该函数定义后从未被任何地方引用(全仓 grep 仅命中此文件), 且实现只是 a == b
+//   没有任何抽象价值, 直接删除避免误导.
 
 
 // [P0#1 2026-07-14] loadStrictHostKey 严格 known_hosts 模式:

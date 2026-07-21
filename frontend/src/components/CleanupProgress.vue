@@ -1,24 +1,69 @@
 <template>
-  <el-dialog v-model="visible" title="Cleanup Node" :width="dialogWidth" top="5vh" class="cleanup-progress-dialog" :close-on-click-modal="false" :show-close="!running">
+  <el-dialog v-model="visible" title="清理并删除节点" :width="dialogWidth" top="5vh" class="cleanup-progress-dialog" :close-on-click-modal="false" :show-close="!running">
     <div class="cp-container">
-      <!-- 未开始：密码输入 -->
+      <!-- 未开始：SSH 凭据输入 -->
       <div v-if="!started" class="cp-pwd-bar">
         <el-alert type="warning" :closable="false" show-icon style="margin-bottom:12px">
           <template #title>
-            Panel will SSH to node server, stop agent container, delete deploy dir (.env.node/binary/xray-cache), then delete from Panel DB. Fully automated, failed steps are skipped but DB cleanup always runs.
+            面板会 SSH 到节点服务器, 停止 agent 容器, 删除部署目录(.env.node / 二进制 / xray-cache), 最后从面板 DB 删除. 全自动, 失败步骤会跳过但 DB 清理最终一定执行.
           </template>
         </el-alert>
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-          <el-input v-model="password" type="password" show-password placeholder="Node root password" style="width:200px" @keyup.enter="start" autocomplete="new-password" name="cleanup-pwd" />
+        <!-- 认证方式切换 -->
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+          <span style="font-size:13px;color:#606266">认证方式:</span>
+          <el-radio-group v-model="authMode" size="small">
+            <el-radio-button value="password">密码</el-radio-button>
+            <el-radio-button value="key">SSH 密钥</el-radio-button>
+          </el-radio-group>
           <el-input v-model="username" placeholder="用户" style="width:90px" />
           <el-input-number v-model="port" :min="1" :max="65535" controls-position="right" style="width:110px" />
-          <el-checkbox v-model="removeImg">Remove image</el-checkbox>
-          <el-button type="danger" :disabled="!password" @click="start">
-            <el-icon><Delete /></el-icon> Start Cleanup
+          <el-checkbox v-model="removeImg">删除镜像</el-checkbox>
+          <el-button type="danger" :disabled="!canStart" @click="start">
+            <el-icon><Delete /></el-icon> 开始清理
           </el-button>
         </div>
+        <!-- 密码模式 -->
+        <div v-if="authMode === 'password'" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <el-input v-model="password" type="password" show-password placeholder="节点服务器密码" style="width:260px" @keyup.enter="start" autocomplete="new-password" name="cleanup-pwd" />
+          <span style="font-size:12px;color:#909399">输入 root 或其他 sudo 用户的密码</span>
+        </div>
+        <!-- SSH 密钥模式 -->
+        <div v-if="authMode === 'key'" style="display:flex;flex-direction:column;gap:8px">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <el-upload
+              :auto-upload="false"
+              :show-file-list="false"
+              :on-change="onKeyFileChange"
+              accept="*"
+              style="display:inline-flex"
+            >
+              <el-button size="small" type="primary" plain>选择私钥文件</el-button>
+            </el-upload>
+            <span style="font-size:12px;color:#909399">或直接粘贴私钥内容</span>
+            <el-button size="small" link type="primary" @click="showKeyHelp = !showKeyHelp">
+              {{ showKeyHelp ? '收起' : '如何获取私钥?' }}
+            </el-button>
+          </div>
+          <el-input
+            v-model="privateKey"
+            type="textarea"
+            :rows="5"
+            placeholder="粘贴 SSH 私钥内容 (PEM 格式)&#10;-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"
+            style="font-family:monospace;font-size:12px"
+          />
+          <el-alert v-if="showKeyHelp" type="info" :closable="false" style="margin-top:4px">
+            <template #title>
+              <div style="font-size:12px;line-height:1.6">
+                1. 生成密钥对: <code>ssh-keygen -t ed25519 -f ~/.ssh/nexus_deploy -N ""</code><br/>
+                2. 公钥写入服务器: <code>ssh-copy-id -i ~/.ssh/nexus_deploy.pub root@节点IP</code><br/>
+                3. 查看私钥: <code>cat ~/.ssh/nexus_deploy</code> 并复制全部内容粘贴到上方<br/>
+                4. 注意: 私钥不要设置密码 ( -N "" )，否则无法在此使用
+              </div>
+            </template>
+          </el-alert>
+        </div>
         <el-alert type="info" :closable="false" style="margin-top:12px">
-          <template #title>Close without password to only delete from panel (node resources need manual cleanup).</template>
+          <template #title>不提供凭据关闭弹窗将仅从面板侧删除(节点服务器残留资源需手动清理).</template>
         </el-alert>
       </div>
 
@@ -51,10 +96,10 @@
                   <span v-else>·</span>
                 </span>
                 <span class="cp-ev-step">{{ stepName(ev.step) }}</span>
-                <el-tag v-if="isStatus(ev, 'done')" size="small" type="success">Done</el-tag>
-                <el-tag v-else-if="isStatus(ev, 'error')" size="small" type="danger">Failed</el-tag>
-                <el-tag v-else-if="isStatus(ev, 'running')" size="small" type="warning">Running</el-tag>
-                <el-tag v-else-if="isStatus(ev, 'warning')" size="small" type="warning" effect="dark">Warning</el-tag>
+                <el-tag v-if="isStatus(ev, 'done')" size="small" type="success">完成</el-tag>
+                <el-tag v-else-if="isStatus(ev, 'error')" size="small" type="danger">失败</el-tag>
+                <el-tag v-else-if="isStatus(ev, 'running')" size="small" type="warning">进行中</el-tag>
+                <el-tag v-else-if="isStatus(ev, 'warning')" size="small" type="warning" effect="dark">警告</el-tag>
               </div>
               <div v-if="ev.msg" class="cp-ev-msg">{{ ev.msg }}</div>
               <pre v-if="ev.output" class="cp-ev-output">{{ ev.output }}</pre>
@@ -64,10 +109,10 @@
 
         <div v-if="running" class="cp-loading">
           <el-icon class="is-loading"><Loading /></el-icon>
-          Cleaning up...
+          清理中...
         </div>
         <div v-else-if="finished" class="cp-done">
-          <el-button type="primary" @click="close">Done</el-button>
+          <el-button type="primary" @click="close">完成</el-button>
         </div>
       </div>
     </div>
@@ -93,7 +138,11 @@ watch(visible, (v) => emit('update:modelValue', v))
 
 const dialogWidth = computed(() => (window.innerWidth < 768 ? '95%' : '780px'))
 
+// [FIX 2026-07-21] 与 DeployProgress.vue 对齐, 新增 authMode/privateKey/showKeyHelp
+const authMode = ref<'password' | 'key'>('password')
 const password = ref('')
+const privateKey = ref('')
+const showKeyHelp = ref(false)
 const username = ref('root')
 const port = ref(22)
 const removeImg = ref(false)
@@ -101,6 +150,26 @@ const started = ref(false)
 const running = ref(false)
 const finished = ref(false)
 const events = ref<Array<{step: string; status: string; msg: string; output: string}>>([])
+
+// 是否允许开始清理 (密码模式需密码, 密钥模式需私钥)
+const canStart = computed(() => {
+  if (authMode.value === 'key') return !!privateKey.value
+  return !!password.value
+})
+
+// 选择私钥文件后, 读取内容填到 privateKey
+const onKeyFileChange = (file: any) => {
+  const raw = file?.raw
+  if (!raw) return
+  const reader = new FileReader()
+  reader.onload = (e) => {
+    privateKey.value = (e.target?.result as string) || ''
+  }
+  reader.onerror = () => {
+    ElMessage.error('私钥文件读取失败')
+  }
+  reader.readAsText(raw)
+}
 
 // Progressive reveal: push displayedEvents one by one with CSS transition animation
 const displayedEvents = ref<Array<{step: string; status: string; msg: string; output: string}>>([])
@@ -119,13 +188,14 @@ const phaseSteps = [
 
 const activePhase = ref<string>('')
 
+// [FIX 2026-07-21] 中文化 step 名称 (与项目其他界面一致)
 const stepNames: Record<string, string> = {
-  connect: '1. SSH connect to node server',
-  stop: '2. Stop and remove agent container',
-  dir: '3. Remove deploy directory',
-  image: '4. Remove docker image',
-  finalize: '5. Panel DB + Redis cleanup',
-  finish: 'Cleanup complete',
+  connect: '1. SSH 连接节点服务器',
+  stop: '2. 停止并删除 agent 容器',
+  dir: '3. 删除部署目录',
+  image: '4. 删除 docker 镜像',
+  finalize: '5. 面板 DB + Redis 清理',
+  finish: '清理完成',
 }
 const stepName = (s: string) => stepNames[s] || s
 
@@ -149,7 +219,10 @@ const resetIfClosed = (v: boolean) => {
       events.value = []
       displayedEvents.value = []
       activePhase.value = ''
+      // [FIX 2026-07-21] 关闭弹窗时同时清空密钥, 避免缓存残留导致下次清理用错凭证
       password.value = ''
+      privateKey.value = ''
+      showKeyHelp.value = false
       removeImg.value = false
       stopReveal()
     }, 300)
@@ -200,9 +273,17 @@ const addEvent = (step: string, status: string, msg: string, output: string = ''
 
 // SSE 流式消费清理接口
 const start = async () => {
-  if (!password.value) {
-    ElMessage.warning('请输入节点服务器密码')
-    return
+  // [FIX 2026-07-21] 密钥模式校验私钥, 密码模式校验密码
+  if (authMode.value === 'key') {
+    if (!privateKey.value) {
+      ElMessage.warning('请粘贴 SSH 私钥内容')
+      return
+    }
+  } else {
+    if (!password.value) {
+      ElMessage.warning('请输入节点服务器密码')
+      return
+    }
   }
   started.value = true
   running.value = true
@@ -227,7 +308,8 @@ const start = async () => {
         'Authorization': token ? 'Bearer ' + token : '',
       },
       body: JSON.stringify({
-        password: password.value,
+        password: authMode.value === 'password' ? password.value : '',
+        privateKey: authMode.value === 'key' ? privateKey.value : '',
         username: username.value,
         port: port.value,
         removeImg: removeImg.value,
@@ -268,10 +350,10 @@ const start = async () => {
       }
     }
     if (!sawFinish) {
-      addEvent('finalize', 'warning', 'SSE stream ended early (network interrupted), but cleanup may have completed')
+      addEvent('finalize', 'warning', 'SSE 流提前结束(网络中断), 但清理可能已完成')
     }
   } catch (e: any) {
-    addEvent('finalize', 'error', 'Request failed: ' + (e?.message || String(e)))
+    addEvent('finalize', 'error', '请求失败: ' + (e?.message || String(e)))
   } finally {
     running.value = false
     finished.value = true

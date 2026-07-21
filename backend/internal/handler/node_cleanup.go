@@ -14,7 +14,6 @@ import (
 
 	"nexus-panel/internal/app"
 	"nexus-panel/internal/model"
-	"nexus-panel/internal/response"
 	"nexus-panel/internal/service"
 	"go.uber.org/zap"
 )
@@ -86,11 +85,16 @@ func NewNodeCleanupHandler(nodeService *service.NodeService, nodeRepo interface{
 }
 
 // cleanupReq 清理请求 (SSH 凭据, 删除时前端弹窗输入)
+// [FIX 2026-07-21] 与 auto_deploy.go 对齐, 新增 PrivateKey 字段:
+//
+//	之前 cleanup 只支持密码登录, 节点若禁用密码(只允许密钥)就无法清理,
+//	运维只能 SSH 手动清理容器/目录. 现在与部署阶段一致: 密钥优先, 密码兜底.
 type cleanupReq struct {
-	Password  string `json:"password"`  // SSH 密码 (必填)
-	Username  string `json:"username"`  // SSH 用户名 (默认 root)
-	Port      int    `json:"port"`      // SSH 端口 (默认 22)
-	RemoveImg bool   `json:"removeImg"` // 是否删除 docker 镜像 (默认 false, 仅停容器删目录)
+	Password   string `json:"password"`   // SSH 密码 (密码模式必填, 密钥模式可选作兜底)
+	PrivateKey string `json:"privateKey"` // SSH 私钥 PEM 文本 (密钥模式必填)
+	Username   string `json:"username"`   // SSH 用户名 (默认 root)
+	Port       int    `json:"port"`       // SSH 端口 (默认 22)
+	RemoveImg  bool   `json:"removeImg"`  // 是否删除 docker 镜像 (默认 false, 仅停容器删目录)
 }
 
 // CleanupWithProgress 带进度展示的节点清理 (SSE 流式)
@@ -118,6 +122,8 @@ func (h *NodeCleanupHandler) CleanupWithProgress(c *gin.Context) {
 	}
 	password := req.Password
 	req.Password = "" // 清出避免后续误用
+	privateKey := req.PrivateKey
+	req.PrivateKey = ""
 
 	// SSE 响应头
 	c.Header("Content-Type", "text/event-stream")
@@ -176,15 +182,26 @@ func (h *NodeCleanupHandler) CleanupWithProgress(c *gin.Context) {
 	}()
 
 	// ====== Phase 1: SSH 连接节点服务器 (带重试 + 防卡死) ======
-	if password == "" {
-		sse.event(CleanupPhaseConnect, "warning", "未提供 SSH 密码, 跳过节点服务器清理, 仅执行面板侧删除", "")
+	// [FIX 2026-07-21] 支持密钥认证: 密码和私钥都没有时才跳过 SSH 清理
+	if password == "" && privateKey == "" {
+		sse.event(CleanupPhaseConnect, "warning", "未提供 SSH 凭据(密码或私钥), 跳过节点服务器清理, 仅执行面板侧删除", "")
 		return
+	}
+	// 私钥提前解析, 失败直接报错(避免重试 3 次浪费时间)
+	if privateKey != "" {
+		if _, keyErr := parsePrivateKey(privateKey); keyErr != nil {
+			sse.eventWithCode(CleanupPhaseConnect, "warning",
+				"SSH 私钥解析失败: "+keyErr.Error()+" (跳过节点服务器清理, 仅执行面板侧删除)", "",
+				classifySSHError(keyErr.Error()))
+			return
+		}
+		sse.event(CleanupPhaseConnect, "log", "", "使用 SSH 密钥认证...")
 	}
 	sse.event(CleanupPhaseConnect, "running",
 		fmt.Sprintf("正在连接节点服务器 %s:%d...", node.ServerAddress, req.Port), "")
 	time.Sleep(cleanupStepDelay) // 确保前端先展示 "进行中" 状态
 
-	client, err := h.connectSSHWithRetry(node.ServerAddress, req.Username, password, req.Port, sse)
+	client, err := h.connectSSHWithRetry(node.ServerAddress, req.Username, password, privateKey, req.Port, sse)
 	if err != nil {
 		// SSH 连不上不阻断: 节点可能已下线/重装系统, DB 删除仍需执行
 		sse.eventWithCode(CleanupPhaseConnect, "warning",
@@ -252,10 +269,24 @@ func (h *NodeCleanupHandler) CleanupWithProgress(c *gin.Context) {
 // ============================================================
 // 带重试的 SSH 连接 (防卡死: 3次重试 + 递增等待 + 会话验证)
 // ============================================================
-func (h *NodeCleanupHandler) connectSSHWithRetry(host, username, password string, port int, sse *sseWriter) (*ssh.Client, error) {
+func (h *NodeCleanupHandler) connectSSHWithRetry(host, username, password, privateKey string, port int, sse *sseWriter) (*ssh.Client, error) {
+	// [FIX 2026-07-21] 与 auto_deploy.go 一致的认证方式: 密钥优先, 密码兜底
+	var authMethods []ssh.AuthMethod
+	if privateKey != "" {
+		signer, keyErr := parsePrivateKey(privateKey)
+		if keyErr != nil {
+			return nil, fmt.Errorf("SSH 私钥解析失败: %w", keyErr)
+		}
+		authMethods = append(authMethods, ssh.PublicKeys(signer))
+		if password != "" {
+			authMethods = append(authMethods, ssh.Password(password))
+		}
+	} else {
+		authMethods = append(authMethods, ssh.Password(password))
+	}
 	sshConfig := &ssh.ClientConfig{
 		User:            username,
-		Auth:            []ssh.AuthMethod{ssh.Password(password)},
+		Auth:            authMethods,
 		HostKeyCallback: hostKeyCallback(host),
 		Timeout:         cleanupSSHTimeout,
 		Config: ssh.Config{
@@ -467,17 +498,7 @@ func (h *NodeCleanupHandler) removeAgentImage(client *ssh.Client, sse *sseWriter
 	}
 }
 
-// CleanupSimple 简单删除 (兼容旧接口, 不走 SSH, 仅 DB+Redis 清理)
-// 路由: DELETE /api/v1/admin/nodes/:id (保持向后兼容)
-func (h *NodeCleanupHandler) CleanupSimple(c *gin.Context) {
-	id := c.Param("id")
-	if err := h.nodeService.DeleteNode(id); err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			response.Fail(c, response.CodeNotFound)
-			return
-		}
-		response.Fail(c, response.CodeServerError)
-		return
-	}
-	response.OKMsg(c, "已删除 (节点服务器残留资源未清理, 建议使用「清理并删除」)")
-}
+// [FIX 2026-07-21] 删除遗留的 CleanupSimple 死代码:
+//   之前注释声称 "路由: DELETE /api/v1/admin/nodes/:id", 但实际路由挂的是
+//   adminNodeH.NodeDelete(走 NodeService.DeleteNode), 此 handler 从未被引用.
+//   清理后 imports 中的 response 包也已不再需要(下方 CleanupWithProgress 全用 sse 推送).

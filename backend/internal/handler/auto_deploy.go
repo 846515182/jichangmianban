@@ -765,7 +765,11 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	// ============================================================
 	sse.event(PhaseBuild, "running", "正在预编译 node-agent 二进制...", "")
 
-	localNodeAgentPath := "/app/node_agent"
+	// [FIX 2026-07-21] 之前硬编码 "/app/node_agent", 导致 NODE_AGENT_PATH 环境变量
+	// 只影响 uploadNodeAgent(打包源码) 但不影响本地 hash 校验/scp 传输路径,
+	// 结果: 自定义 NODE_AGENT_PATH 时源码已打包但缓存永远未命中, 且 scp 找不到二进制.
+	// 修复: 统一使用 nodeAgentPath 变量(来自 getNodeAgentPath, 受 NODE_AGENT_PATH 控制).
+	localNodeAgentPath := nodeAgentPath
 	// [SEC-05] 缓存校验: 不仅看时间, 还比对源码 hash, 防止源码更新后误用旧二进制
 	sourceHashCmd := fmt.Sprintf(
 		"find %s -name '*.go' -o -name 'go.mod' -o -name 'go.sum' 2>/dev/null | sort | xargs md5sum 2>/dev/null | md5sum | cut -d' ' -f1",
@@ -821,7 +825,8 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	var transferOut string
 	var transferErr error
 	for retry := 1; retry <= 2; retry++ {
-		transferOut, transferErr = scpViaSSH(client, "/app/node_agent/agent", deployDir+"/agent")
+		// [FIX 2026-07-21] 与上面 localNodeAgentPath 保持一致, 不再硬编码 /app/node_agent/agent
+		transferOut, transferErr = scpViaSSH(client, localNodeAgentPath+"/agent", deployDir+"/agent")
 		if transferErr == nil {
 			break
 		}
