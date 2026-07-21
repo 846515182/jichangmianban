@@ -988,13 +988,15 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 			sse.event(PhaseStart, "log", "", fmt.Sprintf("启动失败, 第 %d 次重试 (先清理旧容器)...", retry))
 			sshRun(client, fmt.Sprintf("cd %s 2>/dev/null && docker compose -f docker-compose.node.yml --env-file .env.node down --timeout 5 2>/dev/null; docker rm -f %s 2>/dev/null; true", deployDir, containerName))
 			if !verifyDockerReady(client, sse) {
-				sse.event(PhaseStart, "log", "", "Docker daemon 已挂, 尝试修复...")
-				// 停掉后通过 systemd 重新拉起 (自动重启, 无需 setsid)
-				createDockerSystemdService(client)
-				sshRun(client, "systemctl stop docker docker.socket containerd 2>/dev/null; "+
-					"systemctl reset-failed docker docker.socket containerd 2>/dev/null; "+
+				// 修复 P0-REDEPLOY: 旧版这里 `systemctl stop docker` 会杀掉节点上所有容器
+				// (包括第一个节点的容器). 改为只清理 stale PID/sock 文件 + reset-failed
+				// 状态 + restart (live-restore 模式下 restart 不杀容器).
+				// 不再调 createDockerSystemdService — verifyDockerReady 守卫已保证只在
+				// docker 真没就绪时进入这里, 此时 service 文件通常是好的, 重启即可.
+				sse.event(PhaseStart, "log", "", "Docker daemon 已挂, 尝试通过 systemd restart 拉起 (不杀容器)...")
+				sshRun(client, "systemctl reset-failed docker docker.socket containerd 2>/dev/null; "+
 					"rm -f /var/run/docker.pid /run/docker.pid /var/run/docker.sock /run/docker.sock; "+
-					"systemctl restart containerd docker; sleep 5; true")
+					"systemctl restart containerd docker 2>/dev/null; sleep 5; true")
 				if !verifyDockerReady(client, sse) {
 					sse.eventWithCode(PhaseStart, "error", "Docker daemon 修复失败(重试中无法启动docker)", "", DeployErrDockerNotInstalled)
 					return false, DeployErrDockerNotInstalled, "Docker daemon 修复失败"
@@ -1649,19 +1651,51 @@ func runDockerFixScript(client *ssh.Client, sse *sseWriter) bool {
 	return false
 }
 
+// checkDockerReady 单纯检测 Docker daemon 是否就绪, 不动任何 service 文件, 不停 docker.
+//
+// 用于 ensureDocker / verifyDockerReady 流程的"已就绪就跳过"前置检测, 避免重新部署
+// 第二个节点时把已正常运行的 docker 重启从而杀掉第一个节点的容器.
+//
+// 返回 true 表示 docker info 能正常返回 Server 段.
+func checkDockerReady(client *ssh.Client) bool {
+	out, _ := sshRun(client, "timeout 10 docker info 2>&1 | grep -E '^(Server:|Cannot connect)' | head -1")
+	return strings.HasPrefix(strings.TrimSpace(out), "Server:")
+}
+
 // ensureDocker 检查并安装 Docker; 已安装则跳过
 // 兜底: get.docker.com 不可用时自动回退到阿里云镜像源安装
 // 修复: 已安装但启动失败时, 先做全面内核诊断, 如果内核不支持则直接报错不重试;
 //
 //	如果是系统重装后二进制残留, 卸载后重新安装
 func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
+	// ============================================================
+	// 2026-07-21 重构 (P0-REDEPLOY): "已就绪就跳过" 守卫
+	// 旧版根因 (导致重新部署第二个节点会卡住, 且会杀掉第一个节点容器):
+	//   1. 第一行无条件调 createDockerSystemdService
+	//   2. 第二步无条件 systemctl stop docker docker.socket containerd
+	//      → 杀掉所有正在运行的容器 (第二个节点部署时第一个节点容器被杀, 永久挂掉)
+	//   3. 流程顺序倒置: 先动 service 文件 + 停 docker, 才检测是否就绪
+	// 新流程: Step1 已就绪就 return (90% 二次部署场景走这里, 0 副作用)
+	//        Step2 没就绪才进入修复流程 (按"最小干预"逐级升级)
+	// ============================================================
+
+	// Step 1: 已就绪就跳过 (重新部署第二个节点的关键路径)
+	// 这一步零副作用: 不动 service 文件, 不停 docker, 不杀容器
+	if checkDockerReady(client) {
+		sse.event(PhaseInstallDocker, "done", "Docker 已就绪 (跳过安装/修复, 不影响已运行容器)", "")
+		return true, "", ""
+	}
+
+	// Step 2: docker 没就绪, 进入修复流程
 	// 先确保 systemd 服务文件存在 (静态安装可能没有), 然后用 systemd 管理
 	createDockerSystemdService(client)
 	// 检测并解除 Docker service masked 状态 (某些 VPS 供应商预置 mask)
 	unmaskDockerService(client, sse)
-	// 停掉已有 docker 进程, 清除重启计数器, 让 systemd 从干净状态接管
-	sshRun(client, "systemctl stop docker docker.socket containerd 2>/dev/null; "+
-		"systemctl reset-failed docker docker.socket containerd 2>/dev/null; "+
+
+	// 修复 P0-REDEPLOY: 不再无条件 `systemctl stop docker` (会杀容器).
+	// 只清理 stale PID/sock 文件 + reset-failed 状态, 然后让后续 systemctl start 拉起.
+	// 如果 docker 真的有进程残留, reset-failed + start 会自然处理.
+	sshRun(client, "systemctl reset-failed docker docker.socket containerd 2>/dev/null; "+
 		"rm -f /var/run/docker.pid /run/docker.pid /var/run/docker.sock /run/docker.sock /run/containerd/containerd.sock 2>/dev/null; true")
 
 	// 检测 Docker
@@ -1849,11 +1883,23 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 //
 // 策略: 先确认 containerd 存活(若死亡则尝试拉起), 然后轮询 docker info
 // 最多 30 秒(6 次 x 5s)。若超时, 尝试启动 dockerd 后继续轮询。
+//
+// 2026-07-21 重构 (P0-REDEPLOY):
+//   - 旧版第一行无条件调 createDockerSystemdService + 后续 "其他错误" 分支做
+//     `systemctl stop docker docker.socket containerd` → 在已运行 docker 的节点上
+//     会杀掉所有正在运行的容器(重新部署第二个节点时第一个节点被杀, 永久挂掉).
+//   - 新版: 顶部加 checkDockerReady 守卫, 已就绪立即 return (零副作用).
+//     只有 docker 真没就绪时才进入修复流程, 且修复只用 `systemctl restart`
+//     (live-restore 模式下不杀容器), 不再用 `systemctl stop`.
 func verifyDockerReady(client *ssh.Client, sse *sseWriter) bool {
-	// 确保 systemd 服务文件存在并用 systemd 管理 (自动重启, 不依赖 SSH)
-	createDockerSystemdService(client)
+	// Step 0: 已就绪就跳过 (重新部署第二个节点的关键路径, 零副作用)
+	// 不动 service 文件, 不停 docker, 不杀容器, 不重启 daemon
+	if checkDockerReady(client) {
+		return true
+	}
 
 	// 检查 containerd (docker daemon 依赖 containerd)
+	// 注意: 只在 docker 没就绪时才检查, 避免对已正常运行的服务做无谓干扰
 	containerdOut, _ := sshRun(client, "ps aux 2>/dev/null | grep -v grep | grep containerd | head -1 || echo 'CONTAINERD_DEAD'")
 	if strings.Contains(containerdOut, "CONTAINERD_DEAD") {
 		sse.event(PhaseInstallDocker, "log", "", "containerd 未运行, 通过 systemd 拉起...")
@@ -1881,10 +1927,11 @@ func verifyDockerReady(client *ssh.Client, sse *sseWriter) bool {
 			return false
 		}
 		// 其他错误: systemctl 状态异常(如 stale PID 文件导致 "process is still running"),
-		// 尝试修复: 先按 PID 文件精准杀僵尸进程, 再 pkill 兜底, 然后清理 socket/pid 重启
+		// 修复 P0-REDEPLOY: 不再 `systemctl stop docker` (会杀容器), 改用 restart
+		// (live-restore 模式下 restart 不杀容器; 非 live-restore 场景 docker 已坏, 容器也保不住).
+		// 只清理 stale PID 文件 + reset-failed 状态, 然后重启 daemon.
 		sse.event(PhaseInstallDocker, "log", "", fmt.Sprintf("Docker 异常(尝试修复): %s", strings.TrimSpace(out)))
-		sshRun(client, "systemctl stop docker docker.socket containerd 2>/dev/null; "+
-			"systemctl reset-failed docker docker.socket containerd 2>/dev/null; "+
+		sshRun(client, "systemctl reset-failed docker docker.socket containerd 2>/dev/null; "+
 			"rm -f /var/run/docker.pid /run/docker.pid /var/run/docker.sock /run/docker.sock; "+
 			"systemctl restart containerd docker 2>/dev/null; sleep 5; true")
 		time.Sleep(5 * time.Second)
