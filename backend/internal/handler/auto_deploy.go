@@ -1392,6 +1392,23 @@ systemctl enable containerd docker 2>/dev/null
 `)
 }
 
+// unmaskDockerService 检测并解除 Docker 服务的 masked 状态
+// 修复 "Failed to enable unit: Unit file /etc/systemd/system/docker.service is masked."
+// 策略: systemctl unmask → 删除 /dev/null 链接 → 创建正确 service 文件 → daemon-reload
+func unmaskDockerService(client *ssh.Client, sse *sseWriter) bool {
+	out, _ := sshRun(client, "systemctl is-enabled docker 2>/dev/null || echo 'unknown'")
+	if strings.Contains(out, "masked") {
+		sse.event(PhaseInstallDocker, "log", "", "检测到 Docker service 被 masked, 正在解除...")
+		sshRun(client, "systemctl unmask docker 2>/dev/null; true")
+		sshRun(client, "rm -f /etc/systemd/system/docker.service 2>/dev/null; true")
+		createDockerSystemdService(client)
+		sshRun(client, "systemctl daemon-reload 2>/dev/null; true")
+		sse.event(PhaseInstallDocker, "log", "", "Docker service masked 已解除, 已重建 service 文件")
+		return true
+	}
+	return false
+}
+
 // ensureDocker 检查并安装 Docker; 已安装则跳过
 // 兜底: get.docker.com 不可用时自动回退到阿里云镜像源安装
 // 修复: 已安装但启动失败时, 先做全面内核诊断, 如果内核不支持则直接报错不重试;
@@ -1400,6 +1417,8 @@ systemctl enable containerd docker 2>/dev/null
 func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 	// 先确保 systemd 服务文件存在 (静态安装可能没有), 然后用 systemd 管理
 	createDockerSystemdService(client)
+	// 检测并解除 Docker service masked 状态 (某些 VPS 供应商预置 mask)
+	unmaskDockerService(client, sse)
 	// 停掉已有 docker 进程, 清除重启计数器, 让 systemd 从干净状态接管
 	sshRun(client, "systemctl stop docker docker.socket containerd 2>/dev/null; "+
 		"systemctl reset-failed docker docker.socket containerd 2>/dev/null; "+
