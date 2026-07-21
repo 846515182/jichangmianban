@@ -77,7 +77,6 @@ type Agent struct {
 	mainCtx context.Context
 }
 
-
 // safeGo 安全启动 goroutine
 func safeGo(fn func()) {
 	go func() {
@@ -353,6 +352,7 @@ func (a *Agent) bootstrap(ctx context.Context) error {
 //   - 面板重启中 gRPC 暂时不可达
 //   - 节点 token 被误删, 运维在面板重新创建节点后能自动恢复
 //   - 面板 IP 变化后运维修正 .env 后能自动恢复
+//
 // 一旦 bootstrap 成功则返回, 主流程继续启动心跳/流量上报。
 //
 // P0-AG4: 接受 ctx 参数, select 监听 ctx.Done(), 收到 SIGTERM/SIGINT 时立即返回不再重试
@@ -694,38 +694,13 @@ func (a *Agent) doTrafficReport() {
 	}
 	nodeID := a.getNodeID()
 	now := time.Now().Unix()
-	// 使用 nodeID 作为聚合流量标识，替代魔数 UUID
-	aggregateUserID := "node:" + nodeID
-	records := []*proto.TrafficRecord{
-		{
-			NodeId:        nodeID,
-			UserId:        aggregateUserID,
-			UploadBytes:   upload,
-			DownloadBytes: download,
-			LogTime:       now,
-		},
-	}
-	resp, err := a.client.ReportRealtime(nodeID, a.cfg.NodeToken, records)
-	if err != nil {
-		if isFatalHeartbeatError(err) {
-			a.handleFatalShutdown(fmt.Sprintf("流量上报时节点已被删除/token失效: %v", err))
-			return
-		}
-		// 普通失败: 不消费增量, 下次周期重试(累加未上报的增量, 避免永久丢失)
-		log.Printf("流量上报失败: %v", err)
-		return
-	}
-	if resp.GetResp().GetCode() != 0 {
-		msg := resp.GetResp().GetMessage()
-		if isFatalHeartbeatMsg(msg) {
-			a.handleFatalShutdown(fmt.Sprintf("流量上报被拒: %s", msg))
-			return
-		}
-		// 被拒非致命: 不消费增量, 下次重试
-		log.Printf("流量上报被拒: code=%d msg=%s", resp.GetResp().GetCode(), msg)
-		return
-	}
-	// 上报成功, 消费增量(更新基线)
+	// 修复: 移除 "node:"+nodeID 聚合流量上报 — 面板后端已撤销聚合流量分发逻辑,
+	// 不再接受非 UUID 格式的 user_id, "node:xxx" 会被跳过并产生告警日志。
+	// 当前 agent 仅统计节点级总流量, 无用户维度, 暂不上报。
+	// TODO: 后续实现用户级流量统计后, 按真实 user_id 上报。
+	_ = nodeID
+	_ = now
+	// 消费增量避免内存堆积
 	a.traffic.Commit(upload, download)
 }
 
@@ -840,8 +815,9 @@ func readCPUUsage() float64 {
 //
 // 主路径: ss 命令统计 ESTABLISHED 连接(需容器装 iproute2)
 // 兜底:   ss 失败时(如容器未装 iproute2/命令不存在/语法问题)读 /proc/net/tcp[6],
-//         不依赖任何外部命令, 纯 Go 读文件。这样即使节点未重新部署(旧镜像没装 iproute2),
-//         连接数也能正常统计, 不至于恒为 0。
+//
+//	不依赖任何外部命令, 纯 Go 读文件。这样即使节点未重新部署(旧镜像没装 iproute2),
+//	连接数也能正常统计, 不至于恒为 0。
 //
 // 修复 NODE-DATA-01 (P0): 原 doHeartbeat 硬编码 onlineConns=0, 面板连接数永远显示 0。
 // 之前尝试用 ss 修复但 ss 不存在导致恒 0; 现加 /proc/net/tcp 兜底确保至少有值。
@@ -880,8 +856,10 @@ func (a *Agent) readOnlineConnections(ctx context.Context) int32 {
 //
 // 作为 ss 命令失败时的兜底, 不依赖 iproute2, 纯 Go 读文件。
 // /proc/net/tcp 格式:
-//   sl  local_address rem_address   st tx_queue ...
-//    0: 0100007F:1F90 0100007F:1F90 01 ...
+//
+//	sl  local_address rem_address   st tx_queue ...
+//	 0: 0100007F:1F90 0100007F:1F90 01 ...
+//
 // local_address/rem_address 格式: IP:PORT(端口为 4 位十六进制大写)
 // st 字段: 01=ESTABLISHED 0A=LISTEN 06=TIME_WAIT 等
 //

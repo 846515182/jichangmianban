@@ -28,10 +28,14 @@ func (r *SubscriptionRepo) GetByToken(token string) (*model.Subscription, error)
 }
 
 // GetByUserID 按用户 ID 查询订阅
+// 使用 Limit(1).Find 而非 First, 避免 GORM 在未找到时打印 record not found 日志
 func (r *SubscriptionRepo) GetByUserID(userID string) (*model.Subscription, error) {
 	var s model.Subscription
-	if err := r.db.Where("user_id = ? AND is_deleted = false", userID).First(&s).Error; err != nil {
+	if err := r.db.Where("user_id = ? AND is_deleted = false", userID).Limit(1).Find(&s).Error; err != nil {
 		return nil, err
+	}
+	if s.ID == "" {
+		return nil, gorm.ErrRecordNotFound
 	}
 	return &s, nil
 }

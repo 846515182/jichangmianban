@@ -154,7 +154,8 @@ func (s *TrafficServiceServer) ReportRealtime(ctx context.Context, req *nexuspb.
 				continue
 			}
 			if _, parseErr := uuid.Parse(r.GetUserId()); parseErr != nil {
-				s.logger.Warn("user_id 非有效 UUID, 跳过",
+				// 降为 Debug 避免日志噪音(agent 旧版可能上报 "node:xxx" 格式)
+				s.logger.Debug("user_id 非有效 UUID, 跳过",
 					zap.String("user_id", r.GetUserId()))
 				continue
 			}
