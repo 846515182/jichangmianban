@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 import (
 	"context"
@@ -333,8 +333,7 @@ func initDB(cfg *config.Config, logger *zap.Logger) (*gorm.DB, error) {
 	gormCfg := &gorm.Config{
 		Logger: gormlogger.Default.LogMode(gormlogger.Warn),
 	}
-	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s TimeZone=UTC", cfg.DBHost, cfg.DBPort, cfg.DBUser, cfg.DBPass, cfg.DBName, cfg.DBSSlMode)
-	db, err := gorm.Open(postgres.Open(connStr), gormCfg)
+	db, err := gorm.Open(postgres.Open(cfg.DSN()), gormCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -593,3 +592,6 @@ func ginZapLogger(logger *zap.Logger) gin.HandlerFunc {
 		)
 	}
 }
+
+
+
