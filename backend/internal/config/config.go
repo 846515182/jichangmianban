@@ -119,18 +119,18 @@ func Load() (*Config, error) {
 	cfg.JWTAccessTTL = getEnvDuration("JWT_ACCESS_TTL", 24*time.Hour)
 	cfg.JWTRefreshTTL = getEnvDuration("JWT_REFRESH_TTL", 7*24*time.Hour)
 
-	if cfg.DBPass == "" {
-		return nil, fmt.Errorf("环境变量 DB_PASSWORD 未设�? 请在 .env 中配�?PostgreSQL 密码")
-	}
-	if cfg.JWTSecret == "" {
-		return nil, fmt.Errorf("环境变量 JWT_SECRET 未设�?)
-	}
-	if cfg.AESMasterKey == "" {
-		return nil, fmt.Errorf("环境变量 AES_MASTER_KEY 未设�?)
-	}
-	if cfg.HMACSubSecret == "" {
-		return nil, fmt.Errorf("环境变量 HMAC_SUB_SECRET 未设�?)
-	}
+if cfg.DBPass == "" {
+	return nil, fmt.Errorf("环境变量 DB_PASSWORD 未设置, 请在 .env 中配置 PostgreSQL 密码")
+}
+if cfg.JWTSecret == "" {
+	return nil, fmt.Errorf("环境变量 JWT_SECRET 未设置")
+}
+if cfg.AESMasterKey == "" {
+	return nil, fmt.Errorf("环境变量 AES_MASTER_KEY 未设置")
+}
+if cfg.HMACSubSecret == "" {
+	return nil, fmt.Errorf("环境变量 HMAC_SUB_SECRET 未设置")
+}
 	// 修复 F-06: 密钥强度校验, 防止弱密钥导致签名可被暴力破�?
 	// JWTSecret / HMACSubSecret 均要�?>= 32 字节(256 bit), �?HS256 安全强度对齐
 	if len(cfg.JWTSecret) < 32 {
@@ -142,7 +142,8 @@ func Load() (*Config, error) {
 	if decoded, err := base64.StdEncoding.DecodeString(cfg.AESMasterKey); err == nil && len(decoded) == 32 {
 		cfg.AESMasterKey = string(decoded)
 	} else if len(cfg.AESMasterKey) != 32 {
-		return nil, fmt.Errorf("AES_MASTER_KEY 必须�?32 字节(使用 openssl rand -base64 32 生成)")
+		return nil, fmt.Errorf("AES_MASTER_KEY 必须为 32 字节(使用 openssl rand -base64 32 生成)")
+
 	}
 
 	// 兜底: CA 私钥存在�?CA 证书缺失�? 自动从私钥生成自签名 CA 证书�?
@@ -156,6 +157,10 @@ func Load() (*Config, error) {
 func (c *Config) DSN() string {
 	return fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s TimeZone=UTC",
 		c.DBHost, c.DBPort, c.DBUser, c.DBPass, c.DBName, c.DBSSlMode)
+}
+
+func (c *Config) GRPCTLSEnabled() bool {
+	return c.GRPCTLSCert != "" && c.GRPCTLSKey != ""
 }
 
 func (c *Config) LoadGRPCTLSConfig() (*tls.Config, error) {
@@ -334,6 +339,9 @@ func publicKeyFor(priv crypto.PrivateKey) crypto.PublicKey {
 		return nil
 	}
 }
+
+
+
 
 
 

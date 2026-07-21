@@ -356,7 +356,7 @@ func (h *AdminNodeHandler) PingNode(c *gin.Context) {
 		return
 	}
 
-	addr := fmt.Sprintf("%s:%d", node.ServerAddress, node.GrpcPort)
+	addr := net.JoinHostPort(node.ServerAddress, strconv.Itoa(node.GrpcPort))
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		// TCP 连接失败 → 节点确实不在线，立即标记离线
