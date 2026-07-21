@@ -47,7 +47,8 @@ func (s *SubscribeService) GenerateSignedURL(userID, baseURL, clientIP string) (
 		return "", err
 	}
 	hmacMgr := security.NewHMACManager(app.Get().Cfg.HMACSubSecret)
-	sigStr, _ := hmacMgr.SignWithTTL(sub.SubToken, userID, app.Get().Cfg.SubSigTTL)
+	sig, exp := hmacMgr.SignWithTTL(sub.SubToken, userID, app.Get().Cfg.SubSigTTL)
+	sigStr := hmacMgr.BuildSigStr(exp, sig)
 
 	u, err := url.Parse(strings.TrimRight(baseURL, "/") + "/api/v1/subscribe")
 	if err != nil {
