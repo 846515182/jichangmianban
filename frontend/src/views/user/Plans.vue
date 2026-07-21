@@ -230,6 +230,7 @@ const planList = ref<Plan[]>([])
 const payMethods = [
   { value: 'epay_alipay', label: '支付宝', icon: 'Wallet', color: '#1677ff' },
   { value: 'epay_wechat', label: '微信支付', icon: 'ChatDotRound', color: '#07c160' },
+  { value: 'epay_usdt', label: 'USDT', icon: 'Money', color: '#f5a623' },
 ]
 
 // 解析 JSON 数组字符串为字符串数组(容错)

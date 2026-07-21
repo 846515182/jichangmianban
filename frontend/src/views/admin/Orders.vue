@@ -238,7 +238,7 @@ const statusTagType = (s: string): TagType => {
 }
 const payMethodText = (m: string): string => {
   const map: Record<string, string> = {
-    epay_alipay: '支付宝', epay_wechat: '微信支付',
+    epay_alipay: '支付宝', epay_wechat: '微信支付', epay_usdt: 'USDT',
   }
   return map[m] || m
 }

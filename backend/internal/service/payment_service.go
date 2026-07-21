@@ -57,12 +57,15 @@ const (
 
 // paymentMethodToEPayType 将内部 payment_method 映射为 EPay 的 type 参数
 // 注意: 柠檬支付(lemzf)等易支付协议的微信支付 type 为 wxpay, 不是 wechat
+// 文档支持: alipay(支付宝), wxpay(微信支付), usdt(USDT)
 func paymentMethodToEPayType(method string) string {
 	switch method {
 	case "epay_alipay":
 		return "alipay"
 	case "epay_wechat":
 		return "wxpay"
+	case "epay_usdt":
+		return "usdt"
 	default:
 		return ""
 	}
@@ -238,13 +241,19 @@ func (s *PaymentService) CreatePayment(o *model.Order, baseURL string) (*CreateP
 	if returnURL == "" && baseURL != "" {
 		returnURL = strings.TrimRight(baseURL, "/") + "/api/v1/payment/return"
 	}
+	// 商品名称: 文档要求超过 127 字节自动截取
+	// 必须在签名前截断, 否则签名用的 name 与 EPay 截断后的不一致 → 验签失败
+	name := o.PlanName
+	if b := []byte(name); len(b) > 127 {
+		name = string(b[:127])
+	}
 	params := map[string]string{
 		"pid":          fmt.Sprintf("%d", cfg.PID),
 		"type":         payType,
 		"out_trade_no": o.OrderNo,
 		"notify_url":   notifyURL,
 		"return_url":   returnURL,
-		"name":         o.PlanName,
+		"name":         name,
 		"money":        money,
 	}
 	sign := epaySign(params, cfg.Key)
@@ -366,19 +375,24 @@ func parseMoneyToCents(money string) (int64, error) {
 	return int64(math.Round(f * 100)), nil
 }
 
-// epaySign EPay 签名算法:
-// 1. 参数按 key 升序排序
-// 2. 过滤 sign 与 sign_type(空值不过滤, 与 EPay 官方算法对齐)
+// epaySign EPay 签名算法 (按官方文档):
+// 1. 参数按 key 升序排序 (ASCII a-z)
+// 2. 过滤 sign、sign_type、值为空或"0"的参数 (文档原文: "sign、sign_type、值为空或0时，不参与签名")
 // 3. 拼接成 a=1&b=2 格式
-// 4. 末尾加上 key
+// 4. 末尾拼接商户密钥 KEY
 // 5. MD5 加密(小写 hex)
 //
-// 修复 P0-2: 旧实现过滤空值, 与 EPay 官方签名算法不一致(官方不过滤空值),
-// 存在签名绕过风险。现改为与官方对齐: 仅过滤 sign/sign_type, 保留空值参数。
+// 修复 P0: 之前的"修复 P0-2"错误地认为官方不过滤空值, 实际文档明确要求过滤空值和"0"值。
+// 不过滤会导致回调验签失败: EPay 签名时排除了空值参数(如 param=""), 而我们验签时包含了它们,
+// 导致拼接串不同 → 签名不匹配 → 回调被拒 → 用户付款但订单未开通。
 func epaySign(params map[string]string, key string) string {
 	keys := make([]string, 0, len(params))
-	for k := range params {
+	for k, v := range params {
 		if k == "sign" || k == "sign_type" {
+			continue
+		}
+		// 文档: "值为空或0时，不参与签名"
+		if v == "" || v == "0" {
 			continue
 		}
 		keys = append(keys, k)
@@ -432,9 +446,9 @@ func (s *PaymentService) QueryOrderStatus(orderNo string) (*EPayOrderStatus, err
 		return nil, errors.New("EPay 配置不完整")
 	}
 	params := map[string]string{
-		"act":           "order",
-		"pid":           fmt.Sprintf("%d", cfg.PID),
-		"out_trade_no":  orderNo,
+		"act":          "order",
+		"pid":          fmt.Sprintf("%d", cfg.PID),
+		"out_trade_no": orderNo,
 	}
 	sign := epaySign(params, cfg.Key)
 	queryURL := strings.TrimRight(cfg.APIURL, "/") + "/api.php?act=order" +
@@ -490,7 +504,9 @@ func (s *PaymentService) QueryOrderStatus(orderNo string) (*EPayOrderStatus, err
 //   - 若网关支持退款, 调用并返回 nil;
 //   - 若网关返回"不支持退款"等业务错误, 返回 nil(本地已退款, 第三方侧人工对账);
 //   - 仅网络/系统错误返回 err, 由调用方决定是否告警。
+//
 // 已在 OrderService.AdminRefund 之外被调用, 不阻塞本地退款流程。
+// 修复 P1: 文档明确要求退款接口使用 POST 请求, 旧代码用 GET。
 func (s *PaymentService) RequestRefund(orderNo, tradeNo, money string) error {
 	cfg, err := s.loadConfig()
 	if err != nil {
@@ -507,15 +523,26 @@ func (s *PaymentService) RequestRefund(orderNo, tradeNo, money string) error {
 		"money":        money,
 	}
 	sign := epaySign(params, cfg.Key)
-	queryURL := strings.TrimRight(cfg.APIURL, "/") + "/api.php?act=refund" +
-		"&pid=" + fmt.Sprintf("%d", cfg.PID) +
-		"&out_trade_no=" + url.QueryEscape(orderNo) +
-		"&trade_no=" + url.QueryEscape(tradeNo) +
-		"&money=" + url.QueryEscape(money) +
-		"&sign=" + sign +
-		"&sign_type=MD5"
+	// 文档: POST /api.php?act=refund, 请求格式 application/x-www-form-urlencoded
+	postURL := strings.TrimRight(cfg.APIURL, "/") + "/api.php?act=refund"
+	form := url.Values{}
+	form.Set("pid", fmt.Sprintf("%d", cfg.PID))
+	form.Set("out_trade_no", orderNo)
+	form.Set("trade_no", tradeNo)
+	form.Set("money", money)
+	form.Set("sign", sign)
+	form.Set("sign_type", "MD5")
 
-	resp, err := httpGetWithTimeout(queryURL, 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, postURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return fmt.Errorf("构建退款请求失败: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", "NexusPanel/1.0")
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("退款请求失败: %w", err)
 	}
@@ -537,7 +564,6 @@ func (s *PaymentService) RequestRefund(orderNo, tradeNo, money string) error {
 	case float64:
 		codeVal = v
 	case string:
-		// 解析字符串 code
 		var f float64
 		if _, err := fmt.Sscanf(v, "%f", &f); err == nil {
 			codeVal = f

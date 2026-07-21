@@ -106,7 +106,7 @@ import { formatTime } from '@/utils/format'
 
 // 订单类型(与后端 model.Order JSON tag 对齐, snake_case)
 type OrderStatus = 'pending' | 'paid' | 'cancelled' | 'expired' | 'refunded'
-type PayMethod = 'epay_alipay' | 'epay_wechat' | ''
+type PayMethod = 'epay_alipay' | 'epay_wechat' | 'epay_usdt' | ''
 
 interface Order {
   id: string
@@ -154,7 +154,7 @@ const statusTagType = (s: OrderStatus): TagType => {
 // 支付方式映射
 const payMethodText = (m: PayMethod): string => {
   const map: Record<string, string> = {
-    epay_alipay: '支付宝', epay_wechat: '微信支付',
+    epay_alipay: '支付宝', epay_wechat: '微信支付', epay_usdt: 'USDT',
   }
   return map[m] || m
 }
