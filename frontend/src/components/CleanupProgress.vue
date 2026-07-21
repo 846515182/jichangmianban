@@ -1,30 +1,30 @@
-<template>
-  <el-dialog v-model="visible" title="清理并删除节点" :width="dialogWidth" top="5vh" class="cleanup-progress-dialog" :close-on-click-modal="false" :show-close="!running">
+﻿<template>
+  <el-dialog v-model="visible" title="娓呯悊骞跺垹闄よ妭鐐? :width="dialogWidth" top="5vh" class="cleanup-progress-dialog" :close-on-click-modal="false" :show-close="!running">
     <div class="cp-container">
-      <!-- 未开始：密码输入 -->
+      <!-- 鏈紑濮嬶細瀵嗙爜杈撳叆 -->
       <div v-if="!started" class="cp-pwd-bar">
         <el-alert type="warning" :closable="false" show-icon style="margin-bottom:12px">
           <template #title>
-            面板将自动 SSH 连接节点服务器，停止 agent 容器、删除部署目录（含 .env.node/二进制/xray-cache），然后执行面板侧 DB 删除。整个流程全自动，失败步骤会跳过但最终 DB 删除一定执行。
+            闈㈡澘灏嗚嚜鍔?SSH 杩炴帴鑺傜偣鏈嶅姟鍣紝鍋滄 agent 瀹瑰櫒銆佸垹闄ら儴缃茬洰褰曪紙鍚?.env.node/浜岃繘鍒?xray-cache锛夛紝鐒跺悗鎵ц闈㈡澘渚?DB 鍒犻櫎銆傛暣涓祦绋嬪叏鑷姩锛屽け璐ユ楠や細璺宠繃浣嗘渶缁?DB 鍒犻櫎涓€瀹氭墽琛屻€?
           </template>
         </el-alert>
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-          <el-input v-model="password" type="password" show-password placeholder="节点服务器 root 密码" style="width:200px" @keyup.enter="start" autocomplete="new-password" name="cleanup-pwd" />
-          <el-input v-model="username" placeholder="用户" style="width:90px" />
+          <el-input v-model="password" type="password" show-password placeholder="鑺傜偣鏈嶅姟鍣?root 瀵嗙爜" style="width:200px" @keyup.enter="start" autocomplete="new-password" name="cleanup-pwd" />
+          <el-input v-model="username" placeholder="鐢ㄦ埛" style="width:90px" />
           <el-input-number v-model="port" :min="1" :max="65535" controls-position="right" style="width:110px" />
-          <el-checkbox v-model="removeImg">同时删镜像</el-checkbox>
+          <el-checkbox v-model="removeImg">鍚屾椂鍒犻暅鍍?/el-checkbox>
           <el-button type="danger" :disabled="!password" @click="start">
-            <el-icon><Delete /></el-icon> 开始清理并删除
+            <el-icon><Delete /></el-icon> 寮€濮嬫竻鐞嗗苟鍒犻櫎
           </el-button>
         </div>
         <el-alert type="info" :closable="false" style="margin-top:12px">
-          <template #title>不填密码也可点击关闭按钮，将仅执行面板侧删除（节点服务器残留资源需手动清理）。</template>
+          <template #title>涓嶅～瀵嗙爜涔熷彲鐐瑰嚮鍏抽棴鎸夐挳锛屽皢浠呮墽琛岄潰鏉夸晶鍒犻櫎锛堣妭鐐规湇鍔″櫒娈嬬暀璧勬簮闇€鎵嬪姩娓呯悊锛夈€?/template>
         </el-alert>
       </div>
 
-      <!-- 进行中/完成：5 步进度展示 -->
+      <!-- 杩涜涓?瀹屾垚锛? 姝ヨ繘搴﹀睍绀?-->
       <div v-else class="cp-progress">
-        <!-- 5 步进度条 -->
+        <!-- 5 姝ヨ繘搴︽潯 -->
         <div class="cp-steps-bar">
           <div
             v-for="(step, i) in phaseSteps"
@@ -37,24 +37,24 @@
           </div>
         </div>
 
-        <!-- 详细事件流 (渐进式展示, 每个事件独立渲染, 不会一次性跳出) -->
+        <!-- 璇︾粏浜嬩欢娴?(娓愯繘寮忓睍绀? 姣忎釜浜嬩欢鐙珛娓叉煋, 涓嶄細涓€娆℃€ц烦鍑? -->
         <div class="cp-events" ref="eventsContainer">
           <TransitionGroup name="cp-ev" tag="div">
             <div v-for="(ev, i) in displayedEvents" :key="i" class="cp-event" :class="ev.status">
               <div class="cp-ev-head">
                 <span class="cp-ev-icon">
-                  <span v-if="ev.status === 'running'" class="cp-spin">⟳</span>
-                  <span v-else-if="ev.status === 'done'">✓</span>
-                  <span v-else-if="ev.status === 'error'">✗</span>
-                  <span v-else-if="ev.status === 'warning'">⚠</span>
-                  <span v-else-if="ev.status === 'log'" class="cp-ev-dot">·</span>
-                  <span v-else>·</span>
+                  <span v-if="ev.status === 'running'" class="cp-spin">鉄?/span>
+                  <span v-else-if="ev.status === 'done'">鉁?/span>
+                  <span v-else-if="ev.status === 'error'">鉁?/span>
+                  <span v-else-if="ev.status === 'warning'">鈿?/span>
+                  <span v-else-if="ev.status === 'log'" class="cp-ev-dot">路</span>
+                  <span v-else>路</span>
                 </span>
                 <span class="cp-ev-step">{{ stepName(ev.step) }}</span>
-                <el-tag v-if="ev.status === 'done'" size="small" type="success">完成</el-tag>
-                <el-tag v-else-if="ev.status === 'error'" size="small" type="danger">失败</el-tag>
-                <el-tag v-else-if="ev.status === 'running'" size="small" type="warning">进行中</el-tag>
-                <el-tag v-else-if="ev.status === 'warning'" size="small" type="warning" effect="dark">警告</el-tag>
+                <el-tag v-if="ev.status === 'done'" size="small" type="success">瀹屾垚</el-tag>
+                <el-tag v-else-if="ev.status === 'error'" size="small" type="danger">澶辫触</el-tag>
+                <el-tag v-else-if="ev.status === 'running'" size="small" type="warning">杩涜涓?/el-tag>
+                <el-tag v-else-if="ev.status === 'warning'" size="small" type="warning" effect="dark">璀﹀憡</el-tag>
               </div>
               <div v-if="ev.msg" class="cp-ev-msg">{{ ev.msg }}</div>
               <pre v-if="ev.output" class="cp-ev-output">{{ ev.output }}</pre>
@@ -64,10 +64,10 @@
 
         <div v-if="running" class="cp-loading">
           <el-icon class="is-loading"><Loading /></el-icon>
-          正在执行清理...
+          姝ｅ湪鎵ц娓呯悊...
         </div>
         <div v-else-if="finished" class="cp-done">
-          <el-button type="primary" @click="close">完成</el-button>
+          <el-button type="primary" @click="close">瀹屾垚</el-button>
         </div>
       </div>
     </div>
@@ -102,30 +102,30 @@ const running = ref(false)
 const finished = ref(false)
 const events = ref<Array<{step: string; status: string; msg: string; output: string}>>([])
 
-// 渐进式展示: 用 displayedEvents 逐条渲染, 配合 CSS transition 实现动画
+// 娓愯繘寮忓睍绀? 鐢?displayedEvents 閫愭潯娓叉煋, 閰嶅悎 CSS transition 瀹炵幇鍔ㄧ敾
 const displayedEvents = ref<Array<{step: string; status: string; msg: string; output: string}>>([])
 let revealTimer: ReturnType<typeof setInterval> | null = null
 
 const eventsContainer = ref<HTMLElement>()
 
-// 5 步阶段定义
+// 5 姝ラ樁娈靛畾涔?
 const phaseSteps = [
-  { key: 'connect', name: 'SSH连接' },
-  { key: 'stop', name: '停容器' },
-  { key: 'dir', name: '删目录' },
-  { key: 'image', name: '删镜像' },
-  { key: 'finalize', name: 'DB清理' },
+  { key: 'connect', name: 'SSH杩炴帴' },
+  { key: 'stop', name: '鍋滃鍣? },
+  { key: 'dir', name: '鍒犵洰褰? },
+  { key: 'image', name: '鍒犻暅鍍? },
+  { key: 'finalize', name: 'DB娓呯悊' },
 ]
 
 const activePhase = ref<string>('')
 
 const stepNames: Record<string, string> = {
-  connect: '1. SSH 连接节点服务器',
-  stop: '2. 停止并删除 agent 容器',
-  dir: '3. 删除部署目录',
-  image: '4. 删除 docker 镜像',
-  finalize: '5. 面板侧 DB+Redis 清理',
-  finish: '清理完成',
+  connect: '1. SSH 杩炴帴鑺傜偣鏈嶅姟鍣?,
+  stop: '2. 鍋滄骞跺垹闄?agent 瀹瑰櫒',
+  dir: '3. 鍒犻櫎閮ㄧ讲鐩綍',
+  image: '4. 鍒犻櫎 docker 闀滃儚',
+  finalize: '5. 闈㈡澘渚?DB+Redis 娓呯悊',
+  finish: '娓呯悊瀹屾垚',
 }
 const stepName = (s: string) => stepNames[s] || s
 
@@ -154,7 +154,7 @@ const resetIfClosed = (v: boolean) => {
   }
 }
 
-// 渐进展示定时器: 逐条将 events 推入 displayedEvents, 每条间隔 ~80ms
+// 娓愯繘灞曠ず瀹氭椂鍣? 閫愭潯灏?events 鎺ㄥ叆 displayedEvents, 姣忔潯闂撮殧 ~80ms
 const startReveal = () => {
   stopReveal()
   let idx = 0
@@ -162,7 +162,7 @@ const startReveal = () => {
     if (idx < events.value.length) {
       displayedEvents.value.push(events.value[idx])
       idx++
-      // 自动滚动到底部
+      // 鑷姩婊氬姩鍒板簳閮?
       nextTick(() => {
         if (eventsContainer.value) {
           eventsContainer.value.scrollTop = eventsContainer.value.scrollHeight
@@ -170,9 +170,9 @@ const startReveal = () => {
       })
     } else {
       stopReveal()
-      // 兜底: 确保 running 结束时所有事件都展示了
+      // 鍏滃簳: 纭繚 running 缁撴潫鏃舵墍鏈変簨浠堕兘灞曠ず浜?
       if (!running.value) {
-        // 如果 stopped, 立即展示剩余
+        // 濡傛灉 stopped, 绔嬪嵆灞曠ず鍓╀綑
         while (idx < events.value.length) {
           displayedEvents.value.push(events.value[idx])
           idx++
@@ -196,10 +196,10 @@ const addEvent = (step: string, status: string, msg: string, output: string = ''
   }
 }
 
-// SSE 流式消费清理接口
+// SSE 娴佸紡娑堣垂娓呯悊鎺ュ彛
 const start = async () => {
   if (!password.value) {
-    ElMessage.warning('请输入节点服务器密码')
+    ElMessage.warning('璇疯緭鍏ヨ妭鐐规湇鍔″櫒瀵嗙爜')
     return
   }
   started.value = true
@@ -209,20 +209,20 @@ const start = async () => {
   displayedEvents.value = []
   activePhase.value = ''
 
-  // 启动渐进展示定时器
+  // 鍚姩娓愯繘灞曠ず瀹氭椂鍣?
   startReveal()
 
   const auth = useAuthStore()
   const token = auth.token
 
-  // 用 fetch + ReadableStream 消费 SSE (不能用 axios, 因 axios 不支持流式)
+  // 鐢?fetch + ReadableStream 娑堣垂 SSE (涓嶈兘鐢?axios, 鍥?axios 涓嶆敮鎸佹祦寮?
   const url = `/api/v1/admin/nodes/${props.nodeId}/cleanup`
   try {
     const resp = await fetch(url, {
       method: 'DELETE',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': token ? `Bearer ${token}` : '',
+        'Authorization': token ? 'Bearer ' + token : '',
       },
       body: JSON.stringify({
         password: password.value,
@@ -237,7 +237,7 @@ const start = async () => {
       running.value = false
       finished.value = true
       stopReveal()
-      // 立即展示所有事件
+      // 绔嬪嵆灞曠ず鎵€鏈変簨浠?
       displayedEvents.value = [...events.value]
       return
     }
@@ -249,12 +249,12 @@ const start = async () => {
       const { done, value } = await reader.read()
       if (done) break
       buffer += decoder.decode(value, { stream: true })
-      // SSE 事件以 \n\n 分隔
+      // SSE 浜嬩欢浠?\n\n 鍒嗛殧
       let idx
       while ((idx = buffer.indexOf('\n\n')) >= 0) {
         const raw = buffer.slice(0, idx)
         buffer = buffer.slice(idx + 2)
-        if (!raw.startsWith('data: ')) continue // 跳过心跳注释
+        if (!raw.startsWith('data: ')) continue // 璺宠繃蹇冭烦娉ㄩ噴
         const jsonStr = raw.slice(6)
         try {
           const ev = JSON.parse(jsonStr)
@@ -266,22 +266,22 @@ const start = async () => {
       }
     }
     if (!sawFinish) {
-      addEvent('finalize', 'warning', 'SSE 流提前结束(可能网络中断)，但后端清理可能已完成')
+      addEvent('finalize', 'warning', 'SSE 娴佹彁鍓嶇粨鏉?鍙兘缃戠粶涓柇)锛屼絾鍚庣娓呯悊鍙兘宸插畬鎴?)
     }
   } catch (e: any) {
-    addEvent('finalize', 'error', '请求失败: ' + (e?.message || String(e)))
+    addEvent('finalize', 'error', '璇锋眰澶辫触: ' + (e?.message || String(e)))
   } finally {
     running.value = false
     finished.value = true
-    // 等渐进展示完成后再停
+    // 绛夋笎杩涘睍绀哄畬鎴愬悗鍐嶅仠
     setTimeout(() => {
       stopReveal()
-      // 确保所有事件都已展示
+      // 纭繚鎵€鏈変簨浠堕兘宸插睍绀?
       if (displayedEvents.value.length < events.value.length) {
         displayedEvents.value = [...events.value]
       }
     }, 500)
-    // 通知父组件刷新列表
+    // 閫氱煡鐖剁粍浠跺埛鏂板垪琛?
     emit('done')
   }
 }
@@ -357,7 +357,7 @@ const close = () => {
 }
 .cp-done { margin-top: 12px; text-align: center; }
 
-/* 渐进展示动画: 每个事件淡入滑入 */
+/* 娓愯繘灞曠ず鍔ㄧ敾: 姣忎釜浜嬩欢娣″叆婊戝叆 */
 .cp-ev-enter-active {
   transition: all 0.35s ease-out;
 }
@@ -375,3 +375,6 @@ const close = () => {
   color: var(--np-text-muted, #909399);
 }
 </style>
+
+
+
