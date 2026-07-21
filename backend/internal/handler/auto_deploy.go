@@ -842,13 +842,16 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 			sshRun(client, fmt.Sprintf("cd %s 2>/dev/null && docker compose -f docker-compose.node.yml --env-file .env.node down --timeout 5 2>/dev/null; docker rm -f %s 2>/dev/null; true", deployDir, containerName))
 			if !verifyDockerReady(client, sse) {
 				sse.event(PhaseStart, "log", "", "Docker daemon 已挂, 尝试修复...")
-				sshRun(client, "systemctl stop docker 2>/dev/null; "+
+				sshRun(client, "systemctl stop docker docker.socket 2>/dev/null; "+
+					"systemctl disable docker docker.socket 2>/dev/null; "+
+					"systemctl reset-failed docker docker.socket 2>/dev/null; "+
+					"systemctl mask docker docker.socket 2>/dev/null; "+
 					"kill -9 $(cat /var/run/docker.pid 2>/dev/null) 2>/dev/null; "+
 					"pkill -9 dockerd 2>/dev/null; "+
 					"rm -f /var/run/docker.pid /run/docker.pid /var/run/docker.sock /run/docker.sock; "+
 					"sleep 2; "+
-					"systemctl start docker 2>/dev/null || "+
-					"(setsid /usr/local/bin/dockerd > /var/log/dockerd.log 2>&1 < /dev/null &); "+
+					"(ps aux | grep -v grep | grep -q containerd || (setsid containerd > /var/log/containerd.log 2>&1 < /dev/null &); "+
+					"setsid /usr/local/bin/dockerd > /var/log/dockerd.log 2>&1 < /dev/null &); "+
 					"sleep 5; true")
 				if !verifyDockerReady(client, sse) {
 					sse.eventWithCode(PhaseStart, "error", "Docker daemon 修复失败(重试中无法启动docker)", "", DeployErrDockerNotInstalled)
@@ -1303,6 +1306,14 @@ func diagnoseDockerFailure(client *ssh.Client, sse *sseWriter) dockerDiag {
 //
 //	如果是系统重装后二进制残留, 卸载后重新安装
 func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
+	// 先停掉 systemd 的 docker 服务, 避免重启计时器在后台干扰手动启动的 dockerd
+	// 系统日志: "Scheduled restart job, restart counter is at 8" → systemd 不断重启 docker.service
+	// 此时 setsid dockerd 手动启动的 daemon 会被 systemd 干扰导致反复崩溃
+	// reset-failed 清除重启计数器; mask 彻底禁用 (systemctl start 也会失败), 避免意外拉起
+	sshRun(client, "systemctl stop docker docker.socket 2>/dev/null; systemctl disable docker docker.socket 2>/dev/null; "+
+		"systemctl reset-failed docker docker.socket 2>/dev/null; "+
+		"systemctl mask docker docker.socket 2>/dev/null; true")
+
 	// 检测 Docker
 	checkOut, _ := sshRun(client, "command -v docker >/dev/null 2>&1 && echo 'INSTALLED' || echo 'NOT_INSTALLED'")
 	if strings.Contains(checkOut, "INSTALLED") {
@@ -1335,7 +1346,8 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 			// setsid 比 nohup 更可靠: 创建新会话, dockerd 完全独立于 SSH,
 			// SSH 断连不会杀死 daemon
 			// 修复: containerd 必须在 dockerd 前启动, 否则 dockerd 连不上 containerd.sock
-			sshRun(client, "ps aux | grep -v grep | grep -q containerd || (setsid containerd > /var/log/containerd.log 2>&1 < /dev/null &); sleep 2; "+
+			sshRun(client, "ps aux | grep -v grep | grep -q containerd || (setsid containerd > /var/log/containerd.log 2>&1 < /dev/null &); "+
+				"for i in 1 2 3 4 5 6 7 8 9 10; do [ -S /run/containerd/containerd.sock ] && break; sleep 1; done; "+
 				"pkill dockerd 2>/dev/null; rm -f /var/run/docker.pid /run/docker.pid /var/run/docker.sock /run/docker.sock; "+
 				"setsid /usr/local/bin/dockerd > /var/log/dockerd.log 2>&1 < /dev/null &; sleep 3; true")
 			for i := 0; i < 10; i++ {
@@ -1416,7 +1428,8 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 			})
 			if strings.Contains(out2, "INSTALL_OK") {
 				// 手动启动 Docker daemon (setsid 确保独立于 SSH 会话)
-				sshRun(client, "ps aux | grep -v grep | grep -q containerd || (setsid containerd > /var/log/containerd.log 2>&1 < /dev/null &); sleep 2; "+
+				sshRun(client, "ps aux | grep -v grep | grep -q containerd || (setsid containerd > /var/log/containerd.log 2>&1 < /dev/null &); "+
+					"for i in 1 2 3 4 5 6 7 8 9 10; do [ -S /run/containerd/containerd.sock ] && break; sleep 1; done; "+
 					"pkill dockerd 2>/dev/null; rm -f /var/run/docker.pid /run/docker.pid /var/run/docker.sock /run/docker.sock; "+
 					"setsid /usr/local/bin/dockerd > /var/log/dockerd.log 2>&1 < /dev/null &; sleep 3; true")
 				sse.event(PhaseInstallDocker, "done", "Docker 安装完成 (中科大镜像源)", "")
@@ -1446,7 +1459,8 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 		}
 		if !startedWithSystemd {
 			// 静态安装方式兜底: setsid 手动启动 daemon (独立于 SSH 会话)
-			sshRun(client, "ps aux | grep -v grep | grep -q containerd || (setsid containerd > /var/log/containerd.log 2>&1 < /dev/null &); sleep 2; "+
+			sshRun(client, "ps aux | grep -v grep | grep -q containerd || (setsid containerd > /var/log/containerd.log 2>&1 < /dev/null &); "+
+				"for i in 1 2 3 4 5 6 7 8 9 10; do [ -S /run/containerd/containerd.sock ] && break; sleep 1; done; "+
 				"pkill dockerd 2>/dev/null; rm -f /var/run/docker.pid /run/docker.pid /var/run/docker.sock /run/docker.sock; "+
 				"setsid /usr/local/bin/dockerd > /var/log/dockerd.log 2>&1 < /dev/null &; sleep 3; true")
 			// 等待 dockerd 启动 (最多等 20 秒)
@@ -1480,13 +1494,19 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 // 策略: 先确认 containerd 存活(若死亡则尝试拉起), 然后轮询 docker info
 // 最多 30 秒(6 次 x 5s)。若超时, 尝试启动 dockerd 后继续轮询。
 func verifyDockerReady(client *ssh.Client, sse *sseWriter) bool {
+	// 停掉 systemd docker 服务, 避免其重启计时器干扰手动启动的 dockerd
+	sshRun(client, "systemctl stop docker docker.socket 2>/dev/null; systemctl disable docker docker.socket 2>/dev/null; "+
+		"systemctl reset-failed docker docker.socket 2>/dev/null; "+
+		"systemctl mask docker docker.socket 2>/dev/null; true")
+
 	// 先检查 containerd (docker daemon 依赖 containerd)
 	containerdOut, _ := sshRun(client, "ps aux 2>/dev/null | grep -v grep | grep containerd | head -1 || echo 'CONTAINERD_DEAD'")
 	if strings.Contains(containerdOut, "CONTAINERD_DEAD") {
 		sse.event(PhaseInstallDocker, "log", "", "containerd 未运行, 启动 containerd 后重启 dockerd...")
-		sshRun(client, "systemctl start containerd 2>/dev/null || (setsid containerd > /var/log/containerd.log 2>&1 < /dev/null &); sleep 2; "+
+		sshRun(client, "systemctl start containerd 2>/dev/null || (setsid containerd > /var/log/containerd.log 2>&1 < /dev/null &); "+
+			"for i in 1 2 3 4 5 6 7 8 9 10; do [ -S /run/containerd/containerd.sock ] && break; sleep 1; done; "+
 			"pkill dockerd 2>/dev/null; rm -f /var/run/docker.pid /run/docker.pid /var/run/docker.sock /run/docker.sock; "+
-			"sleep 1; setsid /usr/local/bin/dockerd > /var/log/dockerd.log 2>&1 < /dev/null &; sleep 3; true")
+			"setsid /usr/local/bin/dockerd > /var/log/dockerd.log 2>&1 < /dev/null &; sleep 3; true")
 	}
 
 	// 轮询 docker info, 最多 6 次(每次 5s = 30s, 覆盖低配 VPS 场景)
@@ -1512,15 +1532,18 @@ func verifyDockerReady(client *ssh.Client, sse *sseWriter) bool {
 		// 其他错误: systemctl 状态异常(如 stale PID 文件导致 "process is still running"),
 		// 尝试修复: 先按 PID 文件精准杀僵尸进程, 再 pkill 兜底, 然后清理 socket/pid 重启
 		sse.event(PhaseInstallDocker, "log", "", fmt.Sprintf("Docker 异常(尝试修复): %s", strings.TrimSpace(out)))
-		sshRun(client, "systemctl stop docker 2>/dev/null; "+
+		sshRun(client, "systemctl stop docker docker.socket 2>/dev/null; "+
+			"systemctl disable docker docker.socket 2>/dev/null; "+
+			"systemctl reset-failed docker docker.socket 2>/dev/null; "+
+			"systemctl mask docker docker.socket 2>/dev/null; "+
 			"kill -9 $(cat /var/run/docker.pid 2>/dev/null) 2>/dev/null; "+
 			"pkill -9 dockerd 2>/dev/null; "+
 			"rm -f /var/run/docker.pid /run/docker.pid /var/run/docker.sock /run/docker.sock; "+
 			"sleep 2; "+
-			"systemctl start docker 2>/dev/null || "+
-			"(ps aux | grep -v grep | grep -q containerd || (setsid containerd > /var/log/containerd.log 2>&1 < /dev/null &); sleep 2; "+
+			"(ps aux | grep -v grep | grep -q containerd || (setsid containerd > /var/log/containerd.log 2>&1 < /dev/null &); "+
+			"for i in 1 2 3 4 5 6 7 8 9 10; do [ -S /run/containerd/containerd.sock ] && break; sleep 1; done; "+
 			"setsid /usr/local/bin/dockerd > /var/log/dockerd.log 2>&1 < /dev/null &); "+
-			"sleep 3; true")
+			"sleep 5; true")
 		time.Sleep(5 * time.Second)
 	}
 	return false
