@@ -201,10 +201,7 @@ func ensureHostsMapping(client *ssh.Client, panelRealIP, domain string) (string,
 	if panelRealIP == "" || domain == "" {
 		return "(skip: 空参数)", nil
 	}
-	// 兜底: 先清理该域名的所有旧映射 (面板 IP 变化时避免指向旧 IP)
-	cleanCmd := fmt.Sprintf("sed -i '/\\b%s\\b.*nexus-panel.*$/d' /etc/hosts 2>/dev/null; true", domain)
-	sshRun(client, cleanCmd)
-	// 幂等: 检查是否已存在正确的映射
+	// 幂等: 先检查是否已存在映射
 	checkCmd := fmt.Sprintf("grep -c '^%s[[:space:]]\\+%s\\b' /etc/hosts 2>/dev/null || echo 0",
 		panelRealIP, domain)
 	out, err := sshRun(client, checkCmd)
@@ -425,10 +422,12 @@ func (h *AutoDeployHandler) Deploy(c *gin.Context) {
 		lastErrMsg = errMsg
 
 		// 致命/无意义重试的错误不重试
-		if errCode == DeployErrSSHAuth || errCode == DeployErrSSHConnect || errCode == DeployErrDockerNotInstalled {
+		if errCode == DeployErrSSHAuth || errCode == DeployErrSSHConnect || errCode == DeployErrDockerNotInstalled || errCode == DeployErrPortConflict {
 			reason := "部署失败"
 			if errCode == DeployErrDockerNotInstalled {
 				reason = "Docker 安装失败 (重试不会改变结果，请手动排查)"
+			} else if errCode == DeployErrPortConflict {
+				reason = "端口冲突 (Phase 1 已自动清理，仍被占用请手动释放)"
 			}
 			sse.eventWithCode(PhaseVerify, "error",
 				fmt.Sprintf("%s (%s): %s\n\n修复建议: %s", reason, errCode, errMsg, fixSuggestion(errCode)),
@@ -575,11 +574,6 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	//   下次部署 mkdir -p 不会删旧文件, 可能与新版本冲突(xray-cache 版本不匹配等)。
 	//   现在重试前先 docker compose down + rm -rf 部署目录, 确保每次部署都是干净状态。
 	sse.event(PhaseConnectServer, "running", "正在清理旧部署残留(容器+目录+端口)...", "")
-	// 兜底: 清理前确保 Docker daemon 在运行, 否则 docker compose down/rm 等命令全部无效
-	daemonAlive, _ := sshRun(client, "timeout 5 docker info 2>&1 | head -1 || echo DAEMON_DOWN")
-	if strings.Contains(daemonAlive, "DAEMON_DOWN") || (!strings.Contains(daemonAlive, "Server") && !strings.Contains(daemonAlive, "Containers")) {
-		sshRun(client, "rm -f /var/run/docker.pid /run/docker.pid 2>/dev/null; systemctl start docker 2>/dev/null || (pkill dockerd 2>/dev/null; setsid dockerd > /var/log/dockerd.log 2>&1 < /dev/null &); sleep 3; true")
-	}
 	// 兜底: 清理命令逐条执行, 每条独立容错, 避免一条失败导致后续不执行
 	cleanSteps := []struct {
 		desc string
@@ -588,12 +582,7 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 		{"docker compose down", fmt.Sprintf("cd %s 2>/dev/null && docker compose -f docker-compose.node.yml down --timeout 10 2>/dev/null; true", deployDir)},
 		{"停止旧容器", fmt.Sprintf("docker stop %s 2>/dev/null; true", containerName)},
 		{"删除旧容器", fmt.Sprintf("docker rm -f %s 2>/dev/null; true", containerName)},
-		{"释放端口进程", fmt.Sprintf(
-			"for p in %d %d; do "+
-				"(fuser -k $p/tcp 2>/dev/null) || "+
-				"(ss -lptn \"sport = :$p\" 2>/dev/null | grep -oP 'pid=\\K[0-9]+' | xargs -r kill -9 2>/dev/null) || "+
-				"(lsof -ti:$p 2>/dev/null | xargs -r kill -9 2>/dev/null); "+
-				"done; true", listenPort, healthPort)},
+		{"释放端口进程", fmt.Sprintf("fuser -k %d/tcp 2>/dev/null; fuser -k %d/tcp 2>/dev/null; true", listenPort, healthPort)},
 		{"删除旧目录", fmt.Sprintf("rm -rf %s 2>/dev/null; true", deployDir)},
 	}
 	var cleanLines []string
@@ -609,8 +598,8 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	}
 	// 兜底: 强制清理可能卡住的容器 (docker rm -f 可能因为 containerd 卡住而超时)
 	sshRun(client, fmt.Sprintf("docker rm -f %s 2>/dev/null; true", containerName))
-	// 兜底: 精确清理该节点可能残留的 Docker 网络 (仅按节点ID过滤, 不影响同宿主机其他服务)
-	sshRun(client, fmt.Sprintf("docker network ls --filter name=%s -q 2>/dev/null | xargs -r docker network rm 2>/dev/null; true", shortID))
+	// 兜底: 清理可能残留的 Docker 网络 (旧 compose 项目可能留下网络冲突)
+	sshRun(client, fmt.Sprintf("docker network prune -f 2>/dev/null; true"))
 	cleanLines = append(cleanLines, "CLEANED")
 	sse.event(PhaseConnectServer, "done", "旧残留清理完成", strings.Join(cleanLines, "\n"))
 
@@ -683,6 +672,21 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 			"", dockerCode)
 		return false, dockerCode, dockerMsg
 	}
+
+	// 兜底: ensureDocker 返回 true 后做二次验证, 确保 docker.sock 可访问,
+	// 避免刚装完 Docker daemon 未完全就绪时 compose up 报 "Cannot connect to Docker daemon"
+	if !verifyDockerReady(client, sse) {
+		sse.eventWithCode(PhasePrepare, "error",
+			"Docker 守护进程未就绪(安装完成但无法通信)",
+			"", DeployErrDockerNotInstalled)
+		return false, DeployErrDockerNotInstalled, "Docker daemon 未就绪"
+	}
+
+	// 兜底: 预拉取基础镜像(alpine), 避免 compose up --build 时首次拉取超时
+	// 低配 VPS(1GB 内存)拉取 alpine 镜像可能耗时 10-30 秒, compose up 自带的重试太短
+	sse.event(PhasePrepare, "running", "拉取基础镜像 (alpine:3.19)...", "")
+	pullOut, _ := sshRun(client, "docker pull alpine:3.19 2>&1 | tail -5")
+	sse.event(PhasePrepare, "log", "", pullOut)
 
 	// 3.4 创建 .env.node (兜底: 写入失败重试 2 次)
 	// 修复 START_FAIL-CDN (P0): 旧版用 panelIP(IP) 写 PANEL_GRPC_ADDR, 但面板用公信 CA 证书
@@ -904,17 +908,9 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	var startErr error
 	for retry := 1; retry <= 2; retry++ {
 		if retry > 1 {
-			sse.event(PhaseStart, "log", "", fmt.Sprintf("启动失败, 第 %d 次重试 (全量清理后重来)...", retry))
-			// 兜底: 释放端口 + 清理旧容器镜像 + compose down, 确保重试用的是干净环境
-			// 注意: 不能 rm -rf 部署目录, Phase 3/4 刚上传的文件需要保留
-			sshRun(client, fmt.Sprintf(
-				"for p in %d %d; do (fuser -k $p/tcp 2>/dev/null) || (ss -lptn \"sport = :$p\" 2>/dev/null | grep -oP 'pid=\\K[0-9]+' | xargs -r kill -9 2>/dev/null) || (lsof -ti:$p 2>/dev/null | xargs -r kill -9 2>/dev/null); done; "+
-					"pkill -f 'docker.compose.*%s' 2>/dev/null; "+
-					"cd %s 2>/dev/null && docker compose -f docker-compose.node.yml --env-file .env.node down --timeout 10 2>/dev/null; "+
-					"docker rm -f %s 2>/dev/null; "+
-					"docker rmi -f nexus-node-agent:latest 2>/dev/null; "+
-					"true",
-				listenPort, healthPort, shortID, deployDir, containerName))
+			sse.event(PhaseStart, "log", "", fmt.Sprintf("启动失败, 第 %d 次重试 (先清理旧容器)...", retry))
+			// 兜底: 清理失败的容器和网络残留
+			sshRun(client, fmt.Sprintf("cd %s 2>/dev/null && docker compose -f docker-compose.node.yml --env-file .env.node down --timeout 5 2>/dev/null; docker rm -f %s 2>/dev/null; true", deployDir, containerName))
 			time.Sleep(3 * time.Second)
 		}
 		startOut, startErr = sshStream(client, fmt.Sprintf(
@@ -1371,15 +1367,6 @@ func diagnoseDockerFailure(client *ssh.Client, sse *sseWriter) dockerDiag {
 	}
 
 	// 6. 分析 dockerd 日志中的具体错误
-	// 兜底: PID 文件残留导致 dockerd 误判已有实例在运行
-	if strings.Contains(dockerLog, "still running") || strings.Contains(dockerLog, "docker.pid") {
-		// 非致命, 删掉残留 PID 文件后返回
-		sshRun(client, "rm -f /var/run/docker.pid /run/docker.pid 2>&1; true")
-		return dockerDiag{
-			fatal:  false,
-			reason: "dockerd PID 文件残留, 已自动清理, 重试启动",
-		}
-	}
 	if strings.Contains(dockerLog, "cgroup") && (strings.Contains(dockerLog, "not found") || strings.Contains(dockerLog, "no such file")) {
 		return dockerDiag{
 			fatal:  true,
@@ -1429,17 +1416,22 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 		}
 		// 启动 Docker
 		sse.event(PhasePrepare, "log", "", "Docker 已安装, 尝试启动...")
-		// 兜底: 静态安装(USTC/阿里云)后 dockerd 在 /usr/local/bin,
-		// 但 systemd 服务指向 /usr/bin/dockerd → 修正路径
-		sshRun(client, "if systemctl cat docker 2>/dev/null | grep -q 'ExecStart=/usr/bin/dockerd' && [ ! -x /usr/bin/dockerd ] && [ -x /usr/local/bin/dockerd ]; then sed -i 's|ExecStart=/usr/bin/dockerd|ExecStart=/usr/local/bin/dockerd|g' /lib/systemd/system/docker.service && systemctl daemon-reload && echo 'SYSTEMD_PATH_FIXED'; fi; true")
+		// 修复: 静态安装的 systemd 可能指向错误的 dockerd 路径
+		sshRun(client, "if systemctl cat docker 2>/dev/null | grep -q 'ExecStart=/usr/bin/dockerd' "+
+			"&& [ ! -x /usr/bin/dockerd ] && [ -x /usr/local/bin/dockerd ]; then "+
+			"sed -i 's|ExecStart=/usr/bin/dockerd|ExecStart=/usr/local/bin/dockerd|g' "+
+			"/lib/systemd/system/docker.service && systemctl daemon-reload; fi; true")
 		sshRun(client, "systemctl start docker 2>&1 || service docker start 2>&1; systemctl enable docker 2>&1 || true")
 		time.Sleep(3 * time.Second)
 		runOut, _ = sshRun(client, "timeout 10 docker info 2>&1 | head -3 || echo 'START_FAILED'")
 		if !strings.Contains(runOut, "Server Version") && !strings.Contains(runOut, "Containers") {
 			// 兜底: systemctl/service 对静态安装(阿里云/中科大镜像)无效,
-			// 尝试手动启动 dockerd (用 setsid 确保进程独立于 SSH 会话)
+			// 尝试手动启动 dockerd
 			sse.event(PhasePrepare, "log", "", "systemctl 启动失败, 尝试手动启动 dockerd (静态安装)...")
-			sshRun(client, "pkill dockerd 2>/dev/null; rm -f /var/run/docker.pid /run/docker.pid 2>/dev/null; setsid dockerd > /var/log/dockerd.log 2>&1 < /dev/null & sleep 3; true")
+			// setsid 比 nohup 更可靠: 创建新会话, dockerd 完全独立于 SSH,
+			// SSH 断连不会杀死 daemon
+			sshRun(client, "pkill dockerd 2>/dev/null; rm -f /var/run/docker.pid /run/docker.pid; "+
+				"setsid dockerd > /var/log/dockerd.log 2>&1 < /dev/null & sleep 3; true")
 			for i := 0; i < 10; i++ {
 				time.Sleep(2 * time.Second)
 				vOut, _ := sshRun(client, "timeout 5 docker info 2>&1 | head -3")
@@ -1461,7 +1453,7 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 				}
 				// 可能是服务器重装后二进制残留但守护进程损坏, 尝试强制卸载后重新安装
 				sse.event(PhasePrepare, "log", "", "Docker 启动失败(可能是系统重装后残留), 正在卸载旧版本并重新安装...")
-				sshRun(client, "systemctl stop docker 2>&1; systemctl disable docker 2>&1; rm -f /usr/bin/docker /usr/local/bin/docker /usr/bin/dockerd /usr/local/bin/dockerd /usr/bin/docker-compose /usr/local/bin/docker-compose /usr/bin/containerd /usr/local/bin/containerd 2>&1; rm -rf /var/lib/docker /var/lib/containerd 2>&1; rm -f /var/run/docker.pid /run/docker.pid 2>&1; true")
+				sshRun(client, "systemctl stop docker 2>&1; systemctl disable docker 2>&1; rm -f /usr/bin/docker /usr/local/bin/docker /usr/bin/dockerd /usr/local/bin/dockerd /usr/bin/docker-compose /usr/local/bin/docker-compose /usr/bin/containerd /usr/local/bin/containerd 2>&1; rm -rf /var/lib/docker /var/lib/containerd 2>&1; true")
 				// 跳转到安装流程
 			} else {
 				sse.event(PhasePrepare, "done", "Docker 启动成功(等待后)", runOut)
@@ -1517,8 +1509,9 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 				}
 			})
 			if strings.Contains(out2, "INSTALL_OK") {
-				// 手动启动 Docker daemon (setsid 确保进程独立于SSH会话)
-				sshRun(client, "pkill dockerd 2>/dev/null; rm -f /var/run/docker.pid /run/docker.pid 2>/dev/null; setsid dockerd > /var/log/dockerd.log 2>&1 < /dev/null & sleep 3; true")
+				// 手动启动 Docker daemon (setsid 确保独立于 SSH 会话)
+				sshRun(client, "pkill dockerd 2>/dev/null; rm -f /var/run/docker.pid /run/docker.pid; "+
+					"setsid dockerd > /var/log/dockerd.log 2>&1 < /dev/null & sleep 3; true")
 				sse.event(PhasePrepare, "done", "Docker 安装完成 (中科大镜像源)", "")
 				return true, "", ""
 			}
@@ -1527,30 +1520,69 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 	}
 
 	// 兜底: 检查安装后 Docker daemon 是否需要手动启动
-	time.Sleep(2 * time.Second)
+	// 修复: 静态安装(阿里云/中科大)把 dockerd 放到 /usr/local/bin/,
+	// 但 systemd docker.service 可能指向 /usr/bin/dockerd, 导致 service 启动失败。
+	// 统一修正路径后优先尝试 systemctl, 不行再用 nohup 兜底。
+	sshRun(client, "if systemctl cat docker 2>/dev/null | grep -q 'ExecStart=/usr/bin/dockerd' "+
+		"&& [ ! -x /usr/bin/dockerd ] && [ -x /usr/local/bin/dockerd ]; then "+
+		"sed -i 's|ExecStart=/usr/bin/dockerd|ExecStart=/usr/local/bin/dockerd|g' "+
+		"/lib/systemd/system/docker.service && systemctl daemon-reload; fi; true")
+	time.Sleep(1 * time.Second)
 	verifyOut, _ := sshRun(client, "docker info 2>&1 | head -3 || echo 'DAEMON_NOT_RUNNING'")
 	if strings.Contains(verifyOut, "DAEMON_NOT_RUNNING") || strings.Contains(verifyOut, "Cannot connect") {
-		// 静态安装方式需要手动启动 daemon (setsid 确保进程独立于SSH会话)
-		sshRun(client, "pkill dockerd 2>/dev/null; rm -f /var/run/docker.pid /run/docker.pid 2>/dev/null; setsid dockerd > /var/log/dockerd.log 2>&1 < /dev/null & sleep 3; true")
-		// 等待 dockerd 启动 (最多等 20 秒)
-		dockerStarted := false
-		for i := 0; i < 10; i++ {
-			time.Sleep(2 * time.Second)
-			vOut, _ := sshRun(client, "docker info 2>&1 | head -3")
-			if strings.Contains(vOut, "Server Version") || strings.Contains(vOut, "Containers") {
-				dockerStarted = true
-				break
-			}
+		// systemctl 方式启动(优先, 让 systemd 管理生命周期, 避免 nohup 孤儿进程)
+		startedWithSystemd := false
+		sysOut, _ := sshRun(client, "systemctl start docker 2>&1 && sleep 2 && timeout 5 docker info 2>&1 | head -3")
+		if strings.Contains(sysOut, "Server Version") || strings.Contains(sysOut, "Containers") {
+			startedWithSystemd = true
+			sse.event(PhasePrepare, "done", "Docker 通过 systemd 启动成功", "")
 		}
-		if !dockerStarted {
-			// dockerd 启动失败, 做全面内核兼容性诊断
-			diag := diagnoseDockerFailure(client, sse)
-			return false, DeployErrDockerNotInstalled, fmt.Sprintf("Docker 已安装但 daemon 无法启动 - %s", diag.reason)
+		if !startedWithSystemd {
+			// 静态安装方式兜底: setsid 手动启动 daemon (独立于 SSH 会话)
+			sshRun(client, "pkill dockerd 2>/dev/null; rm -f /var/run/docker.pid /run/docker.pid; "+
+				"setsid dockerd > /var/log/dockerd.log 2>&1 < /dev/null & sleep 3; true")
+			// 等待 dockerd 启动 (最多等 20 秒)
+			dockerStarted := false
+			for i := 0; i < 10; i++ {
+				time.Sleep(2 * time.Second)
+				vOut, _ := sshRun(client, "docker info 2>&1 | head -3")
+				if strings.Contains(vOut, "Server Version") || strings.Contains(vOut, "Containers") {
+					dockerStarted = true
+					break
+				}
+			}
+			if !dockerStarted {
+				// dockerd 启动失败, 做全面内核兼容性诊断
+				diag := diagnoseDockerFailure(client, sse)
+				return false, DeployErrDockerNotInstalled, fmt.Sprintf("Docker 已安装但 daemon 无法启动 - %s", diag.reason)
+			}
 		}
 	}
 
 	sse.event(PhasePrepare, "done", "Docker 自动安装完成", "")
 	return true, "", ""
+}
+
+// verifyDockerReady 二次验证 Docker daemon 是否真正可用 (docker info 成功 + socket 可访问)
+// 修复: 静态安装(USTC/阿里云)后 nohup dockerd 可能在 ensureDocker 返回 true 时已完成
+// 自检, 但 docker.sock 文件可能尚未创建或权限未生效, 导致后续 compose up 报
+// "Cannot connect to the Docker daemon"。
+// 本函数轮询 docker info 最多 15 秒, 确保 socket 就绪后再继续部署流程。
+func verifyDockerReady(client *ssh.Client, sse *sseWriter) bool {
+	for i := 0; i < 5; i++ {
+		out, _ := sshRun(client, "timeout 5 docker info 2>&1 | head -3")
+		if strings.Contains(out, "Server Version") || strings.Contains(out, "Containers") {
+			return true
+		}
+		if strings.Contains(out, "Cannot connect") || strings.Contains(out, "deadline") {
+			sse.event(PhasePrepare, "log", "", fmt.Sprintf("等待 Docker daemon 就绪... (%d/5)", i+1))
+			time.Sleep(3 * time.Second)
+			continue
+		}
+		// 其他错误(如 docker 命令不可用)直接返回 false
+		return false
+	}
+	return false
 }
 
 // classifySSHError 分类 SSH 错误码
@@ -1576,7 +1608,7 @@ func fixSuggestion(errCode string) string {
 	case DeployErrDockerNotInstalled:
 		return "1) 内核可能不支持: 执行 uname -r 查看内核版本\n2) 检查 cgroup: mount | grep cgroup\n3) 检查 overlay: lsmod | grep overlay\n4) 手动安装: curl -fsSL https://get.docker.com | sh\n5) 如果低配 VPS 内核不支持 Docker, 请考虑升级系统或使用支持 Docker 的镜像"
 	case DeployErrPortConflict:
-		return "1) 面板已自动尝试 3 层端口释放 (fuser → ss → lsof)\n2) 如果仍失败, 手动释放: fuser -k <端口>/tcp; ss -K 'sport = :<端口>'\n3) 或在面板上修改节点端口后重试"
+		return "1) 释放被占用端口: fuser -k <端口>/tcp\n2) 修改节点的代理端口\n3) 停止占用端口的进程后重试"
 	case DeployErrDiskFull:
 		return "1) 清理磁盘: docker system prune -a\n2) 清理大文件: du -sh /* | sort -h\n3) 扩容服务器磁盘"
 	case DeployErrMemoryLow:

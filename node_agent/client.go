@@ -222,10 +222,18 @@ func probeTLSServer(host, port string) bool {
 	})
 	// 尝试握手: 若对面是 TLS 服务端会完成握手(或返回 TLS alert); 若是明文 gRPC,
 	// 对面会回 HTTP/2 preface 或直接关闭, tls.Handshake 会报 "first record not TLS handshake"
-	if err := tlsConn.Handshake(); err == nil {
+	// 修复 NODE-TLS-PANIC (P0): if err := Handshake() 中用 := 声明了新局部 err,
+	// 遮蔽了外层 dial 的 nil err。出 if 块后 err 回到外层 nil → err.Error() panic。
+	// 改用 = 复用外层 err, 同时判 nil 兜底(conn 被提前关闭等极端场景)
+	err = tlsConn.Handshake()
+	if err == nil {
 		return true // 握手成功, 确定是 TLS
 	}
 	// 握手失败, 但错误类型能区分: TLS alert(对面是 TLS 但证书有问题) vs 非 TLS
+	if err == nil {
+		log.Printf("[WARN] TLS 探测: %s:%s Handshake 返回 nil error 但握手失败(极端情况), 假定明文", host, port)
+		return false
+	}
 	errStr := err.Error()
 	if strings.Contains(errStr, "tls:") || strings.Contains(errStr, "handshake") ||
 		strings.Contains(errStr, "certificate") || strings.Contains(errStr, "alert") {
