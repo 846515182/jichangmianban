@@ -1563,24 +1563,48 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 	return true, "", ""
 }
 
-// verifyDockerReady 二次验证 Docker daemon 是否真正可用 (docker info 成功 + socket 可访问)
-// 修复: 静态安装(USTC/阿里云)后 nohup dockerd 可能在 ensureDocker 返回 true 时已完成
-// 自检, 但 docker.sock 文件可能尚未创建或权限未生效, 导致后续 compose up 报
-// "Cannot connect to the Docker daemon"。
-// 本函数轮询 docker info 最多 15 秒, 确保 socket 就绪后再继续部署流程。
+// verifyDockerReady 二次验证 Docker daemon 是否真正可用。
+// 修复背景:
+//  1. 静态安装(USTC/阿里云)后 dockerd 启动慢, socket 未就绪
+//  2. 服务器重启后 systemd docker.service 在 containerd 就绪前启动 → 失败
+//  3. 低配 VPS(1GB 内存) docker info 首次调用可能耗时 10-15 秒
+//
+// 策略: 先确认 containerd 存活(若死亡则尝试拉起), 然后轮询 docker info
+// 最多 30 秒(6 次 x 5s)。若超时, 尝试启动 dockerd 后继续轮询。
 func verifyDockerReady(client *ssh.Client, sse *sseWriter) bool {
-	for i := 0; i < 5; i++ {
+	// 先检查 containerd (docker daemon 依赖 containerd)
+	containerdOut, _ := sshRun(client, "ps aux 2>/dev/null | grep -v grep | grep containerd | head -1 || echo 'CONTAINERD_DEAD'")
+	if strings.Contains(containerdOut, "CONTAINERD_DEAD") {
+		sse.event(PhasePrepare, "log", "", "containerd 未运行, 尝试启动...")
+		sshRun(client, "systemctl start containerd 2>/dev/null || (setsid containerd > /var/log/containerd.log 2>&1 < /dev/null &); sleep 3; true")
+	}
+
+	// 轮询 docker info, 最多 6 次(每次 5s = 30s, 覆盖低配 VPS 场景)
+	for i := 0; i < 6; i++ {
 		out, _ := sshRun(client, "timeout 5 docker info 2>&1 | head -3")
 		if strings.Contains(out, "Server Version") || strings.Contains(out, "Containers") {
 			return true
 		}
-		if strings.Contains(out, "Cannot connect") || strings.Contains(out, "deadline") {
-			sse.event(PhasePrepare, "log", "", fmt.Sprintf("等待 Docker daemon 就绪... (%d/5)", i+1))
-			time.Sleep(3 * time.Second)
+		if strings.Contains(out, "Cannot connect") || strings.Contains(out, "deadline") || out == "" {
+			elapsed := (i + 1) * 5
+			sse.event(PhasePrepare, "log", "", fmt.Sprintf("等待 Docker daemon 就绪... (%ds/%ds)", elapsed, 30))
+			time.Sleep(5 * time.Second)
 			continue
 		}
-		// 其他错误(如 docker 命令不可用)直接返回 false
-		return false
+		// docker 命令不可用(未安装)
+		if strings.Contains(out, "not found") || strings.Contains(out, "command not found") {
+			return false
+		}
+		// 其他错误: systemctl 状态异常, 尝试修复
+		sse.event(PhasePrepare, "log", "", fmt.Sprintf("Docker 异常(尝试修复): %s", strings.TrimSpace(out)))
+		sshRun(client, "systemctl stop docker 2>/dev/null; "+
+			"pkill -9 dockerd 2>/dev/null; "+
+			"rm -f /var/run/docker.pid /run/docker.pid /var/run/docker.sock /run/docker.sock; "+
+			"sleep 2; "+
+			"systemctl start docker 2>/dev/null || "+
+			"(setsid dockerd > /var/log/dockerd.log 2>&1 < /dev/null &); "+
+			"sleep 3; true")
+		time.Sleep(5 * time.Second)
 	}
 	return false
 }
