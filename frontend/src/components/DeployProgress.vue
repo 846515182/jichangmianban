@@ -168,12 +168,14 @@ const running = ref(false)
 const finished = ref(false)
 const events = ref<Array<{step: string; status: string; msg: string; output: string; errCode?: string}>>([])
 
-// 6 步阶段定义
+// 8 步阶段定义 (每步仅做一件事)
 const phaseSteps = [
   { key: 'connect_server', name: '连接服务器' },
   { key: 'env_check', name: '环境检测' },
-  { key: 'prepare', name: '准备部署' },
+  { key: 'install_docker', name: '安装 Docker' },
+  { key: 'prepare_files', name: '准备文件' },
   { key: 'build', name: '编译程序' },
+  { key: 'grpc_precheck', name: 'gRPC 预检' },
   { key: 'start', name: '启动服务' },
   { key: 'verify', name: '验证完成' },
 ]
@@ -183,15 +185,17 @@ const activePhase = ref<string>('')
 
 // 步骤名称映射 (兼容旧名 + 新名)
 const stepNames: Record<string, string> = {
-  // 新 6 步
   connect_server: '1. 连接节点服务器',
   env_check: '2. 环境检测',
-  prepare: '3. 准备部署',
-  build: '4. 编译程序',
-  start: '5. 启动服务',
-  verify: '6. 验证完成',
+  install_docker: '3. 安装 Docker',
+  prepare_files: '4. 准备部署文件',
+  build: '5. 编译传输',
+  grpc_precheck: '6. gRPC 预检',
+  start: '7. 启动服务',
+  verify: '8. 验证完成',
   // 兼容旧名
   connect: '1. 连接节点服务器',
+  prepare: '3. 准备部署',
   preflight: '2. 环境检测',
   cleanup: '3. 清理旧容器',
   mkdir: '3. 创建远程目录',
