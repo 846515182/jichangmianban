@@ -1203,6 +1203,15 @@ func diagnoseDockerFailure(client *ssh.Client, sse *sseWriter) dockerDiag {
 	kernelVer, _ := sshRun(client, "uname -r 2>/dev/null | tr -d '\\n'")
 	sse.event(PhaseInstallDocker, "log", "", fmt.Sprintf("=== Docker 启动失败诊断 (内核: %s) ===", strings.TrimSpace(kernelVer)))
 
+	// 0. 检测 containerd
+	containerdCheck, _ := sshRun(client, "ps aux 2>/dev/null | grep -v grep | grep containerd | head -1 || echo 'CONTAINERD_DEAD'")
+	if strings.Contains(containerdCheck, "CONTAINERD_DEAD") {
+		sse.event(PhaseInstallDocker, "log", "", "  containerd: 未运行 (dockerd 无法连接 containerd.sock)")
+		sse.event(PhaseInstallDocker, "log", "", "  -> 尝试启动: setsid containerd > /var/log/containerd.log 2>&1 < /dev/null &")
+	} else {
+		sse.event(PhaseInstallDocker, "log", "", "  containerd: 运行中")
+	}
+
 	// 1. 检测 cgroup 挂载 (v1 和 v2)
 	cgroupV1, _ := sshRun(client, "mount 2>/dev/null | grep 'cgroup ' | head -3 || echo 'NO_CGROUP_V1'")
 	cgroupV2, _ := sshRun(client, "mount 2>/dev/null | grep 'cgroup2 ' | head -1 || echo 'NO_CGROUP_V2'")
@@ -1275,7 +1284,13 @@ func diagnoseDockerFailure(client *ssh.Client, sse *sseWriter) dockerDiag {
 		}
 	}
 
-	// 非致命: cgroup 和 overlay 都有, 但 dockerd 还是启动失败 (可能是端口冲突/配置损坏等)
+	// 非致命: cgroup 和 overlay 都有, 但 dockerd 还是启动失败 (可能是 containerd 未运行/端口冲突/配置损坏等)
+	if strings.Contains(dockerLog, "containerd.sock") || strings.Contains(dockerLog, "dial containerd") {
+		return dockerDiag{
+			fatal:  false,
+			reason: fmt.Sprintf("dockerd 无法连接 containerd.sock (containerd 可能未运行或已崩溃)。修复: 执行下面命令后再重试部署:\n  containerd > /var/log/containerd.log 2>&1 &\n  sleep 2\n  dockerd > /var/log/dockerd.log 2>&1 &"),
+		}
+	}
 	return dockerDiag{
 		fatal:  false,
 		reason: fmt.Sprintf("内核兼容性检查通过 (cgroup+overlay 均可用), 但 dockerd 仍无法启动。请查看完整日志排查"),
@@ -1319,8 +1334,10 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 			sse.event(PhaseInstallDocker, "log", "", "systemctl 启动失败, 尝试手动启动 dockerd (静态安装)...")
 			// setsid 比 nohup 更可靠: 创建新会话, dockerd 完全独立于 SSH,
 			// SSH 断连不会杀死 daemon
-			sshRun(client, "pkill dockerd 2>/dev/null; rm -f /var/run/docker.pid /run/docker.pid; "+
-				"setsid dockerd > /var/log/dockerd.log 2>&1 < /dev/null & sleep 3; true")
+			// 修复: containerd 必须在 dockerd 前启动, 否则 dockerd 连不上 containerd.sock
+			sshRun(client, "ps aux | grep -v grep | grep -q containerd || (setsid containerd > /var/log/containerd.log 2>&1 < /dev/null &); sleep 2; "+
+				"pkill dockerd 2>/dev/null; rm -f /var/run/docker.pid /run/docker.pid /var/run/docker.sock /run/docker.sock; "+
+				"setsid /usr/local/bin/dockerd > /var/log/dockerd.log 2>&1 < /dev/null &; sleep 3; true")
 			for i := 0; i < 10; i++ {
 				time.Sleep(2 * time.Second)
 				vOut, _ := sshRun(client, "timeout 5 docker info 2>&1 | head -3")
@@ -1399,8 +1416,9 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 			})
 			if strings.Contains(out2, "INSTALL_OK") {
 				// 手动启动 Docker daemon (setsid 确保独立于 SSH 会话)
-				sshRun(client, "pkill dockerd 2>/dev/null; rm -f /var/run/docker.pid /run/docker.pid; "+
-					"setsid dockerd > /var/log/dockerd.log 2>&1 < /dev/null & sleep 3; true")
+				sshRun(client, "ps aux | grep -v grep | grep -q containerd || (setsid containerd > /var/log/containerd.log 2>&1 < /dev/null &); sleep 2; "+
+					"pkill dockerd 2>/dev/null; rm -f /var/run/docker.pid /run/docker.pid /var/run/docker.sock /run/docker.sock; "+
+					"setsid /usr/local/bin/dockerd > /var/log/dockerd.log 2>&1 < /dev/null &; sleep 3; true")
 				sse.event(PhaseInstallDocker, "done", "Docker 安装完成 (中科大镜像源)", "")
 				return true, "", ""
 			}
@@ -1428,8 +1446,9 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 		}
 		if !startedWithSystemd {
 			// 静态安装方式兜底: setsid 手动启动 daemon (独立于 SSH 会话)
-			sshRun(client, "pkill dockerd 2>/dev/null; rm -f /var/run/docker.pid /run/docker.pid; "+
-				"setsid dockerd > /var/log/dockerd.log 2>&1 < /dev/null & sleep 3; true")
+			sshRun(client, "ps aux | grep -v grep | grep -q containerd || (setsid containerd > /var/log/containerd.log 2>&1 < /dev/null &); sleep 2; "+
+				"pkill dockerd 2>/dev/null; rm -f /var/run/docker.pid /run/docker.pid /var/run/docker.sock /run/docker.sock; "+
+				"setsid /usr/local/bin/dockerd > /var/log/dockerd.log 2>&1 < /dev/null &; sleep 3; true")
 			// 等待 dockerd 启动 (最多等 20 秒)
 			dockerStarted := false
 			for i := 0; i < 10; i++ {
@@ -1464,8 +1483,10 @@ func verifyDockerReady(client *ssh.Client, sse *sseWriter) bool {
 	// 先检查 containerd (docker daemon 依赖 containerd)
 	containerdOut, _ := sshRun(client, "ps aux 2>/dev/null | grep -v grep | grep containerd | head -1 || echo 'CONTAINERD_DEAD'")
 	if strings.Contains(containerdOut, "CONTAINERD_DEAD") {
-		sse.event(PhaseInstallDocker, "log", "", "containerd 未运行, 尝试启动...")
-		sshRun(client, "systemctl start containerd 2>/dev/null || (setsid containerd > /var/log/containerd.log 2>&1 < /dev/null &); sleep 3; true")
+		sse.event(PhaseInstallDocker, "log", "", "containerd 未运行, 启动 containerd 后重启 dockerd...")
+		sshRun(client, "systemctl start containerd 2>/dev/null || (setsid containerd > /var/log/containerd.log 2>&1 < /dev/null &); sleep 2; "+
+			"pkill dockerd 2>/dev/null; rm -f /var/run/docker.pid /run/docker.pid /var/run/docker.sock /run/docker.sock; "+
+			"sleep 1; setsid /usr/local/bin/dockerd > /var/log/dockerd.log 2>&1 < /dev/null &; sleep 3; true")
 	}
 
 	// 轮询 docker info, 最多 6 次(每次 5s = 30s, 覆盖低配 VPS 场景)
@@ -1497,7 +1518,8 @@ func verifyDockerReady(client *ssh.Client, sse *sseWriter) bool {
 			"rm -f /var/run/docker.pid /run/docker.pid /var/run/docker.sock /run/docker.sock; "+
 			"sleep 2; "+
 			"systemctl start docker 2>/dev/null || "+
-			"(setsid /usr/local/bin/dockerd > /var/log/dockerd.log 2>&1 < /dev/null &); "+
+			"(ps aux | grep -v grep | grep -q containerd || (setsid containerd > /var/log/containerd.log 2>&1 < /dev/null &); sleep 2; "+
+			"setsid /usr/local/bin/dockerd > /var/log/dockerd.log 2>&1 < /dev/null &); "+
 			"sleep 3; true")
 		time.Sleep(5 * time.Second)
 	}
