@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 import (
 	"context"
@@ -542,12 +542,16 @@ func runSQLMigrations(db *gorm.DB, logger *zap.Logger) error {
 		{"2026_07_16_drop_node_level_add_coupon", "migrations/2026_07_16_drop_node_level_add_coupon.sql"},
 		{"2026_07_17_perf_indexes", "migrations/2026_07_17_perf_indexes.sql"},
 		{"2026_07_19_drop_invite_codes", "migrations/2026_07_19_drop_invite_codes.sql"},
+		// 修复 2026-07-18: 节点唯一约束迁移(server_address+port 联合唯一)
+		{"2026_07_18_node_unique_constraint", "migrations/2026_07_18_node_unique_constraint.sql"},
 		// 修复 CRITICAL 2026-07-19: 注册试用套餐标记迁移
 		// 旧版未注册, 导致存量试用套餐 is_trial 始终为 false, 出现在购买列表中
 		// 此迁移会 UPDATE plans SET is_trial=true WHERE name LIKE '%试用%'
 		{"2026_07_19_add_plan_is_trial", "migrations/2026_07_19_add_plan_is_trial.sql"},
 		// 修复历史软删用户 email 唯一索引占用问题
 		{"2026_07_19_fix_soft_deleted_emails", "migrations/2026_07_19_fix_soft_deleted_emails.sql"},
+		// 邀请返利系统: referral_codes / referral_rewards 表
+		{"2026_07_21_referral_system", "migrations/2026_07_21_referral_system.sql"},
 	}
 
 	for _, m := range migrations {

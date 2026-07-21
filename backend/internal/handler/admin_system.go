@@ -160,9 +160,9 @@ func (h *AdminSystemHandler) RotateHMAC(c *gin.Context) {
 		response.Fail(c, response.CodeDBError)
 		return
 	}
-	// 更新运行时配置
+	// 更新内存中的配置
 	app.Get().Cfg.HMACSubSecret = newSecret
-	response.OK(c, gin.H{"rotated_at": time.Now(), "hmac_key": newSecret})
+	response.OK(c, gin.H{"rotated_at": time.Now(), "msg": "HMAC 密钥已轮换"})
 }
 
 // LoginAudit [25] GET /api/v1/admin/system/login-audit
