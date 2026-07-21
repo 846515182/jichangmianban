@@ -41,6 +41,10 @@ services:
       - "${LISTEN_PORT:-443}:${LISTEN_PORT:-443}"
     cap_add:
       - NET_ADMIN
+    # 内存限制: 低配 VPS(1GB) 同时跑 panel + postgres + redis + frontend + node-agent
+    # 不设限制可能触发系统 OOM killer 杀死整个容器, 导致 node-agent 反复重启
+    mem_limit: 128m
+    mem_reservation: 64m
     # 修复 STORAGE-LOG-02 (P1): 旧版无 logging 段, Docker 默认 json-file 驱动无大小上限,
     # node-agent 日志(Xray stdout 转发)会无限增长撑爆节点磁盘。与面板容器保持一致: 50m × 3。
     logging:

@@ -103,9 +103,21 @@ func main() {
 	safeGo(agent.runHealthServer)
 
 	// 2. 建立 gRPC 连接(非阻塞，底层自动重连)
+	// 修复 NODE-BOOTSTRAP-01 (P0): 旧版 NewPanelClient/NewXrayManager 失败用 log.Fatalf
+	// 直接退出进程, 配合 docker restart=unless-stopped 进入死循环: 退出→重启→失败→退出→...
+	// 现改为: 失败后进入等待重试模式(同 bootstrap), 进程不退出。适用于:
+	//   - 面板 gRPC 暂时不可达(面板重启中)
+	//   - CA 证书路径配错, 运维修正后 docker restart 即可恢复
+	//   - 文件系统临时异常(如磁盘满、权限问题)
 	client, err := NewPanelClient(cfg.PanelGrpcAddr)
 	if err != nil {
-		log.Fatalf("建立 gRPC 连接失败: %v", err)
+		log.Printf("[FATAL] 建立 gRPC 连接失败, 进入等待重试模式: %v", err)
+		agent.waitForBootstrapRecovery()
+		// recovery 成功后重新初始化 client
+		client, err = NewPanelClient(cfg.PanelGrpcAddr)
+		if err != nil {
+			log.Fatalf("gRPC 连接 recovery 后仍然失败: %v", err)
+		}
 	}
 	agent.client = client
 	defer client.Close()
@@ -113,7 +125,12 @@ func main() {
 	// 3. 下载 Xray-core 二进制(若不存在)
 	xm, err := NewXrayManager(cfg.XrayVersion)
 	if err != nil {
-		log.Fatalf("初始化 Xray 管理器失败: %v", err)
+		log.Printf("[FATAL] 初始化 Xray 管理器失败, 进入等待重试模式: %v", err)
+		agent.waitForBootstrapRecovery()
+		xm, err = NewXrayManager(cfg.XrayVersion)
+		if err != nil {
+			log.Fatalf("Xray 管理器 recovery 后仍然失败: %v", err)
+		}
 	}
 	agent.xray = xm
 	if err := xm.EnsureBinary(); err != nil {
