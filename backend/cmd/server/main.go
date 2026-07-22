@@ -124,7 +124,7 @@ func main() {
 		for {
 			select {
 			case <-tickerExpire.C:
-				cronSvc.RunAll()
+				cronSvc.SafeRun("RunAll", func() { cronSvc.RunAll() })
 			case <-ctx.Done():
 				return
 			}
@@ -155,7 +155,7 @@ func main() {
 		for {
 			select {
 			case <-tickerStale.C:
-				cronSvc.MarkStaleNodesOffline()
+				cronSvc.SafeRun("MarkStaleNodesOffline", func() { cronSvc.MarkStaleNodesOffline() })
 			case <-ctx.Done():
 				return
 			}
@@ -165,11 +165,11 @@ func main() {
 		tickerOrphan := time.NewTicker(6 * time.Hour)
 		defer tickerOrphan.Stop()
 		// 启动后先跑一次, 清理历史孤儿数据
-		cronSvc.CleanOrphanData()
+		cronSvc.SafeRun("CleanOrphanData", func() { cronSvc.CleanOrphanData() })
 		for {
 			select {
 			case <-tickerOrphan.C:
-				cronSvc.CleanOrphanData()
+				cronSvc.SafeRun("CleanOrphanData", func() { cronSvc.CleanOrphanData() })
 			case <-ctx.Done():
 				return
 			}
@@ -184,11 +184,11 @@ func main() {
 		tickerReset := time.NewTicker(1 * time.Hour)
 		defer tickerReset.Stop()
 		// 启动后立即检查一次(若今天还没重置且今天是 reset_day, 立即执行)
-		cronSvc.ResetTrafficMonthly()
+		cronSvc.SafeRun("ResetTrafficMonthly", func() { cronSvc.ResetTrafficMonthly() })
 		for {
 			select {
 			case <-tickerReset.C:
-				cronSvc.ResetTrafficMonthly()
+				cronSvc.SafeRun("ResetTrafficMonthly", func() { cronSvc.ResetTrafficMonthly() })
 			case <-ctx.Done():
 				return
 			}
@@ -205,7 +205,7 @@ func main() {
 		for {
 			select {
 			case <-tickerDisk.C:
-				cronSvc.CheckDiskThreshold()
+				cronSvc.SafeRun("CheckDiskThreshold", func() { cronSvc.CheckDiskThreshold() })
 			case <-ctx.Done():
 				return
 			}
@@ -218,13 +218,13 @@ func main() {
 		tickerBackup := time.NewTicker(24 * time.Hour)
 		defer tickerBackup.Stop()
 		// 启动后先清理历史残留旧备份(立即释放存储, 不等 pg_dump)
-		cronSvc.RotateBackupsKeepOne()
+		cronSvc.SafeRun("RotateBackupsKeepOne", func() { cronSvc.RotateBackupsKeepOne() })
 		// 再跑一次完整备份流程(含轮转)
-		cronSvc.AutoBackupDatabase()
+		cronSvc.SafeRun("AutoBackupDatabase", func() { cronSvc.AutoBackupDatabase() })
 		for {
 			select {
 			case <-tickerBackup.C:
-				cronSvc.AutoBackupDatabase()
+				cronSvc.SafeRun("AutoBackupDatabase", func() { cronSvc.AutoBackupDatabase() })
 			case <-ctx.Done():
 				return
 			}
@@ -241,7 +241,7 @@ func main() {
 		for {
 			select {
 			case <-tickerReconcile.C:
-				cronSvc.ReconcilePendingOrders()
+				cronSvc.SafeRun("ReconcilePendingOrders", func() { cronSvc.ReconcilePendingOrders() })
 			case <-ctx.Done():
 				return
 			}
@@ -264,11 +264,11 @@ func main() {
 		}
 		tickerVer := time.NewTicker(5 * time.Minute)
 		defer tickerVer.Stop()
-		cronSvc.CheckVersionConsistency()
+		cronSvc.SafeRun("CheckVersionConsistency", func() { cronSvc.CheckVersionConsistency() })
 		for {
 			select {
 			case <-tickerVer.C:
-				cronSvc.CheckVersionConsistency()
+				cronSvc.SafeRun("CheckVersionConsistency", func() { cronSvc.CheckVersionConsistency() })
 			case <-ctx.Done():
 				return
 			}

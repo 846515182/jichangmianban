@@ -216,6 +216,11 @@ func (h *OrderHandler) AdminRefund(c *gin.Context) {
 		tradeNo := o.TradeNo
 		money := fmt.Sprintf("%.2f", float64(o.AmountCents)/100.0)
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[payment] EPay 退款同步 panic order_no=%s: %v", orderNo, r)
+				}
+			}()
 			if err := h.paymentSvc.RequestRefund(orderNo, tradeNo, money); err != nil {
 				log.Printf("[payment] EPay 退款同步失败 order_no=%s trade_no=%s: %v", orderNo, tradeNo, err)
 			}

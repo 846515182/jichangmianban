@@ -122,6 +122,12 @@ func (s *CronService) safeRun(name string, fn func()) {
 	fn()
 }
 
+// SafeRun 导出版的 safeRun, 供 main.go 的独立 cron goroutine 调用。
+// 防止定时任务 panic 导致整个面板进程崩溃(main.go 的 go func 无 defer recover)。
+func (s *CronService) SafeRun(name string, fn func()) {
+	s.safeRun(name, fn)
+}
+
 // MarkTrafficExhausted 兜底检测所有超额用户并标记 traffic_exhausted
 // 修复 BIZ-FATAL-02: 此前仅在 grpc ReportRealtime 实时上报时检测超额,
 // 若节点 agent 上报异常/缺失,超额用户永远不会被停服("流量不停机")。

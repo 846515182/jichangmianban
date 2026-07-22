@@ -298,10 +298,10 @@
           <div style="font-size:12px;color:#909399">
             开启后系统自动检测节点负载并动态调整单用户限速：<br/>
             • 空闲：15 Mbps（1080P流畅，4K看不了）<br/>
-            • 正常：12 Mbps（1080P够用）<br/>
-            • 繁忙：8 Mbps（720P流畅/1080P勉强）<br/>
-            • 满载：3 Mbps（聊天+480P短视频）<br/>
-            保证每人能聊天、刷短视频、看1080P，看不了4K，下载被限慢
+            • 正常：12 Mbps（1080P底线）<br/>
+            • 繁忙：12 Mbps（仍保1080P底线，不降）<br/>
+            • 满载：5 Mbps（降级保720P+聊天）<br/>
+            底线保证每人能看1080P视频，只有CPU满载才降级
           </div>
         </el-form-item>
         <el-divider content-position="left">一键自动部署（可选）</el-divider>

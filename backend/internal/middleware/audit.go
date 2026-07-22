@@ -66,6 +66,7 @@ func AuditAction(action string) gin.HandlerFunc {
 
 			// 异步写入，不阻塞响应; 失败时短暂重试, 避免审计日志丢失
 			go func(a *model.AdminAction) {
+				defer func() { _ = recover() }()
 				r := repo.NewAdminActionRepo(app.Get().DB)
 				for i := 0; i < 3; i++ {
 					if err := r.Create(a); err == nil {

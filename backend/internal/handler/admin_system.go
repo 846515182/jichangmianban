@@ -1342,8 +1342,16 @@ func (h *AdminSystemHandler) GitPullClearLog(c *gin.Context) {
 // 手动重启后端服务
 func (h *AdminSystemHandler) SystemRestart(c *gin.Context) {
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logWrite("重启流程 panic: %v", r)
+			}
+		}()
 		time.Sleep(1 * time.Second)
-		execCommand("systemctl", "restart", "nexus-panel")
+		result := execCommand("systemctl", "restart", "nexus-panel")
+		if !result.Success {
+			logWrite("重启失败: %s", result.Error)
+		}
 	}()
 	response.OKMsg(c, "重启指令已下发，面板即将恢复")
 }

@@ -191,16 +191,17 @@ func (s *LoadScorer) UpdateNodeLoadStatus(ctx context.Context, node *model.Node,
 }
 
 // 动态限速基础速度(Mbps)
-// 设计目标: 保证每人能聊天+刷短视频+看1080P(需8-12Mbps),
-// 看不了4K(需25Mbps+), 下载被限慢。管理员只需开关, 系统按负载自动调。
+// 设计目标: 底线保证每人能看 1080P(需8-12Mbps), 看不了4K(需25Mbps+)。
+// 管理员只需开关, 系统自动检测负载, 只有满载才降级。
 const BaseSpeedDynamic = 15 // 空闲时上限: 1080P流畅, 4K看不了
 
 // CalcDynamicSpeedLimit 根据动态限速开关 + 负载评分计算单用户限速(Mbps)
-// 仅当节点开启动态限速(usage_type=="limited")时生效:
+// 仅当节点开启动态限速(usage_type=="limited")时生效。
+// 底线: 空闲/正常/繁忙都保证 1080P(12Mbps), 只有满载才降级保流畅。
 //   - 空闲(score<0.3): 15 Mbps  (1080P流畅, 4K看不了)
-//   - 正常(0.3~0.6):   12 Mbps  (1080P够用)
-//   - 繁忙(0.6~0.85):  8 Mbps   (720P流畅/1080P勉强)
-//   - 满载(>=0.85):    3 Mbps   (聊天+480P短视频)
+//   - 正常(0.3~0.6):   12 Mbps  (1080P底线)
+//   - 繁忙(0.6~0.85):  12 Mbps  (1080P底线, 不降)
+//   - 满载(>=0.85):    5 Mbps   (降级保720P+聊天)
 //   - 若配了 MaxBandwidthMbps, 还要保证: 限速 <= 总带宽/连接数(均分)
 //
 // 返回 0 表示不限速(未开启动态限速)
@@ -210,17 +211,17 @@ func CalcDynamicSpeedLimit(node *model.Node, score LoadScore, snap *HeartbeatSna
 		return 0
 	}
 
-	// 负载分级限速: 空闲15 / 正常12 / 繁忙8 / 满载3
+	// 负载分级限速: 空闲15 / 正常12 / 繁忙12(保1080P底线) / 满载5(降级)
 	var limit int
 	switch {
 	case score.Score < 0.3:
 		limit = 15 // 空闲: 1080P流畅, 4K看不了
 	case score.Score < 0.6:
-		limit = 12 // 正常: 1080P够用
+		limit = 12 // 正常: 1080P底线
 	case score.Score < 0.85:
-		limit = 8 // 繁忙: 720P流畅/1080P勉强
+		limit = 12 // 繁忙: 仍保1080P底线, 不降
 	default:
-		limit = 3 // 满载: 聊天+480P短视频
+		limit = 5 // 满载: 降级保720P+聊天
 	}
 
 	// 若配了带宽上限, 保证均分: 单用户限速 <= 总带宽 / 当前连接数
