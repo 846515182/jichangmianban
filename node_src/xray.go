@@ -293,10 +293,29 @@ func InjectStatsConfig(cfgJSON string, apiPort int) (string, error) {
 		return "", fmt.Errorf("解析 Xray 配置 JSON 失败: %w", err)
 	}
 
-	// 幂等：已有 stats 配置则跳过
+	// 为所有 inbound 的 clients 注入 email 字段(用 id 作为 email)
+	// Xray-core 用户级 stats 依赖 client.email 创建 counter:
+	//   user>>>{email}>>>traffic>>>uplink / downlink
+	// 缺少 email 时 xray 不创建用户级 counter, statsquery 只返回 inbound 级统计,
+	// agent 查询到 0 用户, 真实用户流量无法上报(面板显示 0 bps)。
+	// 用 client.id(UUID) 作为 email, 使 stats 名称与 agent parseUserTrafficStat 解析格式一致。
+	injected := injectClientEmails(cfg)
+	if injected > 0 {
+		log.Printf("[xray] 为 %d 个 client 注入 email 字段(启用用户级流量统计)", injected)
+	}
+
+	// 幂等：已有 stats 配置则跳过注入(但 email 已注入, 需重新序列化)
 	if _, hasStats := cfg["stats"]; hasStats {
-		log.Printf("[xray] 配置已包含 stats 段，跳过注入")
-		return cfgJSON, nil
+		if injected == 0 {
+			log.Printf("[xray] 配置已包含 stats 段且无需注入 email，跳过")
+			return cfgJSON, nil
+		}
+		out, err := json.Marshal(cfg)
+		if err != nil {
+			return "", fmt.Errorf("重新序列化配置(email注入)失败: %w", err)
+		}
+		log.Printf("[xray] 配置已包含 stats 段，仅注入 email 后返回")
+		return string(out), nil
 	}
 
 	cfg["stats"] = map[string]interface{}{}
@@ -518,4 +537,45 @@ func (w logWriter) Write(p []byte) (int, error) {
 		log.Printf("%s%s", w.prefix, msg)
 	}
 	return len(p), nil
+}
+
+// injectClientEmails 遍历所有 inbound 的 clients, 为缺少 email 的 client 添加 email(用 id 作为值)。
+// Xray-core 用户级流量统计(statsquery)依赖 client.email 创建 counter, 缺少 email 时不统计。
+// 返回注入 email 的 client 数量。
+func injectClientEmails(cfg map[string]interface{}) int {
+	injected := 0
+	inbounds, ok := cfg["inbounds"].([]interface{})
+	if !ok {
+		return 0
+	}
+	for _, ib := range inbounds {
+		inbound, ok := ib.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		settings, ok := inbound["settings"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		clients, ok := settings["clients"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, c := range clients {
+			client, ok := c.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if _, hasEmail := client["email"]; hasEmail {
+				continue
+			}
+			id, ok := client["id"].(string)
+			if !ok || id == "" {
+				continue
+			}
+			client["email"] = id
+			injected++
+		}
+	}
+	return injected
 }

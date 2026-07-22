@@ -139,6 +139,16 @@ func (s *NodeServiceServer) Heartbeat(ctx context.Context, req *nexuspb.Heartbea
 	// 运行时信息存 Redis(节点 agent 仪表盘用)
 	// 修复 NODE-HEALTH-01: 新增 proxy_reachable / proxy_latency_ms / proxy_error 字段
 	// 让面板区分"agent 进程可达"和"代理服务可用"
+	proxyReachable := req.GetProxyReachable()
+	proxyReachableInt := int64(0)
+	if proxyReachable {
+		proxyReachableInt = 1
+	}
+	s.logger.Info("心跳运行时信息",
+		zap.String("node_id", node.ID),
+		zap.Bool("proxy_reachable", proxyReachable),
+		zap.Int64("proxy_latency_ms", req.GetProxyLatencyMs()),
+		zap.Int32("online_connections", req.GetOnlineConnections()))
 	if rdb := app.Get().RDB; rdb != nil {
 		hb := map[string]interface{}{
 			"node_id":            node.ID,
@@ -149,8 +159,8 @@ func (s *NodeServiceServer) Heartbeat(ctx context.Context, req *nexuspb.Heartbea
 			"online_connections": req.GetOnlineConnections(),
 			"uptime_seconds":     req.GetUptimeSeconds(),
 			"updated_at":         now.Unix(),
-			// 修复 NODE-HEALTH-01: 代理自检结果, 面板用它显示真实在线状态
-			"proxy_reachable": req.GetProxyReachable(),
+			// 修复 proxy_reachable 存储: 显式转 int64, 与 admin_node.go 的 strconv.ParseInt 一致
+			"proxy_reachable": proxyReachableInt,
 			"proxy_latency":   req.GetProxyLatencyMs(),
 			"proxy_error":     req.GetProxyError(),
 		}
