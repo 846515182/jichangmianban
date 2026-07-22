@@ -104,10 +104,24 @@ func (r *PlanRepo) Update(p *model.Plan) error {
 	return r.db.Save(p).Error
 }
 
-// SoftDelete 软删除
+// SoftDelete 软删除套餐
+// [P1-删除审计] 事务内同时物理删除 node_plan_bindings 绑定关系,
+// 旧版只软删 plan, 绑定残留导致 CountNodesByPlanID 统计虚高,
+// 且 node_plan_bindings.plan_id 外键 CASCADE 仅物理删 plan 时生效, 软删不触发
 func (r *PlanRepo) SoftDelete(id string) error {
-	return r.db.Model(&model.Plan{}).Where("id = ? AND is_deleted = false", id).
-		Update("is_deleted", true).Error
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		// 1. 软删套餐
+		if err := tx.Model(&model.Plan{}).Where("id = ? AND is_deleted = false", id).
+			Update("is_deleted", true).Error; err != nil {
+			return err
+		}
+		// 2. 物理删除节点绑定关系(关系表无需审计, 直接删)
+		//    避免 DeletePlan 后 CountNodesByPlanID 统计虚高
+		if err := tx.Where("plan_id = ?", id).Delete(&model.NodePlanBinding{}).Error; err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 // SyncUsersByPlanID 在事务内按 plan_id 同步 users 表的 traffic_limit

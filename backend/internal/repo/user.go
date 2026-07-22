@@ -98,27 +98,49 @@ func (r *UserRepo) SoftDelete(id string) error {
 // HardDelete 硬删除(物理删除, 仅用于测试数据彻底清理)
 // 与 SoftDelete 不同: 物理从数据库删除, 不留任何痕迹, 释放所有索引。
 // 注意: 此操作不可逆, 仅建议用于测试账号清理。
-// 级联清理: traffic_logs, user_nodes, subscriptions, orders (避免外键残留)
+// 级联清理: traffic_logs, traffic_realtime, user_nodes, subscriptions,
+//
+//	tickets, ticket_replies, orders(软删保留审计)
+//
+// [P0-删除审计] 修复 tickets/ticket_replies/traffic_realtime 残留:
+//   - tickets 表 004 迁移去掉了 FK, 不会自动级联删
+//   - ticket_replies 表完全无 FK 到 tickets
+//   - traffic_realtime 表无 FK 无 is_deleted
+//   - referrals/referral_rewards 有 FK ON DELETE CASCADE 自动级联, 无需显式删
 func (r *UserRepo) HardDelete(id string) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
 		// 1. 物理删除关联流量日志
 		if err := tx.Where("user_id = ?", id).Delete(&model.TrafficLog{}).Error; err != nil {
 			return err
 		}
-		// 2. 物理删除 user_nodes 关联(已软删的也清)
+		// 2. [P0-删除审计] 物理删除 traffic_realtime (无 FK 无 is_deleted, 不级联删会残留)
+		if err := tx.Exec("DELETE FROM traffic_realtime WHERE user_id = ?", id).Error; err != nil {
+			return err
+		}
+		// 3. [P0-删除审计] 物理删除 ticket_replies (无 FK, 先删 replies 再删 tickets)
+		//    ticket_replies 通过 ticket_id 关联 tickets, 需先查出该用户的 ticket_id 再删 replies
+		if err := tx.Exec("DELETE FROM ticket_replies WHERE ticket_id IN (SELECT id FROM tickets WHERE user_id = ?)", id).Error; err != nil {
+			return err
+		}
+		// 4. [P0-删除审计] 物理删除 tickets (004 迁移去掉了 FK, 不级联)
+		if err := tx.Unscoped().Where("user_id = ?", id).Delete(&model.Ticket{}).Error; err != nil {
+			return err
+		}
+		// 5. 物理删除 user_nodes 关联(已软删的也清)
 		if err := tx.Unscoped().Where("user_id = ?", id).Delete(&model.UserNode{}).Error; err != nil {
 			return err
 		}
-		// 3. 物理删除 subscriptions
+		// 6. 物理删除 subscriptions
 		if err := tx.Unscoped().Where("user_id = ?", id).Delete(&model.Subscription{}).Error; err != nil {
 			return err
 		}
-		// 4. 软删除 orders(订单保留, 用于财务审计)
+		// 7. 软删除 orders(订单保留, 用于财务审计)
 		if err := tx.Model(&model.Order{}).Where("user_id = ? AND is_deleted = false", id).
 			Update("is_deleted", true).Error; err != nil {
 			return err
 		}
-		// 5. 物理删除用户(用 Unscoped 跳过 is_deleted 过滤)
+		// 8. 物理删除用户(用 Unscoped 跳过 is_deleted 过滤)
+		//    referrals/referral_rewards 有 FK ON DELETE CASCADE 会自动级联删, 无需显式删
 		if err := tx.Unscoped().Where("id = ?", id).Delete(&model.User{}).Error; err != nil {
 			return err
 		}

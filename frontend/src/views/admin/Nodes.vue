@@ -811,35 +811,21 @@ const cleanupProgressNodeName = ref('')
 
 const handleDelete = (row: NodeRow) => {
   ElMessageBox.confirm(
-    `确定删除节点「${row.name}」吗？\n\n推荐: 点击「清理并删除」自动 SSH 清理节点服务器残留资源(容器/目录/镜像)。\n快速: 点击「仅删除」只在面板侧删除(节点服务器残留资源需手动清理)。`,
+    `确定删除节点「${row.name}」吗？\n\n将自动 SSH 清理节点服务器残留资源(Docker 容器/部署目录/镜像), 确保无残留。\n如节点服务器不可达, 会跳过物理清理仅删面板记录。`,
     '删除节点',
     {
       type: 'warning',
-      distinguishCancelAndClose: true,
-      confirmButtonText: '清理并删除',
-      cancelButtonText: '仅删除',
+      confirmButtonText: '确认删除',
+      cancelButtonText: '取消',
     },
   ).then(() => {
-    // 清理并删除: 打开 SSE 进度弹窗
+    // [P1-删除审计] 统一走 cleanup 流程, 移除"仅删除"分支:
+    // 旧版"仅删除"只删面板 DB+Redis, 节点服务器的 agent 容器/部署目录/镜像全部残留,
+    // 旧 agent 用失效 token 注册失败 30 次 → log.Fatalf → restart=unless-stopped 死循环刷日志
     cleanupProgressNodeId.value = row.id
     cleanupProgressNodeName.value = row.name
     cleanupProgressVisible.value = true
-  }).catch((action: string) => {
-    if (action === 'cancel') {
-      // 仅删除: 走旧接口 DELETE /nodes/:id
-      ElMessageBox.confirm(`确认仅面板侧删除「${row.name}」? 节点服务器上的容器/目录/镜像不会被清理。`, '仅删除', {
-        type: 'warning',
-        confirmButtonText: '确认删除',
-        cancelButtonText: '取消',
-      }).then(async () => {
-        try {
-          await request.delete(`/api/v1/admin/nodes/${row.id}`)
-          ElMessage.success('节点已删除')
-          await fetchList()
-        } catch { /* */ }
-      }).catch(() => {})
-    }
-  })
+  }).catch(() => {})
 }
 
 const rotateToken = (row: NodeRow) => {

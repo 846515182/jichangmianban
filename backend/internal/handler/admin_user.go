@@ -121,6 +121,8 @@ func (h *AdminUserHandler) UserDelete(c *gin.Context) {
 	}
 	// 同时禁用订阅，防止删除后通过公开订阅链接继续使用
 	_ = h.subRepo.DisableByUserID(id)
+	// [P1-删除审计] 失效用户 JWT, 软删后旧 token 在过期前仍可调用 /user/* 接口(虽然 GetByID 返回 NotFound, 但 token 有效是安全隐患)
+	invalidateUserTokens(id)
 	// 触发所有节点配置刷新，确保已删除用户的凭证从节点 Xray 配置中移除
 	_ = h.nodeRepo.TouchAllEnabled()
 	response.OKMsg(c, "已删除")
@@ -178,6 +180,8 @@ func (h *AdminUserHandler) UserHardDelete(c *gin.Context) {
 		response.FailMsg(c, response.CodeServerError, err.Error())
 		return
 	}
+	// [P1-删除审计] 失效用户 JWT, 硬删后旧 token 仍有效是安全隐患
+	invalidateUserTokens(id)
 	// 触发所有节点配置刷新, 确保已删除用户的凭证从节点 Xray 配置中移除
 	_ = h.nodeRepo.TouchAllEnabled()
 	response.OKMsg(c, "已彻底删除(物理清除, 数据不可恢复)")
