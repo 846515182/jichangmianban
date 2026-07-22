@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -94,8 +95,6 @@ func main() {
 
 	deps := handler.NewDeps()
 	handler.RegisterRoutes(r, deps)
-
-
 
 	// 9. 启动 gRPC 服务(节点通信)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -477,16 +476,16 @@ func ensureTrialPlan(db *gorm.DB, logger *zap.Logger) {
 		return
 	}
 	trial := &model.Plan{
-		Name:                "试用套餐",
-		Description:         "注册即享 5GB 试用流量，30 天有效",
-		TrafficLimit:        5 * 1024 * 1024 * 1024, // 5GB
-		DurationDays:        30,
-		PriceCents:          0,
-		OriginalPriceCents:  0,
-		DeviceLimit:         2,
-		IsEnabled:           true,
-		IsTrial:             true, // 试用套餐标记, ListEnabled 会过滤掉
-		SortOrder:           0,    // 排在最前
+		Name:               "试用套餐",
+		Description:        "注册即享 5GB 试用流量，30 天有效",
+		TrafficLimit:       5 * 1024 * 1024 * 1024, // 5GB
+		DurationDays:       30,
+		PriceCents:         0,
+		OriginalPriceCents: 0,
+		DeviceLimit:        2,
+		IsEnabled:          true,
+		IsTrial:            true, // 试用套餐标记, ListEnabled 会过滤掉
+		SortOrder:          0,    // 排在最前
 	}
 	if err := db.Create(trial).Error; err != nil {
 		logger.Warn("创建试用套餐失败", zap.Error(err))
@@ -507,8 +506,8 @@ func generateRandomPassword(n int) string {
 // httpToHTTPSRedirect 将 HTTP 请求 301 重定向到 HTTPS
 func httpToHTTPSRedirect() {
 	redirectSrv := &http.Server{
-		Addr:         ":80",
-		Handler:      http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		Addr: ":80",
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			target := "https://" + r.Host + r.URL.String()
 			http.Redirect(w, r, target, http.StatusMovedPermanently)
 		}),
@@ -569,6 +568,13 @@ func runSQLMigrations(db *gorm.DB, logger *zap.Logger) error {
 		tx := db.Begin()
 		if err := tx.Exec(string(data)).Error; err != nil {
 			tx.Rollback()
+			// 如果是"已存在"类错误（如 relation already exists），说明表结构已在之前创建，
+			// 迁移内容实际已完成，记录版本号避免每次启动重复报错。
+			if isAlreadyExistsError(err) {
+				logger.Warn("迁移对象已存在, 标记为已完成", zap.String("version", m.Version), zap.Error(err))
+				db.Create(&model.SchemaMigration{Version: m.Version})
+				continue
+			}
 			logger.Error("执行迁移失败", zap.String("version", m.Version), zap.Error(err))
 			continue
 		}
@@ -580,6 +586,16 @@ func runSQLMigrations(db *gorm.DB, logger *zap.Logger) error {
 		logger.Info("迁移执行成功", zap.String("version", m.Version))
 	}
 	return nil
+}
+
+// isAlreadyExistsError 判断是否为"对象已存在"类错误（PostgreSQL SQLSTATE 42P07）。
+// 这类错误说明表/索引等对象已在之前创建，迁移内容实际已完成。
+func isAlreadyExistsError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "already exists") || strings.Contains(msg, "42P07")
 }
 
 // ginZapLogger 简易 gin 日志中间件(使用 zap)
@@ -596,6 +612,3 @@ func ginZapLogger(logger *zap.Logger) gin.HandlerFunc {
 		)
 	}
 }
-
-
-
