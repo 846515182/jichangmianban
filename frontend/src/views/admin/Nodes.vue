@@ -297,11 +297,11 @@
           <el-switch v-model="form.dynamicLimit" active-text="开启" inactive-text="关闭" />
           <div style="font-size:12px;color:#909399">
             开启后系统自动检测节点负载并动态调整单用户限速：<br/>
-            • 空闲：8 Mbps（刷短视频流畅，4K看不了）<br/>
-            • 正常：5 Mbps（刷短视频够用）<br/>
-            • 繁忙：3 Mbps（聊天+低清短视频）<br/>
-            • 满载：1 Mbps（仅保证聊天浏览）<br/>
-            保证每人能聊天、刷短视频，看不了4K，下载被限慢
+            • 空闲：15 Mbps（1080P流畅，4K看不了）<br/>
+            • 正常：12 Mbps（1080P够用）<br/>
+            • 繁忙：8 Mbps（720P流畅/1080P勉强）<br/>
+            • 满载：3 Mbps（聊天+480P短视频）<br/>
+            保证每人能聊天、刷短视频、看1080P，看不了4K，下载被限慢
           </div>
         </el-form-item>
         <el-divider content-position="left">一键自动部署（可选）</el-divider>
