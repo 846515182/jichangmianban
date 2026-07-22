@@ -166,8 +166,8 @@ func (ut *UserTraffic) queryXrayStats() (map[string]int64, map[string]int64, err
 
 	var result struct {
 		Stat []struct {
-			Name  string `json:"name"`
-			Value string `json:"value"` // Xray 返回字符串格式的 int64
+			Name  string      `json:"name"`
+			Value interface{} `json:"value"` // Xray v24+ 返回数字，v23 返回字符串
 		} `json:"stat"`
 	}
 	if err := json.Unmarshal(output, &result); err != nil {
@@ -183,8 +183,18 @@ func (ut *UserTraffic) queryXrayStats() (map[string]int64, map[string]int64, err
 			continue
 		}
 		var val int64
-		if _, err := fmt.Sscanf(s.Value, "%d", &val); err != nil {
-			log.Printf("[traffic] 解析计数器失败 name=%s value=%s: %v", s.Name, s.Value, err)
+		switch v := s.Value.(type) {
+		case float64:
+			// Xray v24+ 返回 JSON number (float64)
+			val = int64(v)
+		case string:
+			// Xray v23 返回字符串
+			if _, err := fmt.Sscanf(v, "%d", &val); err != nil {
+				log.Printf("[traffic] 解析计数器失败 name=%s value=%s: %v", s.Name, v, err)
+				continue
+			}
+		default:
+			log.Printf("[traffic] 未知 value 类型 name=%s type=%T: %v", s.Name, s.Value, s.Value)
 			continue
 		}
 		if isUp {
