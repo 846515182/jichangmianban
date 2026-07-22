@@ -7,9 +7,9 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v3.21.12
-// source: proto/nexus.proto
+// source: nexus.proto
 
-package proto
+package nexuspb
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
@@ -69,11 +69,11 @@ func (x UserStatus) String() string {
 }
 
 func (UserStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_nexus_proto_enumTypes[0].Descriptor()
+	return file_nexus_proto_enumTypes[0].Descriptor()
 }
 
 func (UserStatus) Type() protoreflect.EnumType {
-	return &file_proto_nexus_proto_enumTypes[0]
+	return &file_nexus_proto_enumTypes[0]
 }
 
 func (x UserStatus) Number() protoreflect.EnumNumber {
@@ -82,7 +82,7 @@ func (x UserStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use UserStatus.Descriptor instead.
 func (UserStatus) EnumDescriptor() ([]byte, []int) {
-	return file_proto_nexus_proto_rawDescGZIP(), []int{0}
+	return file_nexus_proto_rawDescGZIP(), []int{0}
 }
 
 // 协议类型枚举
@@ -125,11 +125,11 @@ func (x Protocol) String() string {
 }
 
 func (Protocol) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_nexus_proto_enumTypes[1].Descriptor()
+	return file_nexus_proto_enumTypes[1].Descriptor()
 }
 
 func (Protocol) Type() protoreflect.EnumType {
-	return &file_proto_nexus_proto_enumTypes[1]
+	return &file_nexus_proto_enumTypes[1]
 }
 
 func (x Protocol) Number() protoreflect.EnumNumber {
@@ -138,7 +138,7 @@ func (x Protocol) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Protocol.Descriptor instead.
 func (Protocol) EnumDescriptor() ([]byte, []int) {
-	return file_proto_nexus_proto_rawDescGZIP(), []int{1}
+	return file_nexus_proto_rawDescGZIP(), []int{1}
 }
 
 // ============================================================
@@ -155,7 +155,7 @@ type Response struct {
 
 func (x *Response) Reset() {
 	*x = Response{}
-	mi := &file_proto_nexus_proto_msgTypes[0]
+	mi := &file_nexus_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -167,7 +167,7 @@ func (x *Response) String() string {
 func (*Response) ProtoMessage() {}
 
 func (x *Response) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_nexus_proto_msgTypes[0]
+	mi := &file_nexus_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -180,7 +180,7 @@ func (x *Response) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Response.ProtoReflect.Descriptor instead.
 func (*Response) Descriptor() ([]byte, []int) {
-	return file_proto_nexus_proto_rawDescGZIP(), []int{0}
+	return file_nexus_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *Response) GetCode() int32 {
@@ -230,7 +230,7 @@ type NodeInfo struct {
 
 func (x *NodeInfo) Reset() {
 	*x = NodeInfo{}
-	mi := &file_proto_nexus_proto_msgTypes[1]
+	mi := &file_nexus_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -242,7 +242,7 @@ func (x *NodeInfo) String() string {
 func (*NodeInfo) ProtoMessage() {}
 
 func (x *NodeInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_nexus_proto_msgTypes[1]
+	mi := &file_nexus_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -255,7 +255,7 @@ func (x *NodeInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeInfo.ProtoReflect.Descriptor instead.
 func (*NodeInfo) Descriptor() ([]byte, []int) {
-	return file_proto_nexus_proto_rawDescGZIP(), []int{1}
+	return file_nexus_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *NodeInfo) GetId() string {
@@ -376,7 +376,7 @@ type RegisterRequest struct {
 
 func (x *RegisterRequest) Reset() {
 	*x = RegisterRequest{}
-	mi := &file_proto_nexus_proto_msgTypes[2]
+	mi := &file_nexus_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -388,7 +388,7 @@ func (x *RegisterRequest) String() string {
 func (*RegisterRequest) ProtoMessage() {}
 
 func (x *RegisterRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_nexus_proto_msgTypes[2]
+	mi := &file_nexus_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -401,7 +401,7 @@ func (x *RegisterRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterRequest.ProtoReflect.Descriptor instead.
 func (*RegisterRequest) Descriptor() ([]byte, []int) {
-	return file_proto_nexus_proto_rawDescGZIP(), []int{2}
+	return file_nexus_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *RegisterRequest) GetNodeToken() string {
@@ -449,7 +449,7 @@ type RegisterResponse struct {
 
 func (x *RegisterResponse) Reset() {
 	*x = RegisterResponse{}
-	mi := &file_proto_nexus_proto_msgTypes[3]
+	mi := &file_nexus_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -461,7 +461,7 @@ func (x *RegisterResponse) String() string {
 func (*RegisterResponse) ProtoMessage() {}
 
 func (x *RegisterResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_nexus_proto_msgTypes[3]
+	mi := &file_nexus_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -474,7 +474,7 @@ func (x *RegisterResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterResponse.ProtoReflect.Descriptor instead.
 func (*RegisterResponse) Descriptor() ([]byte, []int) {
-	return file_proto_nexus_proto_rawDescGZIP(), []int{3}
+	return file_nexus_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *RegisterResponse) GetResp() *Response {
@@ -493,6 +493,7 @@ func (x *RegisterResponse) GetNode() *NodeInfo {
 
 type HeartbeatRequest struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
+	NodeToken         string                 `protobuf:"bytes,10,opt,name=node_token,json=nodeToken,proto3" json:"node_token,omitempty"`
 	NodeId            string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
 	Version           string                 `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"`
 	CpuUsage          float64                `protobuf:"fixed64,3,opt,name=cpu_usage,json=cpuUsage,proto3" json:"cpu_usage,omitempty"`
@@ -502,21 +503,19 @@ type HeartbeatRequest struct {
 	UptimeSeconds     float64                `protobuf:"fixed64,7,opt,name=uptime_seconds,json=uptimeSeconds,proto3" json:"uptime_seconds,omitempty"`
 	TrafficLimit      int64                  `protobuf:"varint,8,opt,name=traffic_limit,json=trafficLimit,proto3" json:"traffic_limit,omitempty"`
 	TrafficUsed       int64                  `protobuf:"varint,9,opt,name=traffic_used,json=trafficUsed,proto3" json:"traffic_used,omitempty"`
-		DefaultToken string `protobuf:"bytes,10,opt,name=node_token,json=nodeToken,proto3" json:"node_token,omitempty"`
-unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// 代理服务自检结果(agent 本地 REALITY 自连测试)
+	// 修复 NODE-PROXY-01: 旧版 proto 只定义到 field 9, struct 手动加了 11/12/13 但
+	// rawDesc 未更新, 序列化时这三个字段被丢弃, 面板永远收到 false。
+	ProxyReachable bool   `protobuf:"varint,11,opt,name=proxy_reachable,json=proxyReachable,proto3" json:"proxy_reachable,omitempty"`
+	ProxyLatencyMs int64  `protobuf:"varint,12,opt,name=proxy_latency_ms,json=proxyLatencyMs,proto3" json:"proxy_latency_ms,omitempty"`
+	ProxyError     string `protobuf:"bytes,13,opt,name=proxy_error,json=proxyError,proto3" json:"proxy_error,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *HeartbeatRequest) Reset() {
 	*x = HeartbeatRequest{}
-
-func (x *HeartbeatRequest) GetNodeToken() string {
-	if x != nil {
-		return x.DefaultToken
-	}
-	return ""
-}
-	mi := &file_proto_nexus_proto_msgTypes[4]
+	mi := &file_nexus_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -528,7 +527,7 @@ func (x *HeartbeatRequest) String() string {
 func (*HeartbeatRequest) ProtoMessage() {}
 
 func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_nexus_proto_msgTypes[4]
+	mi := &file_nexus_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -541,7 +540,14 @@ func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatRequest.ProtoReflect.Descriptor instead.
 func (*HeartbeatRequest) Descriptor() ([]byte, []int) {
-	return file_proto_nexus_proto_rawDescGZIP(), []int{4}
+	return file_nexus_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *HeartbeatRequest) GetNodeToken() string {
+	if x != nil {
+		return x.NodeToken
+	}
+	return ""
 }
 
 func (x *HeartbeatRequest) GetNodeId() string {
@@ -607,6 +613,27 @@ func (x *HeartbeatRequest) GetTrafficUsed() int64 {
 	return 0
 }
 
+func (x *HeartbeatRequest) GetProxyReachable() bool {
+	if x != nil {
+		return x.ProxyReachable
+	}
+	return false
+}
+
+func (x *HeartbeatRequest) GetProxyLatencyMs() int64 {
+	if x != nil {
+		return x.ProxyLatencyMs
+	}
+	return 0
+}
+
+func (x *HeartbeatRequest) GetProxyError() string {
+	if x != nil {
+		return x.ProxyError
+	}
+	return ""
+}
+
 type HeartbeatResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Resp          *Response              `protobuf:"bytes,1,opt,name=resp,proto3" json:"resp,omitempty"`
@@ -619,7 +646,7 @@ type HeartbeatResponse struct {
 
 func (x *HeartbeatResponse) Reset() {
 	*x = HeartbeatResponse{}
-	mi := &file_proto_nexus_proto_msgTypes[5]
+	mi := &file_nexus_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -631,7 +658,7 @@ func (x *HeartbeatResponse) String() string {
 func (*HeartbeatResponse) ProtoMessage() {}
 
 func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_nexus_proto_msgTypes[5]
+	mi := &file_nexus_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -644,7 +671,7 @@ func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatResponse.ProtoReflect.Descriptor instead.
 func (*HeartbeatResponse) Descriptor() ([]byte, []int) {
-	return file_proto_nexus_proto_rawDescGZIP(), []int{5}
+	return file_nexus_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *HeartbeatResponse) GetResp() *Response {
@@ -686,7 +713,7 @@ type GetConfigRequest struct {
 
 func (x *GetConfigRequest) Reset() {
 	*x = GetConfigRequest{}
-	mi := &file_proto_nexus_proto_msgTypes[6]
+	mi := &file_nexus_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -698,7 +725,7 @@ func (x *GetConfigRequest) String() string {
 func (*GetConfigRequest) ProtoMessage() {}
 
 func (x *GetConfigRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_nexus_proto_msgTypes[6]
+	mi := &file_nexus_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -711,7 +738,7 @@ func (x *GetConfigRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetConfigRequest.ProtoReflect.Descriptor instead.
 func (*GetConfigRequest) Descriptor() ([]byte, []int) {
-	return file_proto_nexus_proto_rawDescGZIP(), []int{6}
+	return file_nexus_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *GetConfigRequest) GetNodeId() string {
@@ -747,7 +774,7 @@ type NodeConfigResponse struct {
 
 func (x *NodeConfigResponse) Reset() {
 	*x = NodeConfigResponse{}
-	mi := &file_proto_nexus_proto_msgTypes[7]
+	mi := &file_nexus_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -759,7 +786,7 @@ func (x *NodeConfigResponse) String() string {
 func (*NodeConfigResponse) ProtoMessage() {}
 
 func (x *NodeConfigResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_nexus_proto_msgTypes[7]
+	mi := &file_nexus_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -772,7 +799,7 @@ func (x *NodeConfigResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeConfigResponse.ProtoReflect.Descriptor instead.
 func (*NodeConfigResponse) Descriptor() ([]byte, []int) {
-	return file_proto_nexus_proto_rawDescGZIP(), []int{7}
+	return file_nexus_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *NodeConfigResponse) GetResp() *Response {
@@ -805,26 +832,19 @@ func (x *NodeConfigResponse) GetMeta() string {
 
 type ReportStatusRequest struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
+	NodeToken         string                 `protobuf:"bytes,6,opt,name=node_token,json=nodeToken,proto3" json:"node_token,omitempty"`
 	NodeId            string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
 	CpuUsage          float64                `protobuf:"fixed64,2,opt,name=cpu_usage,json=cpuUsage,proto3" json:"cpu_usage,omitempty"`
 	MemoryUsage       float64                `protobuf:"fixed64,3,opt,name=memory_usage,json=memoryUsage,proto3" json:"memory_usage,omitempty"`
 	OnlineConnections int32                  `protobuf:"varint,4,opt,name=online_connections,json=onlineConnections,proto3" json:"online_connections,omitempty"`
 	UptimeSeconds     float64                `protobuf:"fixed64,5,opt,name=uptime_seconds,json=uptimeSeconds,proto3" json:"uptime_seconds,omitempty"`
-		DefaultToken string `protobuf:"bytes,6,opt,name=node_token,json=nodeToken,proto3" json:"node_token,omitempty"`
-unknownFields     protoimpl.UnknownFields
+	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
 
 func (x *ReportStatusRequest) Reset() {
 	*x = ReportStatusRequest{}
-
-func (x *ReportStatusRequest) GetNodeToken() string {
-	if x != nil {
-		return x.DefaultToken
-	}
-	return ""
-}
-	mi := &file_proto_nexus_proto_msgTypes[8]
+	mi := &file_nexus_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -836,7 +856,7 @@ func (x *ReportStatusRequest) String() string {
 func (*ReportStatusRequest) ProtoMessage() {}
 
 func (x *ReportStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_nexus_proto_msgTypes[8]
+	mi := &file_nexus_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -849,7 +869,14 @@ func (x *ReportStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportStatusRequest.ProtoReflect.Descriptor instead.
 func (*ReportStatusRequest) Descriptor() ([]byte, []int) {
-	return file_proto_nexus_proto_rawDescGZIP(), []int{8}
+	return file_nexus_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *ReportStatusRequest) GetNodeToken() string {
+	if x != nil {
+		return x.NodeToken
+	}
+	return ""
 }
 
 func (x *ReportStatusRequest) GetNodeId() string {
@@ -903,7 +930,7 @@ type TrafficRecord struct {
 
 func (x *TrafficRecord) Reset() {
 	*x = TrafficRecord{}
-	mi := &file_proto_nexus_proto_msgTypes[9]
+	mi := &file_nexus_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -915,7 +942,7 @@ func (x *TrafficRecord) String() string {
 func (*TrafficRecord) ProtoMessage() {}
 
 func (x *TrafficRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_nexus_proto_msgTypes[9]
+	mi := &file_nexus_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -928,7 +955,7 @@ func (x *TrafficRecord) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TrafficRecord.ProtoReflect.Descriptor instead.
 func (*TrafficRecord) Descriptor() ([]byte, []int) {
-	return file_proto_nexus_proto_rawDescGZIP(), []int{9}
+	return file_nexus_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *TrafficRecord) GetUserId() string {
@@ -968,8 +995,8 @@ func (x *TrafficRecord) GetLogTime() int64 {
 
 type ReportRealtimeRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
 	NodeToken     string                 `protobuf:"bytes,3,opt,name=node_token,json=nodeToken,proto3" json:"node_token,omitempty"`
+	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
 	Records       []*TrafficRecord       `protobuf:"bytes,2,rep,name=records,proto3" json:"records,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -977,7 +1004,7 @@ type ReportRealtimeRequest struct {
 
 func (x *ReportRealtimeRequest) Reset() {
 	*x = ReportRealtimeRequest{}
-	mi := &file_proto_nexus_proto_msgTypes[10]
+	mi := &file_nexus_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -989,7 +1016,7 @@ func (x *ReportRealtimeRequest) String() string {
 func (*ReportRealtimeRequest) ProtoMessage() {}
 
 func (x *ReportRealtimeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_nexus_proto_msgTypes[10]
+	mi := &file_nexus_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1002,7 +1029,14 @@ func (x *ReportRealtimeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportRealtimeRequest.ProtoReflect.Descriptor instead.
 func (*ReportRealtimeRequest) Descriptor() ([]byte, []int) {
-	return file_proto_nexus_proto_rawDescGZIP(), []int{10}
+	return file_nexus_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *ReportRealtimeRequest) GetNodeToken() string {
+	if x != nil {
+		return x.NodeToken
+	}
+	return ""
 }
 
 func (x *ReportRealtimeRequest) GetNodeId() string {
@@ -1012,12 +1046,6 @@ func (x *ReportRealtimeRequest) GetNodeId() string {
 	return ""
 }
 
-nfunc (x *ReportRealtimeRequest) GetNodeToken() string {
-	if x != nil {
-		return x.NodeToken
-	}
-	return ""
-}
 func (x *ReportRealtimeRequest) GetRecords() []*TrafficRecord {
 	if x != nil {
 		return x.Records
@@ -1035,7 +1063,7 @@ type ReportRealtimeResponse struct {
 
 func (x *ReportRealtimeResponse) Reset() {
 	*x = ReportRealtimeResponse{}
-	mi := &file_proto_nexus_proto_msgTypes[11]
+	mi := &file_nexus_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1047,7 +1075,7 @@ func (x *ReportRealtimeResponse) String() string {
 func (*ReportRealtimeResponse) ProtoMessage() {}
 
 func (x *ReportRealtimeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_nexus_proto_msgTypes[11]
+	mi := &file_nexus_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1060,7 +1088,7 @@ func (x *ReportRealtimeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportRealtimeResponse.ProtoReflect.Descriptor instead.
 func (*ReportRealtimeResponse) Descriptor() ([]byte, []int) {
-	return file_proto_nexus_proto_rawDescGZIP(), []int{11}
+	return file_nexus_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ReportRealtimeResponse) GetResp() *Response {
@@ -1089,7 +1117,7 @@ type UserTrafficSummary struct {
 
 func (x *UserTrafficSummary) Reset() {
 	*x = UserTrafficSummary{}
-	mi := &file_proto_nexus_proto_msgTypes[12]
+	mi := &file_nexus_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1101,7 +1129,7 @@ func (x *UserTrafficSummary) String() string {
 func (*UserTrafficSummary) ProtoMessage() {}
 
 func (x *UserTrafficSummary) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_nexus_proto_msgTypes[12]
+	mi := &file_nexus_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1114,7 +1142,7 @@ func (x *UserTrafficSummary) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UserTrafficSummary.ProtoReflect.Descriptor instead.
 func (*UserTrafficSummary) Descriptor() ([]byte, []int) {
-	return file_proto_nexus_proto_rawDescGZIP(), []int{12}
+	return file_nexus_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *UserTrafficSummary) GetUserId() string {
@@ -1156,7 +1184,7 @@ type QueryUserTrafficRequest struct {
 
 func (x *QueryUserTrafficRequest) Reset() {
 	*x = QueryUserTrafficRequest{}
-	mi := &file_proto_nexus_proto_msgTypes[13]
+	mi := &file_nexus_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1168,7 +1196,7 @@ func (x *QueryUserTrafficRequest) String() string {
 func (*QueryUserTrafficRequest) ProtoMessage() {}
 
 func (x *QueryUserTrafficRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_nexus_proto_msgTypes[13]
+	mi := &file_nexus_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1181,7 +1209,7 @@ func (x *QueryUserTrafficRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryUserTrafficRequest.ProtoReflect.Descriptor instead.
 func (*QueryUserTrafficRequest) Descriptor() ([]byte, []int) {
-	return file_proto_nexus_proto_rawDescGZIP(), []int{13}
+	return file_nexus_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *QueryUserTrafficRequest) GetNodeId() string {
@@ -1215,7 +1243,7 @@ type QueryUserTrafficResponse struct {
 
 func (x *QueryUserTrafficResponse) Reset() {
 	*x = QueryUserTrafficResponse{}
-	mi := &file_proto_nexus_proto_msgTypes[14]
+	mi := &file_nexus_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1227,7 +1255,7 @@ func (x *QueryUserTrafficResponse) String() string {
 func (*QueryUserTrafficResponse) ProtoMessage() {}
 
 func (x *QueryUserTrafficResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_nexus_proto_msgTypes[14]
+	mi := &file_nexus_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1240,7 +1268,7 @@ func (x *QueryUserTrafficResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryUserTrafficResponse.ProtoReflect.Descriptor instead.
 func (*QueryUserTrafficResponse) Descriptor() ([]byte, []int) {
-	return file_proto_nexus_proto_rawDescGZIP(), []int{14}
+	return file_nexus_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *QueryUserTrafficResponse) GetResp() *Response {
@@ -1277,7 +1305,7 @@ type UserCredential struct {
 
 func (x *UserCredential) Reset() {
 	*x = UserCredential{}
-	mi := &file_proto_nexus_proto_msgTypes[15]
+	mi := &file_nexus_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1289,7 +1317,7 @@ func (x *UserCredential) String() string {
 func (*UserCredential) ProtoMessage() {}
 
 func (x *UserCredential) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_nexus_proto_msgTypes[15]
+	mi := &file_nexus_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1302,7 +1330,7 @@ func (x *UserCredential) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UserCredential.ProtoReflect.Descriptor instead.
 func (*UserCredential) Descriptor() ([]byte, []int) {
-	return file_proto_nexus_proto_rawDescGZIP(), []int{15}
+	return file_nexus_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *UserCredential) GetUserId() string {
@@ -1379,7 +1407,7 @@ type SyncUsersRequest struct {
 
 func (x *SyncUsersRequest) Reset() {
 	*x = SyncUsersRequest{}
-	mi := &file_proto_nexus_proto_msgTypes[16]
+	mi := &file_nexus_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1391,7 +1419,7 @@ func (x *SyncUsersRequest) String() string {
 func (*SyncUsersRequest) ProtoMessage() {}
 
 func (x *SyncUsersRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_nexus_proto_msgTypes[16]
+	mi := &file_nexus_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1404,7 +1432,7 @@ func (x *SyncUsersRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyncUsersRequest.ProtoReflect.Descriptor instead.
 func (*SyncUsersRequest) Descriptor() ([]byte, []int) {
-	return file_proto_nexus_proto_rawDescGZIP(), []int{16}
+	return file_nexus_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *SyncUsersRequest) GetNodeId() string {
@@ -1439,7 +1467,7 @@ type SyncUsersResponse struct {
 
 func (x *SyncUsersResponse) Reset() {
 	*x = SyncUsersResponse{}
-	mi := &file_proto_nexus_proto_msgTypes[17]
+	mi := &file_nexus_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1451,7 +1479,7 @@ func (x *SyncUsersResponse) String() string {
 func (*SyncUsersResponse) ProtoMessage() {}
 
 func (x *SyncUsersResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_nexus_proto_msgTypes[17]
+	mi := &file_nexus_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1464,7 +1492,7 @@ func (x *SyncUsersResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyncUsersResponse.ProtoReflect.Descriptor instead.
 func (*SyncUsersResponse) Descriptor() ([]byte, []int) {
-	return file_proto_nexus_proto_rawDescGZIP(), []int{17}
+	return file_nexus_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *SyncUsersResponse) GetResp() *Response {
@@ -1488,11 +1516,11 @@ func (x *SyncUsersResponse) GetLatestVersion() int64 {
 	return 0
 }
 
-var File_proto_nexus_proto protoreflect.FileDescriptor
+var File_nexus_proto protoreflect.FileDescriptor
 
-const file_proto_nexus_proto_rawDesc = "" +
+const file_nexus_proto_rawDesc = "" +
 	"\n" +
-	"\x11proto/nexus.proto\x12\x05nexus\"L\n" +
+	"\vnexus.proto\x12\x05nexus\"L\n" +
 	"\bResponse\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\x05R\x04code\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12\x12\n" +
@@ -1526,8 +1554,11 @@ const file_proto_nexus_proto_rawDesc = "" +
 	"\x0eserver_address\x18\x05 \x01(\tR\rserverAddress\"\\\n" +
 	"\x10RegisterResponse\x12#\n" +
 	"\x04resp\x18\x01 \x01(\v2\x0f.nexus.ResponseR\x04resp\x12#\n" +
-	"\x04node\x18\x02 \x01(\v2\x0f.nexus.NodeInfoR\x04node\"\xc6\x02\n" +
-	"\x10HeartbeatRequest\x12\x17\n" +
+	"\x04node\x18\x02 \x01(\v2\x0f.nexus.NodeInfoR\x04node\"\xd9\x03\n" +
+	"\x10HeartbeatRequest\x12\x1d\n" +
+	"\n" +
+	"node_token\x18\n" +
+	" \x01(\tR\tnodeToken\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12\x1b\n" +
 	"\tcpu_usage\x18\x03 \x01(\x01R\bcpuUsage\x12!\n" +
@@ -1536,7 +1567,11 @@ const file_proto_nexus_proto_rawDesc = "" +
 	"\x12online_connections\x18\x06 \x01(\x05R\x11onlineConnections\x12%\n" +
 	"\x0euptime_seconds\x18\a \x01(\x01R\ruptimeSeconds\x12#\n" +
 	"\rtraffic_limit\x18\b \x01(\x03R\ftrafficLimit\x12!\n" +
-	"\ftraffic_used\x18\t \x01(\x03R\vtrafficUsed\"\xa5\x01\n" +
+	"\ftraffic_used\x18\t \x01(\x03R\vtrafficUsed\x12'\n" +
+	"\x0fproxy_reachable\x18\v \x01(\bR\x0eproxyReachable\x12(\n" +
+	"\x10proxy_latency_ms\x18\f \x01(\x03R\x0eproxyLatencyMs\x12\x1f\n" +
+	"\vproxy_error\x18\r \x01(\tR\n" +
+	"proxyError\"\xa5\x01\n" +
 	"\x11HeartbeatResponse\x12#\n" +
 	"\x04resp\x18\x01 \x01(\v2\x0f.nexus.ResponseR\x04resp\x12%\n" +
 	"\x0econfig_changed\x18\x02 \x01(\bR\rconfigChanged\x12#\n" +
@@ -1553,8 +1588,10 @@ const file_proto_nexus_proto_rawDesc = "" +
 	"\x0econfig_version\x18\x02 \x01(\tR\rconfigVersion\x12\x1f\n" +
 	"\vxray_config\x18\x03 \x01(\tR\n" +
 	"xrayConfig\x12\x12\n" +
-	"\x04meta\x18\x04 \x01(\tR\x04meta\"\xc4\x01\n" +
-	"\x13ReportStatusRequest\x12\x17\n" +
+	"\x04meta\x18\x04 \x01(\tR\x04meta\"\xe3\x01\n" +
+	"\x13ReportStatusRequest\x12\x1d\n" +
+	"\n" +
+	"node_token\x18\x06 \x01(\tR\tnodeToken\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x1b\n" +
 	"\tcpu_usage\x18\x02 \x01(\x01R\bcpuUsage\x12!\n" +
 	"\fmemory_usage\x18\x03 \x01(\x01R\vmemoryUsage\x12-\n" +
@@ -1565,8 +1602,10 @@ const file_proto_nexus_proto_rawDesc = "" +
 	"\anode_id\x18\x02 \x01(\tR\x06nodeId\x12!\n" +
 	"\fupload_bytes\x18\x03 \x01(\x03R\vuploadBytes\x12%\n" +
 	"\x0edownload_bytes\x18\x04 \x01(\x03R\rdownloadBytes\x12\x19\n" +
-	"\blog_time\x18\x05 \x01(\x03R\alogTime\"`\n" +
-	"\x15ReportRealtimeRequest\x12\x17\n" +
+	"\blog_time\x18\x05 \x01(\x03R\alogTime\"\x7f\n" +
+	"\x15ReportRealtimeRequest\x12\x1d\n" +
+	"\n" +
+	"node_token\x18\x03 \x01(\tR\tnodeToken\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12.\n" +
 	"\arecords\x18\x02 \x03(\v2\x14.nexus.TrafficRecordR\arecords\"Y\n" +
 	"\x16ReportRealtimeResponse\x12#\n" +
@@ -1632,20 +1671,20 @@ const file_proto_nexus_proto_rawDesc = "" +
 	"\tSyncUsers\x12\x17.nexus.SyncUsersRequest\x1a\x18.nexus.SyncUsersResponseB\x1bZ\x19nexus-panel/proto;nexuspbb\x06proto3"
 
 var (
-	file_proto_nexus_proto_rawDescOnce sync.Once
-	file_proto_nexus_proto_rawDescData []byte
+	file_nexus_proto_rawDescOnce sync.Once
+	file_nexus_proto_rawDescData []byte
 )
 
-func file_proto_nexus_proto_rawDescGZIP() []byte {
-	file_proto_nexus_proto_rawDescOnce.Do(func() {
-		file_proto_nexus_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_nexus_proto_rawDesc), len(file_proto_nexus_proto_rawDesc)))
+func file_nexus_proto_rawDescGZIP() []byte {
+	file_nexus_proto_rawDescOnce.Do(func() {
+		file_nexus_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_nexus_proto_rawDesc), len(file_nexus_proto_rawDesc)))
 	})
-	return file_proto_nexus_proto_rawDescData
+	return file_nexus_proto_rawDescData
 }
 
-var file_proto_nexus_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_proto_nexus_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
-var file_proto_nexus_proto_goTypes = []any{
+var file_nexus_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_nexus_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
+var file_nexus_proto_goTypes = []any{
 	(UserStatus)(0),                  // 0: nexus.UserStatus
 	(Protocol)(0),                    // 1: nexus.Protocol
 	(*Response)(nil),                 // 2: nexus.Response
@@ -1667,7 +1706,7 @@ var file_proto_nexus_proto_goTypes = []any{
 	(*SyncUsersRequest)(nil),         // 18: nexus.SyncUsersRequest
 	(*SyncUsersResponse)(nil),        // 19: nexus.SyncUsersResponse
 }
-var file_proto_nexus_proto_depIdxs = []int32{
+var file_nexus_proto_depIdxs = []int32{
 	1,  // 0: nexus.NodeInfo.protocol:type_name -> nexus.Protocol
 	2,  // 1: nexus.RegisterResponse.resp:type_name -> nexus.Response
 	3,  // 2: nexus.RegisterResponse.node:type_name -> nexus.NodeInfo
@@ -1702,27 +1741,27 @@ var file_proto_nexus_proto_depIdxs = []int32{
 	0,  // [0:13] is the sub-list for field type_name
 }
 
-func init() { file_proto_nexus_proto_init() }
-func file_proto_nexus_proto_init() {
-	if File_proto_nexus_proto != nil {
+func init() { file_nexus_proto_init() }
+func file_nexus_proto_init() {
+	if File_nexus_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_nexus_proto_rawDesc), len(file_proto_nexus_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_nexus_proto_rawDesc), len(file_nexus_proto_rawDesc)),
 			NumEnums:      2,
 			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   3,
 		},
-		GoTypes:           file_proto_nexus_proto_goTypes,
-		DependencyIndexes: file_proto_nexus_proto_depIdxs,
-		EnumInfos:         file_proto_nexus_proto_enumTypes,
-		MessageInfos:      file_proto_nexus_proto_msgTypes,
+		GoTypes:           file_nexus_proto_goTypes,
+		DependencyIndexes: file_nexus_proto_depIdxs,
+		EnumInfos:         file_nexus_proto_enumTypes,
+		MessageInfos:      file_nexus_proto_msgTypes,
 	}.Build()
-	File_proto_nexus_proto = out.File
-	file_proto_nexus_proto_goTypes = nil
-	file_proto_nexus_proto_depIdxs = nil
+	File_nexus_proto = out.File
+	file_nexus_proto_goTypes = nil
+	file_nexus_proto_depIdxs = nil
 }

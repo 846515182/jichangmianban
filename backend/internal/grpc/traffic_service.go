@@ -232,6 +232,33 @@ func (s *TrafficServiceServer) ReportRealtime(ctx context.Context, req *nexuspb.
 			zap.String("node_id", req.GetNodeId()), zap.Error(err))
 	}
 
+	// 修复 NODE-SPEED-01: 计算本批次瞬时速率写入 heartbeat hash。
+	// admin_node.go 的 speed_bps 主路径读 heartbeat.speed_bps, 旧版无人写导致恒 0,
+	// 只能靠 snap 兜底估算(延迟高、不准)。这里用本批次总字节 / 实际上报间隔算真实速率。
+	// 用 Redis 记录上次上报时间戳(node:speed_ts:{nodeID})计算真实时间差, 避免假设固定 60s。
+	if rdb := app.Get().RDB; rdb != nil && accepted > 0 {
+		var totalBytes int64
+		for _, a := range userAgg {
+			totalBytes += a.upload + a.download
+		}
+		speedTSKey := fmt.Sprintf("node:speed_ts:%s", req.GetNodeId())
+		now := time.Now()
+		if prevTS, err := rdb.Get(ctx, speedTSKey).Int64(); err == nil && prevTS > 0 {
+			elapsed := now.Unix() - prevTS
+			if elapsed > 0 {
+				speedBps := totalBytes * 8 / elapsed
+				hbKey := fmt.Sprintf("node:heartbeat:%s", req.GetNodeId())
+				if err := rdb.HSet(ctx, hbKey, "speed_bps", speedBps).Err(); err != nil {
+					s.logger.Warn("写入 speed_bps 失败",
+						zap.String("node_id", req.GetNodeId()), zap.Error(err))
+				}
+				// 刷新 TTL 避免心跳 hash 过期后 speed_bps 丢失
+				_ = rdb.Expire(ctx, hbKey, 10*time.Minute).Err()
+			}
+		}
+		_ = rdb.Set(ctx, speedTSKey, now.Unix(), 10*time.Minute).Err()
+	}
+
 	return &nexuspb.ReportRealtimeResponse{
 		Resp:     &nexuspb.Response{Code: 0, Message: "ok"},
 		Accepted: accepted,

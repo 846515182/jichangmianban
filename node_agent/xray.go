@@ -293,15 +293,29 @@ func InjectStatsConfig(cfgJSON string, apiPort int) (string, error) {
 		return "", fmt.Errorf("解析 Xray 配置 JSON 失败: %w", err)
 	}
 
-	// 幂等：已有有效的 stats 配置则跳过（面板可能下发空对象 {}）
-	if existingStats, hasStats := cfg["stats"]; hasStats {
-		// 尝试解析为 map，如果是非空 map 则保留
-		if statsMap, ok := existingStats.(map[string]interface{}); ok && len(statsMap) > 0 {
-			log.Printf("[xray] 配置已包含有效 stats 段，跳过注入")
+	// 为所有 inbound 的 clients 注入 email 字段(用 id 作为 email)
+	// Xray-core 用户级 stats 依赖 client.email 创建 counter:
+	//   user>>>{email}>>>traffic>>>uplink / downlink
+	// 缺少 email 时 xray 不创建用户级 counter, statsquery 只返回 inbound 级统计,
+	// agent 查询到 0 用户, 真实用户流量无法上报(面板显示 0 bps)。
+	// 用 client.id(UUID) 作为 email, 使 stats 名称与 agent parseUserTrafficStat 解析格式一致。
+	injected := injectClientEmails(cfg)
+	if injected > 0 {
+		log.Printf("[xray] 为 %d 个 client 注入 email 字段(启用用户级流量统计)", injected)
+	}
+
+	// 幂等：已有 stats 配置则跳过注入(但 email 已注入, 需重新序列化)
+	if _, hasStats := cfg["stats"]; hasStats {
+		if injected == 0 {
+			log.Printf("[xray] 配置已包含 stats 段且无需注入 email，跳过")
 			return cfgJSON, nil
 		}
-		// 空对象或非 map 类型 → 重新注入
-		log.Printf("[xray] stats 段为空，重新注入")
+		out, err := json.Marshal(cfg)
+		if err != nil {
+			return "", fmt.Errorf("重新序列化配置(email注入)失败: %w", err)
+		}
+		log.Printf("[xray] 配置已包含 stats 段，仅注入 email 后返回")
+		return string(out), nil
 	}
 
 	cfg["stats"] = map[string]interface{}{}
@@ -378,54 +392,11 @@ func InjectStatsConfig(cfgJSON string, apiPort int) (string, error) {
 	rules = append([]interface{}{apiRule}, rules...)
 	routing["rules"] = rules
 
-	// 为所有代理 inbound 的 clients 注入 email 和 level 字段。
-	// Xray StatsService 使用 client.email 作为用户级统计的标识符
-	// (格式: user>>>{email}>>>traffic>>>uplink/downlink)。
-	// 面板下发的配置通常只有 id(UUID) 而没有 email，导致用户级统计不生效。
-	// 这里用 UUID 作为 email，使 stats 名称中包含 UUID，方便面板匹配用户。
-	injectClientStats := 0
-	for _, ibRaw := range inbounds {
-		ib, ok := ibRaw.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		proto, _ := ib["protocol"].(string)
-		if proto != "vless" && proto != "vmess" && proto != "trojan" {
-			continue
-		}
-		// 给代理 inbound 加 tag（如果缺失），便于路由和统计
-		if _, hasTag := ib["tag"]; !hasTag {
-			ib["tag"] = "proxy-" + proto
-		}
-		settings, _ := ib["settings"].(map[string]interface{})
-		if settings == nil {
-			continue
-		}
-		clients, _ := settings["clients"].([]interface{})
-		for _, cRaw := range clients {
-			c, ok := cRaw.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			// 注入 email（用 UUID 作为 email，使 stats name 包含 UUID）
-			if _, hasEmail := c["email"]; !hasEmail {
-				if id, hasID := c["id"].(string); hasID && id != "" {
-					c["email"] = id
-					injectClientStats++
-				}
-			}
-			// 注入 level=0（匹配 policy.levels.0 的 statsUserUplink/Downlink）
-			if _, hasLevel := c["level"]; !hasLevel {
-				c["level"] = 0
-			}
-		}
-	}
-
 	out, err := json.Marshal(cfg)
 	if err != nil {
 		return "", fmt.Errorf("重新序列化 stats 注入配置失败: %w", err)
 	}
-	log.Printf("[xray] Stats/API 配置已注入 (api_port=%d, client_stats=%d)", apiPort, injectClientStats)
+	log.Printf("[xray] Stats/API 配置已注入 (api_port=%d)", apiPort)
 	return string(out), nil
 }
 
@@ -566,4 +537,45 @@ func (w logWriter) Write(p []byte) (int, error) {
 		log.Printf("%s%s", w.prefix, msg)
 	}
 	return len(p), nil
+}
+
+// injectClientEmails 遍历所有 inbound 的 clients, 为缺少 email 的 client 添加 email(用 id 作为值)。
+// Xray-core 用户级流量统计(statsquery)依赖 client.email 创建 counter, 缺少 email 时不统计。
+// 返回注入 email 的 client 数量。
+func injectClientEmails(cfg map[string]interface{}) int {
+	injected := 0
+	inbounds, ok := cfg["inbounds"].([]interface{})
+	if !ok {
+		return 0
+	}
+	for _, ib := range inbounds {
+		inbound, ok := ib.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		settings, ok := inbound["settings"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		clients, ok := settings["clients"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, c := range clients {
+			client, ok := c.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if _, hasEmail := client["email"]; hasEmail {
+				continue
+			}
+			id, ok := client["id"].(string)
+			if !ok || id == "" {
+				continue
+			}
+			client["email"] = id
+			injected++
+		}
+	}
+	return injected
 }

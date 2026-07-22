@@ -217,7 +217,7 @@ func parseUserTrafficStat(name string) (string, bool) {
 	if !strings.HasPrefix(name, "user>>>") {
 		return "", false
 	}
-	rest := name[7:] // 去掉 "user>>>"（7个字符: u,s,e,r,>,>,>）
+	rest := name[7:] // 去掉 "user>>>"（7字符: u,s,e,r,>,>,>）
 
 	idx := strings.Index(rest, ">>>")
 	if idx < 0 {

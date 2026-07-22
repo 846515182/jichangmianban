@@ -82,9 +82,9 @@ message HeartbeatRequest {
   double uptime_seconds = 7;
   int64 traffic_limit = 8;
   int64 traffic_used = 9;
-  // 修复 NODE-HEALTH-01: agent 已做 REALITY 自检但结果不上报面板,
-  // Xray 崩溃后心跳照发, 面板 online=true 但用户连不上。
-  // 新增 proxy_reachable 字段让面板区分"agent 进程可达"和"代理服务可用"。
+  // 代理服务自检结果(agent 本地 REALITY 自连测试)
+  // 修复 NODE-PROXY-01: 旧版 proto 只定义到 field 9, struct 手动加了 11/12/13 但
+  // rawDesc 未更新, 序列化时这三个字段被丢弃, 面板永远收到 false。
   bool proxy_reachable = 11;
   int64 proxy_latency_ms = 12;
   string proxy_error = 13;
