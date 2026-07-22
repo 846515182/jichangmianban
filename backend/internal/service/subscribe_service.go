@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -114,6 +115,11 @@ func (s *SubscribeService) Fetch(userID, subType, sig, userAgent, clientIP strin
 		if err != nil {
 			return nil, err
 		}
+		// [节点容量管理] 智能负载调度:
+		// ① 过滤掉 full 状态节点(满载, 拒绝新用户)
+		// ② busy 状态节点降权排序(允许连接但排最后)
+		// ③ 按 load_status 优先级排序: idle > normal > busy, 让用户优先连空闲节点
+		nodes = filterAndSortByLoad(nodes)
 	}
 
 	// 5. 按类型生成
@@ -539,4 +545,42 @@ func (s *SubscribeService) PublicFetch(token, subType, sig, userAgent, clientIP 
 // GetByToken 通过 sub_token 反查订阅记录(用于 PublicSubscribe 填充响应头)
 func (s *SubscribeService) GetByToken(token string) (*model.Subscription, error) {
 	return s.subRepo.GetByToken(token)
+}
+
+// filterAndSortByLoad [节点容量管理] 订阅侧负载调度
+// 过滤 full 状态节点(满载拒绝新用户), 按 load_status 优先级排序(idle > normal > busy)
+// 保留原 created_at 顺序作为同优先级内的稳定排序
+func filterAndSortByLoad(nodes []model.Node) []model.Node {
+	if len(nodes) == 0 {
+		return nodes
+	}
+
+	// 负载状态优先级: idle(0) < normal(1) < busy(2) < full(3, 过滤掉)
+	statusPriority := map[string]int{
+		"idle":   0,
+		"normal": 1,
+		"busy":   2,
+		"full":   3,
+	}
+
+	// 过滤掉 full 状态节点(满载, 拒绝新用户)
+	filtered := make([]model.Node, 0, len(nodes))
+	for _, n := range nodes {
+		prio := statusPriority[n.LoadStatus]
+		if prio >= 3 {
+			// full 状态, 跳过(不下发给新用户)
+			continue
+		}
+		filtered = append(filtered, n)
+	}
+
+	// 按负载优先级稳定排序(保留原 created_at 顺序)
+	// 使用稳定排序确保同优先级节点保持原顺序
+	sort.SliceStable(filtered, func(i, j int) bool {
+		pi := statusPriority[filtered[i].LoadStatus]
+		pj := statusPriority[filtered[j].LoadStatus]
+		return pi < pj
+	})
+
+	return filtered
 }

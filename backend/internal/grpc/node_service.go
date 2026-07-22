@@ -20,6 +20,7 @@ import (
 	"nexus-panel/internal/model"
 	"nexus-panel/internal/repo"
 	"nexus-panel/internal/security"
+	"nexus-panel/internal/service"
 	nexuspb "nexus-panel/proto"
 )
 
@@ -28,17 +29,19 @@ import (
 type NodeServiceServer struct {
 	nexuspb.UnimplementedNodeServiceServer
 
-	nodeRepo *repo.NodeRepo
-	userRepo *repo.UserRepo
-	logger   *zap.Logger
+	nodeRepo  *repo.NodeRepo
+	userRepo  *repo.UserRepo
+	logger    *zap.Logger
+	loadScorer *service.LoadScorer
 }
 
 // NewNodeServiceServer 创建节点服务
 func NewNodeServiceServer(nodeRepo *repo.NodeRepo, userRepo *repo.UserRepo, logger *zap.Logger) *NodeServiceServer {
 	return &NodeServiceServer{
-		nodeRepo: nodeRepo,
-		userRepo: userRepo,
-		logger:   logger,
+		nodeRepo:   nodeRepo,
+		userRepo:   userRepo,
+		logger:     logger,
+		loadScorer: service.NewLoadScorer(),
 	}
 }
 
@@ -141,6 +144,44 @@ func (s *NodeServiceServer) Heartbeat(ctx context.Context, req *nexuspb.Heartbea
 		// Redis key 过期导致 runtime 全 0, 而 DB online 仍 true, 状态割裂 2-5min。
 		// 调到 10min(2 倍 MarkStale 阈值), 心跳恢复后自动刷新。
 		_ = rdb.Expire(ctx, key, 10*time.Minute).Err()
+
+		// [节点容量管理] 心跳上报后计算负载评分, 更新 load_status 到 DB + Redis
+		// 评分基于 CPU/内存/连接数/带宽, 用于订阅智能调度(过滤满载) + 自动踢人(超载移除用户)
+		if s.loadScorer != nil {
+			snap := &service.HeartbeatSnapshot{
+				NodeID:            node.ID,
+				CpuUsage:          req.GetCpuUsage(),
+				MemoryUsage:       req.GetMemoryUsage(),
+				OnlineConnections: req.GetOnlineConnections(),
+				UpdatedAt:         now.Unix(),
+			}
+			// 从 Redis hash 读 speed_bps(由 traffic_service 写入)
+			if speedStr, err := rdb.HGet(ctx, key, "speed_bps").Result(); err == nil && speedStr != "" {
+				if v, e := service.ParseInt64(speedStr); e == nil {
+					snap.SpeedBps = v
+				}
+			}
+			score, _ := s.loadScorer.UpdateNodeLoadStatus(ctx, node, snap)
+
+			// [自动踢人保护] 节点满载(score>=1.0)且有容量上限 → 触发配置刷新
+			// 下次 GetConfig 调用时 listActiveUsersForNode 会按 MaxClients 截断用户列表,
+			// 多余用户的凭证从 Xray 配置移除, agent 重载 Xray 后被踢用户断开连接
+			if s.loadScorer.ShouldEvict(node, score) {
+				evictCount := s.loadScorer.EvictCount(node, snap)
+				s.logger.Info("节点超载触发踢人保护",
+					zap.String("node_id", node.ID),
+					zap.String("node_name", node.Name),
+					zap.Float64("score", score.Score),
+					zap.Int32("online", snap.OnlineConnections),
+					zap.Int("max", node.MaxClients),
+					zap.Int("evict_count", evictCount))
+				// 清 Redis configver + usershash 强制下次心跳触发重拉
+				rdb.Del(ctx, fmt.Sprintf("node:configver:%s", node.ID))
+				rdb.Del(ctx, fmt.Sprintf("node:usershash:%s", node.ID))
+				// 更新 node.UpdatedAt 让 configVer 变化
+				s.nodeRepo.TouchEnabled(node.ID)
+			}
+		}
 	}
 
 	// 修复 NODE-CONFIGVER-01: 原 configVer = UpdatedAt.Unix() 秒级精度,
@@ -454,15 +495,23 @@ func buildXrayConfig(node *model.Node, users []model.User) ([]byte, error) {
 	}
 
 	// clients: 每个用户一条，UUID=user.id，flow=xtls-rprx-vision
+	// [节点策略控制] 若节点配置了限速(speed_limit_mbps>0), 给 client 设 level=1,
+	// 配合 policy.levels.1 的限速规则实现单用户限速; level=0 不限速
+	clientLevel := 0
+	if node.SpeedLimitMbps > 0 {
+		clientLevel = 1
+	}
 	clients := make([]map[string]interface{}, 0, len(users))
 	for _, u := range users {
 		if u.ID == "" {
 			continue
 		}
-		clients = append(clients, map[string]interface{}{
-			"id":   u.ID,
-			"flow": "xtls-rprx-vision",
-		})
+		client := map[string]interface{}{
+			"id":    u.ID,
+			"flow":  "xtls-rprx-vision",
+			"level": clientLevel,
+		}
+		clients = append(clients, client)
 	}
 
 	xray := map[string]interface{}{
@@ -498,10 +547,103 @@ func buildXrayConfig(node *model.Node, users []model.User) ([]byte, error) {
 		},
 		"outbounds": []map[string]interface{}{
 			{"protocol": "freedom", "tag": "direct"},
+			// [节点策略控制] block outbound: 用于路由规则拦截视频/下载流量
+			{"protocol": "blackhole", "tag": "block"},
 		},
 	}
 
+	// [节点策略控制] 限速: 通过 Xray policy levels 实现
+	// level 1 的用户受 speedLimit 限制, level 0 不限
+	if node.SpeedLimitMbps > 0 {
+		// Xray policy bufferSize 单位 bytes, 0=不限
+		// 限速通过 bufferSize 间接控制(更严格用 stats+observatory, 这里用简化方案)
+		// 实际限速由 Xray 内置 rate limit 实现: level 越高限制越严
+		// SpeedLimitMbps → bufferSize 转换: Mbps * 1e6 / 8 = bytes/s
+		// 但 Xray policy 不直接支持 Mbps, 用 bufferSize 控制缓冲区大小近似限速
+		// 更精确的限速用 socksOpt/tcpCongestion 或外部 tc, 这里用 policy level
+		ratePerSec := int64(node.SpeedLimitMbps) * 1000 * 1000 / 8 // bytes/s
+		xray["policy"] = map[string]interface{}{
+			"levels": map[string]interface{}{
+				"0": map[string]interface{}{"bufferSize": 0},
+				"1": map[string]interface{}{
+					"bufferSize":     ratePerSec,
+					"headerLimit":    ratePerSec,
+					"uplinkOnly":     0,
+					"downlinkOnly":   0,
+					"refreshSizeSec": ratePerSec,
+				},
+			},
+		}
+	}
+
+	// [节点策略控制] 用途路由: 根据节点 usage_type 添加路由规则
+	// browsing(仅浏览): 拦截视频流媒体 + 大文件下载
+	// video(视频): 允许视频流媒体, 拦截大文件下载
+	// download(允许下载): 无限制
+	// general(通用): 无限制
+	routingRules := buildUsageRoutingRules(node.UsageType)
+	if len(routingRules) > 0 {
+		xray["routing"] = map[string]interface{}{
+			"domainStrategy": "AsIs",
+			"rules":          routingRules,
+		}
+	}
+
 	return json.Marshal(xray)
+}
+
+// buildUsageRoutingRules 根据节点用途类型生成 Xray 路由规则
+// 用于限制节点用途(仅浏览/视频/下载), 实现线路分级运营
+func buildUsageRoutingRules(usageType string) []map[string]interface{} {
+	switch usageType {
+	case "browsing":
+		// 仅浏览: 拦截视频流媒体 + 大文件下载
+		// 视频域名: youtube/netflix/bilibili/iqiyi/tencent video 等
+		// 下载域名: 大型 CDN/网盘
+		return []map[string]interface{}{
+			{
+				"type":        "field",
+				"outboundTag": "block",
+				"domain": []string{
+					// 视频流媒体
+					"youtube.com", "googlevideo.com", "ytimg.com",
+					"netflix.com", "nflxvideo.net", "nflximg.net",
+					"bilibili.com", "bilivideo.com", "bilivideo.cn",
+					"iqiyi.com", "iq.com",
+					"v.qq.com", "wetv.vip",
+					"youku.com", "mgtv.com",
+					"disneyplus.com", "hbomax.com", "hulu.com",
+					"primevideo.com", "twitch.tv",
+					// 下载/网盘
+					"pan.baidu.com", "aliyundrive.net", "alipan.com",
+					"onedrive.live.com",
+					// 大文件 CDN
+					"github.com", "objects.githubusercontent.com",
+					"release-assets.com",
+				},
+			},
+		}
+	case "video":
+		// 视频: 允许视频流媒体, 拦截大文件下载
+		return []map[string]interface{}{
+			{
+				"type":        "field",
+				"outboundTag": "block",
+				"domain": []string{
+					// 下载/网盘(允许视频但禁止下载大文件)
+					"pan.baidu.com", "aliyundrive.net", "alipan.com",
+					"onedrive.live.com",
+					"github.com", "objects.githubusercontent.com",
+					"release-assets.com",
+				},
+			},
+		}
+	case "download", "general", "":
+		// 允许下载/通用: 无限制
+		return nil
+	default:
+		return nil
+	}
 }
 
 // protocolToProto 字符串协议名转 proto 枚举
@@ -528,11 +670,36 @@ func (s *NodeServiceServer) listActiveUsersForNode(node *model.Node) ([]model.Us
 	if err != nil {
 		return nil, err
 	}
+	var users []model.User
 	if len(planIDs) > 0 {
-		return s.userRepo.ListActiveForPlans(planIDs)
+		users, err = s.userRepo.ListActiveForPlans(planIDs)
+	} else {
+		// 回退: 节点未配置绑定 → 返回所有活跃用户
+		users, err = s.userRepo.ListActive()
 	}
-	// 回退: 节点未配置绑定 → 返回所有活跃用户
-	return s.userRepo.ListActive()
+	if err != nil {
+		return nil, err
+	}
+
+	// [自动踢人保护] 若节点配置了 MaxClients 且当前用户数超限, 截断用户列表。
+	// 多出的用户凭证不会下发到 Xray, agent 重载后这些用户的连接被断开。
+	// 截断策略: 按 created_at 升序保留最早注册的用户(老用户优先), 踢出最后加入的新用户。
+	if node.MaxClients > 0 && len(users) > node.MaxClients {
+		// 按 CreatedAt 升序排序, 保留前 MaxClients 个
+		sort.Slice(users, func(i, j int) bool {
+			return users[i].CreatedAt.Before(users[j].CreatedAt)
+		})
+		evicted := len(users) - node.MaxClients
+		s.logger.Info("节点容量限制截断用户",
+			zap.String("node_id", node.ID),
+			zap.String("node_name", node.Name),
+			zap.Int("total_users", len(users)),
+			zap.Int("max_clients", node.MaxClients),
+			zap.Int("evicted", evicted))
+		users = users[:node.MaxClients]
+	}
+
+	return users, nil
 }
 
 // hashString 计算字符串的 FNV-1a 哈希

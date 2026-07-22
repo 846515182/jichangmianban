@@ -26,6 +26,10 @@
           <el-icon><Connection /></el-icon>
           <template #title>节点管理</template>
         </el-menu-item>
+        <el-menu-item index="/admin/monitor">
+          <el-icon><Monitor /></el-icon>
+          <template #title>节点监控</template>
+        </el-menu-item>
         <el-sub-menu index="user-ops">
           <template #title>
             <el-icon><User /></el-icon>

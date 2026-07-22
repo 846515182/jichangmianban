@@ -228,3 +228,8 @@ func strconvParseInt(s string) (int64, error) {
 	_, err := fmt.Sscanf(s, "%d", &i)
 	return i, err
 }
+
+// ParseInt64 导出版, 供 grpc/node_service.go 等外部包调用
+func ParseInt64(s string) (int64, error) {
+	return strconvParseInt(s)
+}

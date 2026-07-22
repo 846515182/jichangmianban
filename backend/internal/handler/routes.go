@@ -226,6 +226,8 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 	{
 		admin.GET("/nodes", adminNodeH.NodeList)
 		admin.GET("/nodes/:id", adminNodeH.NodeDetail)
+		// 节点负载监控大盘: 返回所有节点实时负载评分 + 状态汇总, 供前端 Monitor.vue 使用
+		admin.GET("/nodes/monitor", adminNodeH.NodeMonitor)
 		admin.POST("/nodes", middleware.AuditAction("node.create"), adminNodeH.NodeCreate)
 		admin.PUT("/nodes/:id", middleware.AuditAction("node.update"), adminNodeH.NodeUpdate)
 		admin.DELETE("/nodes/:id", middleware.AuditAction("node.delete"), adminNodeH.NodeDelete)

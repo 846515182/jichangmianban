@@ -283,6 +283,14 @@ func (r *NodeRepo) TouchAllEnabled() error {
 		Update("updated_at", time.Now()).Error
 }
 
+// TouchEnabled bumps updated_at on a single node to trigger config refresh on next heartbeat
+// [节点容量管理] 用于超载踢人时触发单节点配置刷新
+func (r *NodeRepo) TouchEnabled(id string) error {
+	return r.db.Model(&model.Node{}).
+		Where("id = ? AND is_deleted = false AND is_enabled = true", id).
+		Update("updated_at", time.Now()).Error
+}
+
 func (r *NodeRepo) AddTrafficTx(tx *gorm.DB, id string, bytes int64) error {
 	return tx.Model(&model.Node{}).Where("id = ? AND is_deleted = false", id).
 		UpdateColumn("traffic_used", gorm.Expr("traffic_used + ?", bytes)).Error

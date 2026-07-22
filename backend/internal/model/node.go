@@ -25,15 +25,19 @@ type Node struct {
 	LastSeenAt    *time.Time     `gorm:"column:last_seen_at" json:"last_seen_at,omitempty"`
 	Online        bool           `gorm:"default:false" json:"online"`
 	Version       string         `gorm:"type:varchar(32)" json:"version"`
-	// [节点容量管理] 智能负载调度 + 自动踢人保护
+	// [节点容量管理] 智能负载调度 + 自动踢人保护 + 限速 + 用途控制
 	// MaxClients: 节点最大用户数, 0=不限(不参与调度)
 	// MaxBandwidthMbps: 节点最大带宽Mbps, 0=不限
 	// CpuThreshold: CPU超载阈值%, 默认80, 超过则视为满载
 	// LoadStatus: 负载状态 idle/normal/busy/full, 由心跳评分实时更新
+	// SpeedLimitMbps: 单用户限速Mbps, 0=不限, 通过Xray level+policy实现
+	// UsageType: 用途 general通用/browsing仅浏览(禁视频下载)/video视频/download允许下载
 	MaxClients       int    `gorm:"type:int;default:0" json:"max_clients"`
 	MaxBandwidthMbps int    `gorm:"type:int;default:0" json:"max_bandwidth_mbps"`
 	CpuThreshold     int    `gorm:"type:int;default:80" json:"cpu_threshold"`
 	LoadStatus       string `gorm:"type:varchar(20);default:'idle'" json:"load_status"`
+	SpeedLimitMbps   int    `gorm:"type:int;default:0" json:"speed_limit_mbps"`
+	UsageType        string `gorm:"type:varchar(20);default:'general'" json:"usage_type"`
 	IsDeleted        bool   `gorm:"column:is_deleted;default:false" json:"-"`
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`

@@ -60,6 +60,13 @@
             </el-tag>
           </template>
         </el-table-column>
+        <el-table-column label="用途" width="90">
+          <template #default="{ row }">
+            <el-tag size="small" :type="usageTagType(row.usage_type)" effect="plain">
+              {{ usageText(row.usage_type) }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="服务器地址" min-width="150">
           <template #default="{ row }">{{ row.server_address }}:{{ row.port }}</template>
         </el-table-column>
@@ -85,6 +92,13 @@
               <i class="np-dot" :class="row.online ? 'online' : 'offline'"></i>
               {{ row.online ? '在线' : '离线' }}
             </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="负载状态" width="100">
+          <template #default="{ row }">
+            <el-tag size="small" :type="loadStatusTagType(row.load_status)" effect="dark">
+              {{ loadStatusText(row.load_status) }}
+            </el-tag>
           </template>
         </el-table-column>
         <el-table-column label="实时负载" width="200">
@@ -151,6 +165,8 @@
             <div class="nc-title-wrap">
               <span class="nc-name">{{ row.name }}</span>
               <el-tag size="small" effect="dark" :type="protocolTagType(row.protocol)">{{ (row.protocol || 'vless').toUpperCase() }}</el-tag>
+              <el-tag size="small" :type="usageTagType(row.usage_type)" effect="plain">{{ usageText(row.usage_type) }}</el-tag>
+              <el-tag size="small" :type="loadStatusTagType(row.load_status)" effect="dark">{{ loadStatusText(row.load_status) }}</el-tag>
               <el-tag size="small" :type="row.is_enabled ? 'success' : 'info'" effect="plain">{{ row.is_enabled ? '启用' : '停用' }}</el-tag>
             </div>
             <span class="nc-online" :class="row.online ? 'online' : 'offline'">
@@ -263,6 +279,32 @@
         <el-form-item label="流量上限(GB)">
           <el-input-number v-model="form.trafficLimitGB" :min="0" :precision="2" controls-position="right" style="width: 100%" />
           <div style="font-size:12px;color:#909399">0 = 不限</div>
+        </el-form-item>
+        <el-divider content-position="left">节点策略控制（可选）</el-divider>
+        <el-form-item label="最大用户数">
+          <el-input-number v-model="form.maxClients" :min="0" controls-position="right" style="width:100%" />
+          <div style="font-size:12px;color:#909399">0=不限。超过此数量新用户不会下发到此节点，已连接用户超额时自动踢出最后加入的用户</div>
+        </el-form-item>
+        <el-form-item label="带宽上限(Mbps)">
+          <el-input-number v-model="form.maxBandwidthMbps" :min="0" controls-position="right" style="width:100%" />
+          <div style="font-size:12px;color:#909399">0=不限。节点总带宽上限，用于负载评分计算</div>
+        </el-form-item>
+        <el-form-item label="CPU阈值(%)">
+          <el-input-number v-model="form.cpuThreshold" :min="1" :max="100" controls-position="right" style="width:100%" />
+          <div style="font-size:12px;color:#909399">CPU超过此阈值视为满载，默认80</div>
+        </el-form-item>
+        <el-form-item label="单用户限速(Mbps)">
+          <el-input-number v-model="form.speedLimitMbps" :min="0" controls-position="right" style="width:100%" />
+          <div style="font-size:12px;color:#909399">0=不限。通过Xray policy限制单用户速度，适合优质轻量线路</div>
+        </el-form-item>
+        <el-form-item label="用途类型">
+          <el-select v-model="form.usageType" style="width:100%">
+            <el-option label="通用(无限制)" value="general" />
+            <el-option label="仅浏览(禁视频/下载)" value="browsing" />
+            <el-option label="视频流媒体(禁下载)" value="video" />
+            <el-option label="允许下载(无限制)" value="download" />
+          </el-select>
+          <div style="font-size:12px;color:#909399">控制节点用途。轻量线路选"仅浏览"，大带宽线路选"允许下载"</div>
         </el-form-item>
         <el-divider content-position="left">一键自动部署（可选）</el-divider>
         <el-form-item label="SSH 密码">
@@ -469,6 +511,14 @@ interface NodeRow {
   version: string
   plan_ids: string[]
   runtime: NodeRuntime
+  // 节点策略控制字段
+  max_clients: number
+  max_bandwidth_mbps: number
+  cpu_threshold: number
+  speed_limit_mbps: number
+  usage_type: string
+  // 节点实时负载状态: idle/normal/busy/full
+  load_status: string
   [k: string]: any
 }
 
@@ -663,6 +713,25 @@ const protocolTagType = (p: string): TagType => {
   return map[p] || 'primary'
 }
 
+// 节点负载状态: idle 空闲 / normal 正常 / busy 繁忙 / full 满载
+const loadStatusText = (s: string) => {
+  const map: Record<string, string> = { idle: '空闲', normal: '正常', busy: '繁忙', full: '满载' }
+  return map[s] || '空闲'
+}
+const loadStatusTagType = (s: string): any => {
+  const map: Record<string, string> = { idle: 'success', normal: '', busy: 'warning', full: 'danger' }
+  return map[s] || 'success'
+}
+// 节点用途标签: general 通用 / browsing 仅浏览 / video 视频 / download 下载
+const usageText = (t: string) => {
+  const map: Record<string, string> = { general: '通用', browsing: '仅浏览', video: '视频', download: '下载' }
+  return map[t] || '通用'
+}
+const usageTagType = (t: string): any => {
+  const map: Record<string, string> = { general: '', browsing: 'info', video: 'warning', download: 'success' }
+  return map[t] || ''
+}
+
 // 套餐名称查找(用于表格显示绑定的套餐名)
 const planName = (pid: string): string => {
   const p = planList.value.find((x) => x.id === pid)
@@ -709,6 +778,11 @@ const form = reactive({
   grpc_port: 50051,
   plan_ids: [] as string[],
   trafficLimitGB: 0,
+  maxClients: 0,
+  maxBandwidthMbps: 0,
+  cpuThreshold: 80,
+  speedLimitMbps: 0,
+  usageType: "general",
   sshPassword: '',
   sshPort: 22,
 })
@@ -733,6 +807,11 @@ const openDialog = (row?: NodeRow) => {
       grpc_port: row.grpc_port || 50051,
       plan_ids: row.plan_ids ? [...row.plan_ids] : [],
       trafficLimitGB: row.traffic_limit ? Math.round(row.traffic_limit / 1024 / 1024 / 1024 * 100) / 100 : 0,
+      maxClients: row.max_clients || 0,
+      maxBandwidthMbps: row.max_bandwidth_mbps || 0,
+      cpuThreshold: row.cpu_threshold || 80,
+      speedLimitMbps: row.speed_limit_mbps || 0,
+      usageType: row.usage_type || "general",
       // 安全: 编辑节点时清空密码, 避免上次添加节点时的密码缓存
       sshPassword: '',
       sshPort: 22,
@@ -747,6 +826,11 @@ const openDialog = (row?: NodeRow) => {
       grpc_port: 50051,
       plan_ids: [],
       trafficLimitGB: 0,
+      maxClients: 0,
+      maxBandwidthMbps: 0,
+      cpuThreshold: 80,
+      speedLimitMbps: 0,
+      usageType: "general",
       sshPassword: '',
       sshPort: 22,
     })
@@ -770,6 +854,12 @@ const handleSave = async () => {
         plan_ids: form.plan_ids,
         // 修复 P1: 保存用 Math.round 与编辑回填一致, Math.floor 会向下漂移
         traffic_limit: Math.round(form.trafficLimitGB * 1024 * 1024 * 1024),
+        // 节点策略控制字段
+        max_clients: form.maxClients,
+        max_bandwidth_mbps: form.maxBandwidthMbps,
+        cpu_threshold: form.cpuThreshold,
+        speed_limit_mbps: form.speedLimitMbps,
+        usage_type: form.usageType,
       }
       if (editing.value) {
         // 编辑模式: 不发送 extra_config, 避免覆盖节点原有 REALITY dest/sni 配置
