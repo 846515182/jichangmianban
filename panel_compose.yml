@@ -1,0 +1,190 @@
+# ============================================================
+# Nexus-Panel Docker Compose 编排（低内存服务器优化版）
+# 服务: postgres + redis + panel + frontend
+# node-agent 已移除（部署在独立节点服务器）
+# panel/frontend: restart: unless-stopped, 挂了自动重启, 防止 502 不恢复
+# postgres/redis: restart: unless-stopped, 主机重启后自启(配合 healthcheck + depends_on
+#   保证 panel 在数据层 healthy 后才启动)。原 restart:"no" 会导致主机重启后数据层
+#   不自启, panel 因 DNS 解析失败(hostname resolving error: no such host)崩溃循环。
+#   PG 有 WAL 崩溃恢复 + SIGTERM 优雅关闭, unless-stopped 不会损坏数据。
+# 使用: docker compose --env-file .env up -d
+# ============================================================
+version: "3.9"
+
+# ---------- 网络定义 ----------
+networks:
+  nexus-net:
+    driver: bridge
+
+# ---------- 数据卷定义 ----------
+volumes:
+  pg-data:        # PostgreSQL 数据持久化
+    driver: local
+  redis-data:     # Redis 数据持久化
+    driver: local
+
+services:
+  # ============================================================
+  # PostgreSQL 15 数据库（内存限制 512MB）
+  # ============================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: nexus-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-nexus}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD 必须在 .env 中设置}
+      POSTGRES_DB: ${DB_NAME:-nexus_panel}
+      TZ: UTC
+      PGTZ: UTC
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./backend/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-nexus} -d ${DB_NAME:-nexus_panel}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    cpus: "1.0"
+    mem_limit: 512m
+    mem_reservation: 256m
+    networks:
+      - nexus-net
+
+  # ============================================================
+  # Redis 7 缓存（内存限制 256MB）
+  # ============================================================
+  redis:
+    image: redis:7-alpine
+    container_name: nexus-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD 必须在 .env 中设置}
+      --appendonly yes
+      --maxmemory 128mb
+      --maxmemory-policy allkeys-lru
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "${REDIS_PASSWORD:?REDIS_PASSWORD 必须在 .env 中设置}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    cpus: "1.0"
+    mem_limit: 256m
+    mem_reservation: 128m
+    networks:
+      - nexus-net
+
+  # ============================================================
+  # Nexus-Panel 后端服务（内存限制 512MB）
+  # ============================================================
+  panel:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: nexus-panel:latest
+    container_name: nexus-panel
+    restart: unless-stopped
+    # !! [安全警告] root+ docker.sock = 容器可控制宿主机, 生产环境考虑移除 docker.sock 挂载改用远程 Docker API+TLS
+    user: "0:0"  # 以 root 运行，确保能访问 docker.sock 调用宿主机 docker(用于预编译 node-agent)
+    env_file:
+      - .env
+    environment:
+      DB_HOST: postgres
+      REDIS_ADDR: redis:6379
+      # 告诉面板容器宿主机上的项目根目录路径
+      # helper 容器通过 docker.sock 调宿主机 docker 时需要用宿主机路径
+      HOST_PROJECT_ROOT: ${PWD:-/root/nexus-panel}
+    ports:
+      - "8080:8080"
+      # gRPC 端口 - 节点 agent 通过此端口上报心跳和流量
+      # !! 生产建议改为仅监听内网 IP(如 10.0.0.0/8) 而非 0.0.0.0
+      - "0.0.0.0:50051:50051"
+    volumes:
+      - ./deployments/tls:/app/tls:ro
+      - ./backups:/app/data/backup
+      - ./node_agent:/app/node_agent
+      # 挂载宿主机项目目录，让面板容器能调用 docker compose 重建自己
+      # 用于一键部署时在面板服务器预编译 node-agent 二进制
+      # 注意: 挂载宿主机 /usr/bin/docker 在 alpine 容器内无法运行(glibc 不兼容)
+      # 所以用静态编译的 docker CLI
+      - ./:/root/nexus-panel:rw
+      # !! [安全警告] docker.sock 挂载 + root 运行 = 容器可完全控制宿主机
+      # 若面板被入侵，攻击者可访问宿主机所有容器和数据
+      - /var/run/docker.sock:/var/run/docker.sock
+    entrypoint: >
+      sh -c "apk add --no-cache git docker-cli docker-cli-compose >/dev/null 2>&1 &&
+             exec /app/nexus-panel"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    cpus: "1.0"
+    mem_limit: 512m
+    mem_reservation: 256m
+    networks:
+      - nexus-net
+
+  # ============================================================
+  # Nexus-Panel 前端 (Nginx 静态服务 + 反向代理，内存限制 128MB)
+  # ============================================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: nexus-frontend:latest
+    container_name: nexus-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deployments/tls:/etc/nginx/certs:ro
+      - ./deployments/nginx/conf.d:/etc/nginx/conf.d:ro
+    depends_on:
+      panel:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-qO-", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    cpus: "1.0"
+    mem_limit: 128m
+    mem_reservation: 64m
+    networks:
+      - nexus-net
