@@ -596,9 +596,14 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	//   3 次重试间若上次失败留下了脏 .env.node / 半截 agent 二进制 / 旧 xray-cache,
 	//   下次部署 mkdir -p 不会删旧文件, 可能与新版本冲突(xray-cache 版本不匹配等)。
 	//   现在重试前先 docker compose down + rm -rf 部署目录, 确保每次部署都是干净状态。
-	// [SEC-05] 增强清理: 网络残留 + gRPC端口 + swap + /etc/hosts + systemd 配置恢复
-	sse.event(PhaseConnectServer, "running", "正在清理旧部署残留(容器+目录+端口+网络+swap)...", "")
-	// 兜底: 清理命令逐条执行, 每条独立容错, 避免一条失败导致后续不执行
+	//
+	// [P0-同机多节点] 清理阶段只清理"当前节点"的残留, 绝不影响同机其他节点:
+	//   - 移除 fuser -k: preDeployCheck(Phase 2) 已有端口冲突检测, 清理阶段预先杀端口
+	//     会误杀同机其他节点(若 listenPort 撞了)或面板(fuser -k 50051 杀面板 gRPC)
+	//   - 移除 /etc/hosts 全局清理: ensureHostsMapping 本身幂等(先 grep 再追加),
+	//     清理阶段删 /etc/hosts 会破坏同机其他节点的面板域名映射, 导致 gRPC 重连失败
+	//   - swap/网络只清理当前节点 UUID 对应的文件, 不用通配符
+	sse.event(PhaseConnectServer, "running", "正在清理本节点旧部署残留(容器+目录+网络+swap)...", "")
 	cleanSteps := []struct {
 		desc string
 		cmd  string
@@ -606,10 +611,19 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 		{"docker compose down", fmt.Sprintf("cd %s 2>/dev/null && docker compose -f docker-compose.node.yml down --timeout 10 2>/dev/null; true", deployDir)},
 		{"停止旧容器", fmt.Sprintf("docker stop %s 2>/dev/null; true", containerName)},
 		{"删除旧容器", fmt.Sprintf("docker rm -f %s 2>/dev/null; true", containerName)},
-		{"释放端口进程(代理+健康检查+gRPC)", fmt.Sprintf("fuser -k %d/tcp 2>/dev/null; fuser -k %d/tcp 2>/dev/null; fuser -k %s/tcp 2>/dev/null; true", listenPort, healthPort, grpcPortStr)},
-		{"清理 Docker 网络残留", fmt.Sprintf("docker network ls --filter name=node-agent --format '{{.Name}}' 2>/dev/null | xargs -r docker network rm 2>/dev/null; true")},
-		{"清理 swap 文件残留", fmt.Sprintf("swapoff /swapfile_np_* 2>/dev/null; rm -f /swapfile_np_* 2>/dev/null; true")},
-		{"清理 /etc/hosts 旧映射", "sed -i '/# nexus-panel grpc bypass CDN/d' /etc/hosts 2>/dev/null; sed -i '/# nexus-panel/d' /etc/hosts 2>/dev/null; true"},
+		// [P0-同机多节点] 移除 fuser -k: docker stop/rm 已释放容器端口,
+		// preDeployCheck 会检测端口冲突。fuser -k 会误杀同机其他节点或面板 gRPC(50051)
+		// {"释放端口进程", "..."},  ← 已移除
+		// [P0-同机多节点] docker network 只清理 compose down 未清干净的当前项目网络,
+		// 不用 --filter name=node-agent 通配(会尝试删同机其他节点的网络, 虽 in-use 删不掉但报错)
+		// compose down 已清理本项目网络, 此处仅兜底 prune 无容器连接的孤儿网络
+		{"清理孤儿 Docker 网络", fmt.Sprintf("docker network prune -f 2>/dev/null; true")},
+		// [P0-同机多节点] swap 只清理当前节点的(/swapfile_np_<UUID>*),
+		// 用 UUID 做前缀通配符(含重试产生的 _2 后缀), 不会匹配其他节点的 swap
+		{"清理本节点 swap 文件", fmt.Sprintf("swapoff /swapfile_np_%s* 2>/dev/null; rm -f /swapfile_np_%s* 2>/dev/null; true", shortID, shortID)},
+		// [P0-同机多节点] 移除 /etc/hosts 全局清理: ensureHostsMapping 本身幂等,
+		// 清理阶段删映射会破坏同机其他节点的面板域名解析, 导致 gRPC 重连失败
+		// {"清理 /etc/hosts 旧映射", "..."},  ← 已移除
 		{"恢复 systemd Docker 配置", "if [ -f /etc/systemd/system/docker.service.bak ]; then cp /etc/systemd/system/docker.service.bak /etc/systemd/system/docker.service && systemctl daemon-reload; fi; true"},
 		{"删除旧部署目录", fmt.Sprintf("chmod -R +w %s 2>/dev/null; rm -rf %s 2>/dev/null; true", deployDir, deployDir)},
 	}
@@ -626,10 +640,8 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	}
 	// 兜底: 强制清理可能卡住的容器 (docker rm -f 可能因为 containerd 卡住而超时)
 	sshRun(client, fmt.Sprintf("docker rm -f %s 2>/dev/null; true", containerName))
-	// 兜底: 清理可能残留的 Docker 网络 (旧 compose 项目可能留下网络冲突)
-	sshRun(client, fmt.Sprintf("docker network prune -f 2>/dev/null; true"))
-	// 兜底: 清理可能残留的旧版 nexus 映射
-	sshRun(client, "sed -i '/# nexus-panel/d' /etc/hosts 2>/dev/null; true")
+	// [P0-同机多节点] 不再全局清理 /etc/hosts: ensureHostsMapping(Phase 4) 本身幂等,
+	// 全局 sed 删除会破坏同机其他节点的面板域名映射
 	cleanLines = append(cleanLines, "CLEANED")
 	sse.event(PhaseConnectServer, "done", "旧残留清理完成", strings.Join(cleanLines, "\n"))
 
@@ -641,7 +653,7 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	if clientDisconnected(c, sse, "部署") {
 		return false, DeployErrUnknown, "客户端断开, 部署已取消"
 	}
-	checkResult := preDeployCheck(client, listenPort, healthPort, sse)
+	checkResult := preDeployCheck(client, listenPort, healthPort, shortID, sse)
 	if !checkResult.OK {
 		// 致命错误直接退出
 		if checkResult.Fatal {
@@ -1142,7 +1154,8 @@ type preCheckResult struct {
 // preDeployCheck 在部署前检测关键环境 (逐步推送 SSE 事件)
 // 检测项: 磁盘空间(>=1G可用) / 内存(>=512M可用) / Docker / 端口冲突 / 网络(curl github.com)
 // 每项均有兜底: 命令失败/不存在/超时等异常情况均有降级方案
-func preDeployCheck(client *ssh.Client, listenPort, healthPort int, sse *sseWriter) preCheckResult {
+// nodeShortID: 节点 UUID, 用于 swap 文件命名(同机多节点互不干扰)
+func preDeployCheck(client *ssh.Client, listenPort, healthPort int, nodeShortID string, sse *sseWriter) preCheckResult {
 	var lines []string
 	result := preCheckResult{OK: true}
 
@@ -1192,10 +1205,12 @@ func preDeployCheck(client *ssh.Client, listenPort, healthPort int, sse *sseWrit
 			// 可用内存 <1024MB 时自动创建 swap, 防止 Docker 构建时 OOM 杀死 dockerd
 			// 低配 VPS (如 1GB 内存) dockerd + containerd + docker build 易耗尽内存
 			// 修复: 阈值从 768 提高到 1024, 因为 docker build golang 镜像峰值可达 800MB+
+			// [P0-同机多节点] swap 文件名用 nodeShortID(UUID), 每节点独立,
+			// 清理阶段可精确删除本节点 swap, 不会误删同机其他节点的 swap
 			sse.event(PhaseEnvCheck, "warning", fmt.Sprintf("可用内存 %dMB, 低于 1024MB 建议值, 尝试自动创建 swap...", availMB), memOut)
 			diskForSwap, _ := sshRun(client, "df -BG / 2>/dev/null | tail -1 || df -h / 2>/dev/null | tail -1 || echo '0G'")
 			if availGB := parseAvailGB(diskForSwap); availGB >= 1 {
-				swapFile := fmt.Sprintf("/swapfile_np_%d", time.Now().UnixNano()%100000)
+				swapFile := fmt.Sprintf("/swapfile_np_%s", nodeShortID)
 				sse.event(PhaseEnvCheck, "running", fmt.Sprintf("磁盘可用 %dGB, 正在创建 1GB swap 分区 (%s)...", availGB, swapFile), "")
 				var swapCreated bool
 				var swapOut string
@@ -1203,7 +1218,8 @@ func preDeployCheck(client *ssh.Client, listenPort, healthPort int, sse *sseWrit
 					if swapRetry > 1 {
 						sse.event(PhaseEnvCheck, "log", "", fmt.Sprintf("swap 创建第 %d 次重试...", swapRetry))
 						time.Sleep(2 * time.Second)
-						swapFile = fmt.Sprintf("/swapfile_np_%d", time.Now().UnixNano()%100000)
+						// 重试时加序号后缀避免文件名重复
+						swapFile = fmt.Sprintf("/swapfile_np_%s_%d", nodeShortID, swapRetry)
 					}
 					swapCmd := fmt.Sprintf(
 						"(fallocate -l 1G %s 2>/dev/null || dd if=/dev/zero of=%s bs=1M count=1024 2>/dev/null) && chmod 600 %s && mkswap %s && swapon %s && echo 'SWAP_CREATED'",
