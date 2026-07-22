@@ -2427,6 +2427,11 @@ func scpViaSSH(client *ssh.Client, localPath, remotePath string) (string, error)
 const defaultPath = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 func sshRun(client *ssh.Client, cmd string) (string, error) {
+	return sshRunWithTimeout(client, cmd, 5*time.Minute)
+}
+
+// sshRunWithTimeout 执行命令并带超时控制, 防止 docker pull/info 等命令 hang 死整个部署
+func sshRunWithTimeout(client *ssh.Client, cmd string, timeout time.Duration) (string, error) {
 	session, err := client.NewSession()
 	if err != nil {
 		return "", err
@@ -2438,11 +2443,26 @@ func sshRun(client *ssh.Client, cmd string) (string, error) {
 	session.Stdout = &outBuf
 	session.Stderr = &errBuf
 	// 兜底: 部分服务器 SSH 会话 PATH 为空, 导致 docker/curl/tar 等命令找不到
-	err = session.Run("export " + defaultPath + "; " + cmd)
-	if err != nil && errBuf.Len() > 0 {
-		return outBuf.String(), fmt.Errorf("%w (stderr: %s)", err, errBuf.String())
+	fullCmd := "export " + defaultPath + "; " + cmd
+
+	// 用 goroutine + timer 实现超时, 避免 session.Run 永久阻塞
+	done := make(chan error, 1)
+	go func() {
+		defer func() { _ = recover() }()
+		done <- session.Run(fullCmd)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil && errBuf.Len() > 0 {
+			return outBuf.String(), fmt.Errorf("%w (stderr: %s)", err, errBuf.String())
+		}
+		return outBuf.String() + errBuf.String(), err
+	case <-time.After(timeout):
+		// 超时强制关闭 session, 释放底层连接资源
+		_ = session.Close()
+		return outBuf.String(), fmt.Errorf("sshRun 超时(%v): %s", timeout, cmd)
 	}
-	return outBuf.String() + errBuf.String(), err
 }
 
 // sshWriteFile 通过 SSH 安全写入文件内容，避免命令注入风险
@@ -2472,7 +2492,19 @@ func sshWriteFile(client *ssh.Client, path, content string) error {
 		}
 	})
 
-	return session.Wait()
+	// 加超时防止 session.Wait() 永久阻塞
+	done := make(chan error, 1)
+	go func() {
+		defer func() { _ = recover() }()
+		done <- session.Wait()
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(60 * time.Second):
+		_ = session.Close()
+		return fmt.Errorf("sshWriteFile 超时(60s): %s", path)
+	}
 }
 
 // sshStream 执行命令，实时回调每一行输出
