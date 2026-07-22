@@ -378,11 +378,54 @@ func InjectStatsConfig(cfgJSON string, apiPort int) (string, error) {
 	rules = append([]interface{}{apiRule}, rules...)
 	routing["rules"] = rules
 
+	// 为所有代理 inbound 的 clients 注入 email 和 level 字段。
+	// Xray StatsService 使用 client.email 作为用户级统计的标识符
+	// (格式: user>>>{email}>>>traffic>>>uplink/downlink)。
+	// 面板下发的配置通常只有 id(UUID) 而没有 email，导致用户级统计不生效。
+	// 这里用 UUID 作为 email，使 stats 名称中包含 UUID，方便面板匹配用户。
+	injectClientStats := 0
+	for _, ibRaw := range inbounds {
+		ib, ok := ibRaw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		proto, _ := ib["protocol"].(string)
+		if proto != "vless" && proto != "vmess" && proto != "trojan" {
+			continue
+		}
+		// 给代理 inbound 加 tag（如果缺失），便于路由和统计
+		if _, hasTag := ib["tag"]; !hasTag {
+			ib["tag"] = "proxy-" + proto
+		}
+		settings, _ := ib["settings"].(map[string]interface{})
+		if settings == nil {
+			continue
+		}
+		clients, _ := settings["clients"].([]interface{})
+		for _, cRaw := range clients {
+			c, ok := cRaw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			// 注入 email（用 UUID 作为 email，使 stats name 包含 UUID）
+			if _, hasEmail := c["email"]; !hasEmail {
+				if id, hasID := c["id"].(string); hasID && id != "" {
+					c["email"] = id
+					injectClientStats++
+				}
+			}
+			// 注入 level=0（匹配 policy.levels.0 的 statsUserUplink/Downlink）
+			if _, hasLevel := c["level"]; !hasLevel {
+				c["level"] = 0
+			}
+		}
+	}
+
 	out, err := json.Marshal(cfg)
 	if err != nil {
 		return "", fmt.Errorf("重新序列化 stats 注入配置失败: %w", err)
 	}
-	log.Printf("[xray] Stats/API 配置已注入 (api_port=%d)", apiPort)
+	log.Printf("[xray] Stats/API 配置已注入 (api_port=%d, client_stats=%d)", apiPort, injectClientStats)
 	return string(out), nil
 }
 
