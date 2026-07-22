@@ -139,16 +139,26 @@ const openDetail = async (row: any) => {
   current.value = { ...row, messages: [] }
   replyText.value = ''
   detailVisible.value = true
+  await reloadDetail(row.id)
+}
+
+// P2-12: 从服务端拉取工单真实 replies + 状态, 避免本地伪造 id/updated_at
+// (旧版 handleReply 用 'm'+Date.now() 伪造消息id, 多管理员并发时看不到他人回复)
+const reloadDetail = async (ticketId: string) => {
   try {
-    const res: any = await request.get(`/api/v1/admin/tickets/${row.id}`)
-    if (res && res.data && Array.isArray(res.data.replies)) {
+    const res: any = await request.get(`/api/v1/admin/tickets/${ticketId}`)
+    if (res && res.data) {
       if (current.value) {
-        current.value.messages = res.data.replies.map((r: any) => ({
-          id: r.id,
-          from: r.reply_type === 'admin' ? 'admin' : 'user',
-          content: r.content,
-          createdAt: (r.created_at || '').replace('T', ' ').slice(0, 19),
-        }))
+        current.value.status = res.data.status || current.value.status
+        current.value.updated_at = (res.data.updated_at || '').toString().replace('T', ' ').slice(0, 19)
+        if (Array.isArray(res.data.replies)) {
+          current.value.messages = res.data.replies.map((r: any) => ({
+            id: r.id,
+            from: r.reply_type === 'admin' ? 'admin' : 'user',
+            content: r.content,
+            createdAt: (r.created_at || '').replace('T', ' ').slice(0, 19),
+          }))
+        }
       }
     }
   } catch (e: any) {
@@ -161,16 +171,11 @@ const handleReply = async () => {
   replying.value = true
   try {
     await request.post(`/api/v1/admin/tickets/${current.value.id}/reply`, { content: replyText.value })
-    if (current.value.messages) {
-      current.value.messages.push({
-        id: 'm' + Date.now(), from: 'admin', content: replyText.value,
-        createdAt: new Date().toISOString().replace('T', ' ').slice(0, 19),
-      })
-    }
-    current.value.status = 'replied'
-    current.value.updated_at = new Date().toISOString().replace('T', ' ').slice(0, 19)
     replyText.value = ''
     ElMessage.success('回复已发送')
+    // P2-12: 回复后从服务端拉取真实 replies + 状态, 不再本地伪造
+    await reloadDetail(current.value.id)
+    fetchList()
   } catch (e: any) {
     ElMessage.error(e?.message || '回复失败')
   } finally {

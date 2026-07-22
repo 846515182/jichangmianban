@@ -284,7 +284,11 @@ const stats = ref<OrderStats>({
 const totalIncomeYuan = computed(() => stats.value.total_income_cents / 100)
 
 // 加载统计(失败不阻塞列表展示, 静默处理)
+// P2-13: 加 statsLoading 锁防止快速切筛选时多个 loadStats 并发竞态(后发先至导致数据闪烁)
+let statsLoading = false
 const loadStats = async () => {
+  if (statsLoading) return
+  statsLoading = true
   try {
     const res: any = await request.get('/api/v1/admin/orders/stats', { silent: true })
     const data = res?.data || res
@@ -300,6 +304,8 @@ const loadStats = async () => {
     }
   } catch {
     // 统计加载失败不影响列表展示
+  } finally {
+    statsLoading = false
   }
 }
 
@@ -333,7 +339,13 @@ const viewDetail = (row: any) => {
 // 手动标记已支付（用于线下收款）
 // 修复 P0: 旧版 try{}catch{} 后无条件更新本地状态 + 弹成功, API 失败时用户被误导。
 // 现仅在 API 成功后才更新本地状态 + 弹成功, 失败时拦截器已弹错误, 这里不再改状态。
-// 成功后调用 loadData() 重新拉取列表(含 paid_at 后端返回的真实值), 避免本地写时区错乱。
+// P2-10: 单条操作后局部更新 + loadStats, 避免全量 loadData 竞态
+const updateRowLocal = (row: any, patch: any) => {
+  Object.assign(row, patch)
+  loadStats()
+}
+
+// 成功后局部更新状态 + 刷新统计, 避免全量 loadData 竞态
 const markPaid = (row: any) => {
   ElMessageBox.confirm(
     `确认将订单「${row.order_no}」标记为已支付吗？\n此操作通常用于线下收款确认。`,
@@ -344,8 +356,7 @@ const markPaid = (row: any) => {
     try {
       await request.post(`/api/v1/admin/orders/${row.id}/mark-paid`)
       ElMessage.success('订单已标记为已支付')
-      // 重新拉取列表+统计, 拿后端返回的真实 paid_at / trade_no
-      await loadData()
+      updateRowLocal(row, { status: 'paid', paid_at: new Date().toISOString().replace('T', ' ').slice(0, 19) })
     } catch {
       // 拦截器已弹错误, 不改本地状态
     } finally {
@@ -365,7 +376,7 @@ const refund = (row: any) => {
     try {
       await request.post(`/api/v1/admin/orders/${row.id}/refund`)
       ElMessage.success('订单已退款')
-      await loadData()
+      updateRowLocal(row, { status: 'refunded' })
     } catch {
       // 拦截器已弹错误
     } finally {
@@ -383,7 +394,7 @@ const cancelOrder = (row: any) => {
     try {
       await request.post(`/api/v1/admin/orders/${row.id}/cancel`)
       ElMessage.success('订单已取消')
-      await loadData()
+      updateRowLocal(row, { status: 'cancelled' })
     } catch {
       // 拦截器已弹错误
     } finally {

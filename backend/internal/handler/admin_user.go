@@ -34,12 +34,7 @@ func (h *AdminUserHandler) UserList(c *gin.Context) {
 	page, size := parsePage(c)
 	keyword := c.Query("keyword")
 
-	// 安全修复: 限制单次查询最大条数，防止大量数据导出
-	const maxPageSize = 1000
-	if size > maxPageSize {
-		size = maxPageSize
-	}
-
+	// P2-8: 移除 maxPageSize=1000 死代码, parsePage 已将 size 上限设为 200, 此判断永不触发
 	list, total, err := h.userRepo.List(page, size, keyword)
 	if err != nil {
 		response.Fail(c, response.CodeDBError)

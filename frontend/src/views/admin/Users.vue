@@ -179,8 +179,9 @@ const isExpired = (row: any) => row.expired_at ? new Date(row.expired_at).getTim
 const dialogVisible = ref(false)
 const editing = ref<UserRow | null>(null)
 const formRef = ref<FormInstance>()
+// P2-19: 移除 form.plan_id 死字段(编辑对话框无套餐选择控件, 套餐变更走单独"开通套餐"对话框)
 const form = reactive({
-  username: "", email: "", password: "", plan_id: "",
+  username: "", email: "", password: "",
   trafficLimitGB: 100, expireAt: "",
 })
 const rules: FormRules = {
@@ -194,12 +195,11 @@ const openDialog = (row?: any) => {
   if (row) {
     Object.assign(form, {
       username: row.username, email: row.email, password: "",
-      plan_id: row.plan_id || "",
       trafficLimitGB: row.traffic_limit ? Math.round(row.traffic_limit / 1024 / 1024 / 1024) : 0,
       expireAt: row.expired_at || "",
     })
   } else {
-    Object.assign(form, { username: "", email: "", password: "", plan_id: "", trafficLimitGB: 100, expireAt: "" })
+    Object.assign(form, { username: "", email: "", password: "", trafficLimitGB: 100, expireAt: "" })
   }
   dialogVisible.value = true
 }
@@ -215,7 +215,7 @@ const handleSave = async () => {
         // 修复 P2: 旧版 Math.floor 会少算最多近 1 字节, 用 Math.round 四舍五入更精确
         traffic_limit: Math.round(form.trafficLimitGB * 1024 * 1024 * 1024),
       }
-      if (form.plan_id) payload.plan_id = form.plan_id
+      // P2-19: plan_id 不在编辑表单暴露, 套餐变更走单独"开通套餐"对话框
       // 到期时间: 留空=清除到期(expire_days=0), 有值=按天数(允许负数设已过期)
       // 修复 P1: 旧版 Math.max(1, Math.ceil(...)) 把过去日期也变成+1天(无法设已过期),
       // 且无法清除到期时间(不发 expire_days=不改)。改用 round 提高精度 + 允许负数 + 空值发0。
@@ -320,19 +320,9 @@ const fetchList = async () => {
         keyword: keyword.value || undefined,
       },
     })
-    let arr: any[] = []
-    if (res && res.data && Array.isArray(res.data.list)) {
-      arr = res.data.list
-      total.value = Number(res.data.total) || arr.length
-    } else if (res && Array.isArray(res.data)) {
-      arr = res.data
-      total.value = arr.length
-    } else if (Array.isArray(res)) {
-      arr = res
-      total.value = arr.length
-    } else {
-      total.value = 0
-    }
+    // P2-18: 后端统一返回 {code,msg,data:{list,total}}, 移除永不触发的多分支死代码
+    const arr = (res && res.data && Array.isArray(res.data.list)) ? res.data.list : []
+    total.value = (res && res.data && Number(res.data.total)) || arr.length
     list.value = arr
   } catch { /* */ }
   finally { loading.value = false }

@@ -507,10 +507,28 @@ onMounted(async () => {
   if (logMonitor.selectedContainer) {
     fetchContainerLogs()
   }
-  if (logMonitor.autoRefresh) {
+  // P2-20: fetchContainers 失败(available=false)时不启动日志定时器, 避免空转
+  if (logMonitor.autoRefresh && logMonitor.available) {
     startLogTimer()
   }
+  document.addEventListener('visibilitychange', handleVisibility)
 })
+
+// P2-9: 标签页隐藏时暂停所有轮询(sysTimer 3s + logTimer 30s), 切回恢复
+let isVisible = true
+const handleVisibility = () => {
+  const nowVisible = !document.hidden
+  if (nowVisible === isVisible) return
+  isVisible = nowVisible
+  if (isVisible) {
+    fetchSysStats()
+    sysTimer = window.setInterval(fetchSysStats, 3000)
+    if (logMonitor.autoRefresh && logMonitor.available) startLogTimer()
+  } else {
+    if (sysTimer !== null) { clearInterval(sysTimer); sysTimer = null }
+    stopLogTimer()
+  }
+}
 
 onBeforeUnmount(() => {
   if (sysTimer !== null) {
@@ -518,6 +536,7 @@ onBeforeUnmount(() => {
     sysTimer = null
   }
   stopLogTimer()
+  document.removeEventListener('visibilitychange', handleVisibility)
 })
 </script>
 

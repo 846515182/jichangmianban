@@ -274,17 +274,11 @@ const fetchList = async () => {
     const res: any = await request.get("/api/v1/admin/plans", {
       params: { page: currentPage.value, size: pageSize.value, keyword: keyword.value || undefined },
     })
-    let arr: any[] = []
-    if (res && res.data && Array.isArray(res.data.list)) {
-      arr = res.data.list
-      total.value = Number(res.data.total) || arr.length
-    } else if (res && Array.isArray(res.data)) {
-      arr = res.data
-      total.value = arr.length
-    } else {
-      total.value = 0
-    }
-    list.value = arr.sort((a: PlanRow, b: PlanRow) => a.sort_order - b.sort_order)
+    // P2-18: 后端统一返回 {code,msg,data:{list,total}}, 移除永不触发的多分支死代码
+    const arr = (res && res.data && Array.isArray(res.data.list)) ? res.data.list : []
+    total.value = (res && res.data && Number(res.data.total)) || arr.length
+    // P2-11: 后端已 ORDER BY sort_order ASC, 移除前端 sort 避免跨页顺序错乱
+    list.value = arr
   } catch { /* */ }
   finally { loading.value = false }
 }

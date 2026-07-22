@@ -9,20 +9,22 @@
           <div class="section-title"><el-icon><Lock /></el-icon> 安全设置</div>
           <el-form label-width="130px" label-position="right">
             <el-form-item label="HMAC 密钥">
-              <!-- 修复 P0: 旧版默认显示 Math.random() 生成的假 key, 现未轮换时显示占位提示。
-                   HMAC 密钥属于机密, 后端不暴露已保存的值, 只在轮换时返回新值。 -->
-              <el-input
-                v-model="security.hmacKey"
-                :type="showKey ? 'text' : 'password'"
-                readonly
-                :placeholder="security.hmacKey ? '' : '点击下方轮换按钮以生成新密钥（出于安全考虑不显示已保存的密钥）'"
-              >
-                <template #append>
-                  <el-button @click="showKey = !showKey">
-                    <el-icon><View v-if="!showKey" /><Hide v-else /></el-icon>
-                  </el-button>
-                </template>
-              </el-input>
+              <!-- P2-17: 未轮换时不显示输入框(避免 readonly+password 暗示有秘密可看)，
+                   只显示提示文字；轮换后 hmacKey 有值才显示输入框供查看/复制 -->
+              <template v-if="security.hmacKey">
+                <el-input
+                  v-model="security.hmacKey"
+                  :type="showKey ? 'text' : 'password'"
+                  readonly
+                >
+                  <template #append>
+                    <el-button @click="showKey = !showKey">
+                      <el-icon><View v-if="!showKey" /><Hide v-else /></el-icon>
+                    </el-button>
+                  </template>
+                </el-input>
+              </template>
+              <span v-else class="form-tip">密钥已安全保存，点击下方按钮轮换</span>
             </el-form-item>
             <el-form-item>
               <el-button type="warning" @click="rotateHmac" :loading="rotating">
@@ -558,8 +560,8 @@ const restoreBackup = async (file: File) => {
     })
     ElMessage.success('恢复成功，系统将在 5 秒后重启')
     setTimeout(() => location.reload(), 5000)
-  } catch (e: any) {
-    ElMessage.error('恢复失败: ' + (e?.message || '未知错误'))
+  } catch {
+    // P2-14: 拦截器已弹后端 msg, 不再重复弹 axios 错误(旧版弹两条)
   }
   return false
 }

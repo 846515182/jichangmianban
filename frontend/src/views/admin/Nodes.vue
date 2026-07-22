@@ -476,6 +476,10 @@ interface NodeRow {
 // 节点 agent 连不上正确面板。改为从 Vite 环境变量读取, 缺省回退到当前域名。
 // - 开发: 在 frontend/.env 中设置 VITE_PANEL_IP=192.168.x.x
 // - 生产: 不配置则自动用 window.location.hostname(节点通过浏览器访问的同一面板域名)
+//
+// P2-16: 注意 CDN 场景限制 — 若面板域名走 Cloudflare 等 CDN, hostname 解析到 CDN IP,
+// 节点 agent 无法通过 CDN 连接 50051 端口。此场景必须配置 VITE_PANEL_IP 为面板真实 IP,
+// 或在面板 .env 设置 PANEL_GRPC_HOST 后端变量由 auto_deploy.go 注入到 .env.node。
 const PANEL_IP = import.meta.env.VITE_PANEL_IP || window.location.hostname
 
 // 部署步骤数据结构
@@ -1040,8 +1044,8 @@ const pingNode = async (row: NodeRow) => {
       } else {
         ElMessage.warning(`${row.name} 无法连接 (${res.data.error || '未知错误'})，已标记为离线`)
       }
-      // 刷新列表以更新 online 状态
-      await fetchList()
+      // P2-10: 局部更新当前行 online 状态, 避免全量 fetchList 浪费请求
+      row.online = res.data.reachable
     }
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.msg || '检测失败')
