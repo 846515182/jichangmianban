@@ -1014,6 +1014,18 @@ func (h *AdminSystemHandler) GitPull(c *gin.Context) {
 
 	go func() {
 		defer gitPullMu.Unlock()
+		// [防卡死保护] 兜底确保异常退出时状态一定回写为 done,
+		// 避免 npm ci OOM / panic / 任何意外 return 导致前端永远转圈"更新中"。
+		// 用 recovered 标记是否正常完成, 正常完成时 setPullDone 已在末尾调用过,
+		// 这里只在异常路径兜底。gitPullDone 为 true 表示已设置过, 不重复写。
+		defer func() {
+			if r := recover(); r != nil {
+				logWrite("更新流程 panic: %v", r)
+			}
+			if !gitPullDone {
+				setPullDone(false)
+			}
+		}()
 		gitRoot := getGitRoot()
 		branch := getCurrentBranch()
 

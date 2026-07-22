@@ -109,7 +109,7 @@ func (s *LoadScorer) CalculateScore(node *model.Node, snap *HeartbeatSnapshot) L
 
 	var clientRatio, bandwidthRatio, cpuRatio, memRatio float64
 
-	// 连接数占比
+	// 连接数占比(需配 MaxClients, 否则不算)
 	if node.MaxClients > 0 {
 		clientRatio = float64(snap.OnlineConnections) / float64(node.MaxClients)
 	}
@@ -120,15 +120,19 @@ func (s *LoadScorer) CalculateScore(node *model.Node, snap *HeartbeatSnapshot) L
 		bandwidthRatio = float64(snap.SpeedBps) / maxBps
 	}
 
-	// CPU 占比 (默认阈值 80%)
+	// CPU 占比 (默认阈值 80%) — CPU 是限速的主要依据
 	cpuThreshold := float64(node.CpuThreshold)
 	if cpuThreshold <= 0 {
 		cpuThreshold = 80
 	}
 	cpuRatio = snap.CpuUsage / cpuThreshold
 
-	// 内存占比 (固定阈值 90%, 内存泄漏才需关注)
-	memRatio = snap.MemoryUsage / 90.0
+	// 内存占比: 内存不像CPU那样随负载波动, Xray 常驻就占 40%+,
+	// 直接用内存占比会导致 1 个人也评分 0.49 被限速。
+	// 改为: 内存 >85% 才算分(接近爆满才限速保护), 平时不参与评分。
+	if snap.MemoryUsage > 85 {
+		memRatio = snap.MemoryUsage / 90.0
+	}
 
 	// 综合评分 = 各维度最大值(短板效应)
 	score := math.Max(math.Max(clientRatio, bandwidthRatio), math.Max(cpuRatio, memRatio))
