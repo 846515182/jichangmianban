@@ -1,38 +1,54 @@
 <template>
   <div class="user-dashboard">
-    <!-- 服务器实时状态（精简版） -->
+    <!-- 节点实时流量（用户真正关心的：自己订阅节点的流量） -->
     <el-row :gutter="20" style="margin-bottom: 20px">
       <el-col :span="24">
         <div class="np-card dash-card">
-          <div class="card-title">服务器状态</div>
+          <div class="card-title">
+            <span>节点实时流量</span>
+            <el-tag v-if="nodesLoading" size="small" type="info" effect="plain">刷新中...</el-tag>
+            <el-tag v-else size="small" :type="onlineNodes > 0 ? 'success' : 'danger'" effect="plain">
+              {{ onlineNodes }} 个在线
+            </el-tag>
+          </div>
           <el-row :gutter="16">
             <el-col :xs="12" :sm="6">
               <div class="mini-stat">
-                <div class="mini-label">CPU 负载</div>
-                <div class="mini-value">{{ sysStats.load1?.toFixed(2) ?? '0.00' }}</div>
-                <el-progress :percentage="loadPct" :show-text="false" :stroke-width="4" :status="loadPct >= 80 ? 'exception' : 'success'" />
+                <div class="mini-label">在线节点</div>
+                <div class="mini-value">{{ onlineNodes }} / {{ nodes.length }}</div>
               </div>
             </el-col>
             <el-col :xs="12" :sm="6">
               <div class="mini-stat">
-                <div class="mini-label">内存</div>
-                <div class="mini-value">{{ sysStats.mem_pct?.toFixed(0) ?? 0 }}%</div>
-                <el-progress :percentage="memPct" :show-text="false" :stroke-width="4" :status="memPct >= 85 ? 'exception' : (memPct >= 70 ? 'warning' : 'success')" />
+                <div class="mini-label">总下行速率</div>
+                <div class="mini-value down">{{ formatSpeed(totalDownBps) }}</div>
               </div>
             </el-col>
             <el-col :xs="12" :sm="6">
               <div class="mini-stat">
-                <div class="mini-label">实时下行</div>
-                <div class="mini-value down">{{ formatSpeed(sysStats.net_in_bps) }}</div>
+                <div class="mini-label">总上行速率</div>
+                <div class="mini-value up">{{ formatSpeed(totalUpBps) }}</div>
               </div>
             </el-col>
             <el-col :xs="12" :sm="6">
               <div class="mini-stat">
-                <div class="mini-label">实时上行</div>
-                <div class="mini-value up">{{ formatSpeed(sysStats.net_out_bps) }}</div>
+                <div class="mini-label">近 5 分钟用量</div>
+                <div class="mini-value">{{ formatTraffic(recent5mTotal) }}</div>
               </div>
             </el-col>
           </el-row>
+          <!-- 节点流速明细（紧凑列表） -->
+          <div class="node-speed-list" v-if="nodes.length">
+            <div v-for="n in nodes" :key="n.id" class="speed-row" :class="{ offline: !n.online }">
+              <span class="speed-name">
+                <i class="np-dot" :class="n.online ? 'online' : 'offline'"></i>
+                {{ n.name }}
+              </span>
+              <span class="speed-val down">{{ formatSpeed(nodeDownBps(n)) }}</span>
+              <span class="speed-val up">{{ formatSpeed(nodeUpBps(n)) }}</span>
+            </div>
+          </div>
+          <el-empty v-else description="暂无可用节点" :image-size="50" />
         </div>
       </el-col>
     </el-row>
@@ -124,27 +140,20 @@ import VChart from 'vue-echarts'
 import '@/utils/echarts'
 import { ElMessage } from 'element-plus'
 import { formatTraffic, formatTime, formatSpeed, daysUntil } from '@/utils/format'
+import { copyToClipboard } from '@/utils/clipboard'
 import request from '@/utils/request'
+import { useAuthStore } from '@/stores/auth'
 
-interface ApiResponse<T> { code: number; msg: string; data: T }
-interface UserInfoResp {
-  id: string
-  username: string
-  email: string
-  traffic_limit: number
-  traffic_used: number
-  expired_at: string
-  status: string
-  subscribe_url: string
-}
+const auth = useAuthStore()
 
-const username = ref('')
-const email = ref('')
-const trafficLimit = ref(0)
-const trafficUsed = ref(0)
-const expiredAt = ref('')
-const status = ref('active')
-const subscribeUrl = ref('')
+// 用户信息（从 auth store 读，避免重复请求）
+const username = computed(() => auth.userInfo?.username || '')
+const email = computed(() => auth.userInfo?.email || '')
+const trafficLimit = computed(() => auth.userInfo?.trafficLimit || 0)
+const trafficUsed = computed(() => auth.userInfo?.trafficUsed || 0)
+const expiredAt = computed(() => auth.userInfo?.expireAt || '')
+const status = computed(() => auth.userInfo?.status || 'active')
+const subscribeUrl = computed(() => auth.subscribeUrl || '')
 
 const remainTraffic = computed(() => {
   if (!trafficLimit.value) return Infinity
@@ -163,16 +172,6 @@ const trafficPercent = computed(() => {
   const pct = (trafficUsed.value / trafficLimit.value) * 100
   return Math.max(0.1, Math.min(100, Math.round(pct * 10) / 10))
 })
-
-// === 系统状态（精简版：用户端） ===
-const sysStats = ref({
-  load1: 0, load5: 0, load15: 0,
-  mem_total: 0, mem_used: 0, mem_pct: 0,
-  net_in_bps: 0, net_out_bps: 0,
-  uptime_sec: 0, hostname: '',
-})
-const loadPct = computed(() => Math.min(100, Math.round((sysStats.value.load1 || 0) * 25)))
-const memPct = computed(() => Math.round(sysStats.value.mem_pct || 0))
 
 // 环形图配置
 const trafficOption = computed(() => ({
@@ -199,6 +198,36 @@ const trafficOption = computed(() => ({
   ],
 }))
 
+// === 节点实时流量 ===
+interface NodeItem {
+  id: string
+  name: string
+  online: boolean
+  recent5m_up?: number
+  recent5m_dn?: number
+}
+const nodes = ref<NodeItem[]>([])
+const nodesLoading = ref(false)
+
+const onlineNodes = computed(() => nodes.value.filter((n) => n.online).length)
+// recent5m_up/dn 是近 5 分钟字节数，×8/300 转 bps
+const nodeUpBps = (n: NodeItem) => (n.recent5m_up || 0) * 8 / 300
+const nodeDownBps = (n: NodeItem) => (n.recent5m_dn || 0) * 8 / 300
+const totalUpBps = computed(() => nodes.value.reduce((s, n) => s + nodeUpBps(n), 0))
+const totalDownBps = computed(() => nodes.value.reduce((s, n) => s + nodeDownBps(n), 0))
+const recent5mTotal = computed(() => nodes.value.reduce((s, n) => s + (n.recent5m_up || 0) + (n.recent5m_dn || 0), 0))
+
+const fetchNodes = async () => {
+  nodesLoading.value = true
+  try {
+    const res = await request.get<{ code: number; data: { list: NodeItem[] } }>('/api/v1/nodes/list')
+    if (res && res.code === 0 && res.data) {
+      nodes.value = res.data.list || []
+    }
+  } catch { /* */ }
+  nodesLoading.value = false
+}
+
 const clients = [
   { name: 'Clash', icon: 'Link' },
   { name: 'Sing-Box', icon: 'Connection' },
@@ -206,43 +235,13 @@ const clients = [
   { name: 'Shadowrocket', icon: 'Iphone' },
 ]
 
-// 兼容 HTTP（非安全上下文）环境的复制
-const fallbackCopy = (text: string): boolean => {
-  try {
-    const textarea = document.createElement('textarea')
-    textarea.value = text
-    textarea.style.position = 'fixed'
-    textarea.style.left = '-9999px'
-    textarea.style.top = '0'
-    textarea.style.opacity = '0'
-    document.body.appendChild(textarea)
-    textarea.focus()
-    textarea.select()
-    const ok = document.execCommand('copy')
-    document.body.removeChild(textarea)
-    return ok
-  } catch {
-    return false
-  }
-}
-const copyToClipboard = (text: string): Promise<boolean> => {
-  if (window.isSecureContext && navigator.clipboard) {
-    return navigator.clipboard.writeText(text).then(() => true).catch(() => fallbackCopy(text))
-  }
-  return Promise.resolve(fallbackCopy(text))
-}
-
 const copyLink = async () => {
   if (!subscribeUrl.value) {
     ElMessage.warning('订阅链接为空')
     return
   }
   const ok = await copyToClipboard(subscribeUrl.value)
-  if (ok) {
-    ElMessage.success('订阅链接已复制')
-  } else {
-    ElMessage.warning('复制失败，请手动复制')
-  }
+  ok ? ElMessage.success('订阅链接已复制') : ElMessage.warning('复制失败，请手动复制')
 }
 
 const quickImport = async (c: { name: string }) => {
@@ -266,48 +265,42 @@ const quickImport = async (c: { name: string }) => {
   }
 }
 
-const fetchUserInfo = async () => {
-  try {
-    const res = await request.get<ApiResponse<UserInfoResp>>('/api/v1/user/info')
-    if (res && res.code === 0 && res.data) {
-      username.value = res.data.username || ''
-      email.value = res.data.email || ''
-      trafficLimit.value = res.data.traffic_limit || 0
-      trafficUsed.value = res.data.traffic_used || 0
-      expiredAt.value = res.data.expired_at || ''
-      status.value = res.data.status || 'active'
-      subscribeUrl.value = res.data.subscribe_url || ''
-    }
-  } catch { /* 拦截器处理 */ }
-}
-
-let sysTimer: number | null = null
-const fetchSysStats = async () => {
-  try {
-    const res: any = await request.get('/api/v1/user/system/stats')
-    if (res && res.code === 0 && res.data) {
-      sysStats.value = { ...sysStats.value, ...res.data }
-    }
-  } catch { /* fallback */ }
+// 轮询 + visibilitychange 优化（标签页隐藏时暂停轮询，节省资源）
+let nodeTimer: number | null = null
+let isVisible = true
+const handleVisibility = () => {
+  const nowVisible = !document.hidden
+  if (nowVisible === isVisible) return
+  isVisible = nowVisible
+  if (isVisible) {
+    fetchNodes()
+    nodeTimer = window.setInterval(fetchNodes, 10000)
+  } else if (nodeTimer !== null) {
+    clearInterval(nodeTimer)
+    nodeTimer = null
+  }
 }
 
 onMounted(() => {
-  fetchUserInfo()
-  fetchSysStats()
-  sysTimer = window.setInterval(fetchSysStats, 3000)
+  // 强制刷新用户信息（Dashboard 是首页，确保拿到最新数据）
+  auth.fetchUserInfo(true)
+  fetchNodes()
+  nodeTimer = window.setInterval(fetchNodes, 10000)
+  document.addEventListener('visibilitychange', handleVisibility)
 })
 
 onBeforeUnmount(() => {
-  if (sysTimer !== null) {
-    clearInterval(sysTimer)
-    sysTimer = null
+  if (nodeTimer !== null) {
+    clearInterval(nodeTimer)
+    nodeTimer = null
   }
+  document.removeEventListener('visibilitychange', handleVisibility)
 })
 </script>
 
 <style scoped>
 .dash-card { padding: 20px; height: 100%; box-sizing: border-box; }
-.card-title { font-size: 15px; font-weight: 600; color: var(--np-text); margin-bottom: 16px; }
+.card-title { font-size: 15px; font-weight: 600; color: var(--np-text); margin-bottom: 16px; display: flex; align-items: center; gap: 10px; }
 .mini-stat { display: flex; flex-direction: column; gap: 6px; padding: 4px 0; }
 .mini-label { font-size: 12px; color: var(--np-text-muted); }
 .mini-value { font-size: 18px; font-weight: 700; color: var(--np-text); font-family: monospace; }
@@ -330,4 +323,20 @@ onBeforeUnmount(() => {
 .import-guide { margin-top: 20px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .guide-label { color: var(--np-text-secondary); font-size: 14px; }
 .client-btns { display: flex; gap: 10px; flex-wrap: wrap; }
+
+/* 节点流速列表 */
+.node-speed-list { margin-top: 16px; display: flex; flex-direction: column; gap: 6px; }
+.speed-row { display: grid; grid-template-columns: 1fr auto auto; gap: 16px; align-items: center; padding: 8px 12px; background: rgba(255,255,255,0.03); border-radius: 8px; }
+.speed-row.offline { opacity: 0.5; }
+.speed-name { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--np-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.speed-val { font-size: 13px; font-weight: 600; font-family: monospace; min-width: 90px; text-align: right; }
+.speed-val.up { color: #ffbe0b; }
+.speed-val.down { color: var(--np-primary); }
+.np-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.np-dot.online { background: #67c23a; box-shadow: 0 0 6px #67c23a; }
+.np-dot.offline { background: #909399; }
+
+@media (max-width: 768px) {
+  .speed-val { min-width: 70px; font-size: 12px; }
+}
 </style>

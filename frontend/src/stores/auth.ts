@@ -15,11 +15,24 @@ export interface UserInfo {
   status: 'active' | 'disabled'
 }
 
+// 后端 /api/v1/user/info 返回结构（snake_case）
+interface UserInfoResp {
+  id: string
+  username: string
+  email: string
+  traffic_limit: number
+  traffic_used: number
+  expired_at: string
+  status: string
+  subscribe_url?: string
+}
+
 interface AuthState {
   token: string
   refreshToken: string
   role: UserRole | null
   userInfo: UserInfo | null
+  subscribeUrl: string
 }
 
 const TOKEN_KEY = 'np_token'
@@ -40,6 +53,7 @@ export const useAuthStore = defineStore('auth', {
     refreshToken: '',
     role: null,
     userInfo: null,
+    subscribeUrl: '',
   }),
   getters: {
     isLoggedIn: (state) => !!state.token,
@@ -187,6 +201,31 @@ export const useAuthStore = defineStore('auth', {
     setUserInfo(info: UserInfo) {
       this.userInfo = info
       this.persist()
+    },
+
+    // 统一拉取用户信息并映射 snake_case → camelCase，缓存到 store 供各页面复用
+    // 避免每个页面（Dashboard/Subscribe/Profile）各自请求 /api/v1/user/info 造成重复请求
+    async fetchUserInfo(force = false) {
+      if (!force && this.userInfo) return this.userInfo
+      try {
+        const res = await request.get<{ code: number; data: UserInfoResp }>('/api/v1/user/info')
+        const data = res?.data
+        if (data) {
+          this.subscribeUrl = data.subscribe_url || ''
+          this.userInfo = {
+            id: data.id,
+            username: data.username || '',
+            email: data.email || '',
+            role: this.role || 'user',
+            trafficUsed: data.traffic_used || 0,
+            trafficLimit: data.traffic_limit || 0,
+            expireAt: data.expired_at || '',
+            status: (data.status as 'active' | 'disabled') || 'active',
+          }
+          this.persist()
+        }
+      } catch { /* 拦截器处理 */ }
+      return this.userInfo
     },
   },
 })

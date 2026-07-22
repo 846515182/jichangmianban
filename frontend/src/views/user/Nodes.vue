@@ -94,10 +94,26 @@ const loadData = async () => {
 }
 
 let timer: number | null = null
+let isVisible = true
+// 标签页隐藏时暂停轮询，节省资源（切回自动恢复+立即刷新一次）
+const handleVisibility = () => {
+  const nowVisible = !document.hidden
+  if (nowVisible === isVisible) return
+  isVisible = nowVisible
+  if (isVisible) {
+    loadData()
+    timer = window.setInterval(loadData, 10000)
+  } else if (timer !== null) {
+    clearInterval(timer)
+    timer = null
+  }
+}
+
 onMounted(() => {
   loadData()
   // 每 10s 自动刷新（含节点在线状态与近 5min 流量速率）
   timer = window.setInterval(loadData, 10000)
+  document.addEventListener('visibilitychange', handleVisibility)
 })
 
 onBeforeUnmount(() => {
@@ -105,6 +121,7 @@ onBeforeUnmount(() => {
     clearInterval(timer)
     timer = null
   }
+  document.removeEventListener('visibilitychange', handleVisibility)
 })
 </script>
 

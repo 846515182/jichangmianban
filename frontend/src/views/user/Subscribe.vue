@@ -167,7 +167,11 @@ import QRCode from 'qrcode'
 import { ElMessage } from 'element-plus'
 import { CopyDocument, Download, Refresh, Loading, DataLine, Timer, Cpu, CircleCheck, FullScreen } from '@element-plus/icons-vue'
 import { formatTime, formatTraffic } from '@/utils/format'
+import { copyToClipboard, utf8ToBase64 } from '@/utils/clipboard'
 import request from '@/utils/request'
+import { useAuthStore } from '@/stores/auth'
+
+const auth = useAuthStore()
 
 interface ApiResponse<T> { code: number; msg: string; data: T }
 interface ConnectInfo {
@@ -240,37 +244,7 @@ const updateUrl = () => {
   renderQr()
 }
 
-// 通用复制函数：兼容 HTTP（非安全上下文）环境
-// 注意：必须保持在用户手势上下文中同步执行 execCommand，否则会失败
-const fallbackCopy = (text: string): boolean => {
-  try {
-    const textarea = document.createElement('textarea')
-    textarea.value = text
-    textarea.style.position = 'fixed'
-    textarea.style.left = '-9999px'
-    textarea.style.top = '0'
-    textarea.style.opacity = '0'
-    document.body.appendChild(textarea)
-    textarea.focus()
-    textarea.select()
-    const ok = document.execCommand('copy')
-    document.body.removeChild(textarea)
-    return ok
-  } catch {
-    return false
-  }
-}
-
-const copyToClipboard = (text: string): Promise<boolean> => {
-  // 安全上下文（HTTPS/localhost）：优先 Clipboard API
-  if (window.isSecureContext && navigator.clipboard) {
-    return navigator.clipboard.writeText(text)
-      .then(() => true)
-      .catch(() => fallbackCopy(text))
-  }
-  // 非安全上下文（HTTP）：直接同步执行 execCommand，保持用户手势上下文
-  return Promise.resolve(fallbackCopy(text))
-}
+// 通用复制函数已抽到 @/utils/clipboard
 
 const fetchUserInfo = async () => {
   try {
@@ -376,7 +350,7 @@ const buildNodeShareUrl = (n: NodeItem): string => {
       v: '2', ps: n.name, add: n.server_address, port: n.port,
       id: c.uuid, aid: 0, scy: c.method || 'auto', net: 'tcp',
     }
-    return `vmess://${btoa(unescape(encodeURIComponent(JSON.stringify(obj))))}`
+    return `vmess://${utf8ToBase64(JSON.stringify(obj))}`
   }
   if (proto === 'trojan') {
     return `trojan://${c.password}@${n.server_address}:${n.port}?sni=${c.sni || ''}#${encodeURIComponent(n.name)}`
