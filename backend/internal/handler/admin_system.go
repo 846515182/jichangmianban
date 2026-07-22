@@ -162,7 +162,9 @@ func (h *AdminSystemHandler) RotateHMAC(c *gin.Context) {
 	}
 	// 更新内存中的配置
 	app.Get().Cfg.HMACSubSecret = newSecret
-	response.OK(c, gin.H{"rotated_at": time.Now(), "msg": "HMAC 密钥已轮换"})
+	// 返回新密钥: 前端 rotateHmac 依赖 hmac_key 字段回显, 旧版只返回 rotated_at/msg
+	// 导致前端永远走 else 分支报"未返回新密钥", 但密钥已实际轮换使所有订阅 token 失效
+	response.OK(c, gin.H{"hmac_key": newSecret, "rotated_at": time.Now(), "msg": "HMAC 密钥已轮换"})
 }
 
 // LoginAudit [25] GET /api/v1/admin/system/login-audit

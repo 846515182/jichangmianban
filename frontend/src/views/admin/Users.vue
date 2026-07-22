@@ -97,7 +97,7 @@
           <span class="form-tip">0 表示无限</span>
         </el-form-item>
         <el-form-item label="到期时间">
-          <el-date-picker v-model="form.expireAt" type="datetime" placeholder="选择到期时间" style="width:100%" value-format="YYYY-MM-DD HH:mm:ss" />
+          <el-date-picker v-model="form.expireAt" type="datetime" placeholder="选择到期时间(留空=清除/不限)" style="width:100%" value-format="YYYY-MM-DD HH:mm:ss" clearable />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -216,9 +216,15 @@ const handleSave = async () => {
         traffic_limit: Math.round(form.trafficLimitGB * 1024 * 1024 * 1024),
       }
       if (form.plan_id) payload.plan_id = form.plan_id
+      // 到期时间: 留空=清除到期(expire_days=0), 有值=按天数(允许负数设已过期)
+      // 修复 P1: 旧版 Math.max(1, Math.ceil(...)) 把过去日期也变成+1天(无法设已过期),
+      // 且无法清除到期时间(不发 expire_days=不改)。改用 round 提高精度 + 允许负数 + 空值发0。
       if (form.expireAt) {
         const diffMs = new Date(form.expireAt).getTime() - Date.now()
-        payload.expire_days = Math.max(1, Math.ceil(diffMs / (24 * 3600 * 1000)))
+        payload.expire_days = Math.round(diffMs / (24 * 3600 * 1000))
+      } else if (editing.value) {
+        // 编辑时清空到期时间 → 发 0 清除(创建时不发, 默认不限)
+        payload.expire_days = 0
       }
       if (editing.value) {
         if (form.password) payload.password = form.password

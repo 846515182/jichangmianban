@@ -273,9 +273,14 @@ func (h *AdminNodeHandler) NodeCreate(c *gin.Context) {
 // NodeDetail GET /api/v1/admin/nodes/:id
 // 获取单个节点详情(部署前校验/编辑回显等场景需要)
 //
-// P0-N8: 返回前清空敏感字段, 防止 NodeDetail 接口泄露 node_token 和
-// reality.private_key_enc。NodeList 已隐藏 token, 但 NodeDetail 之前未做处理,
-// 越权/中间人可拿到 token 后冒充节点上报流量或拉取用户凭证。
+// 安全说明: NodeList(列表) 已隐藏 node_token 防止批量泄露, 但 NodeDetail 是
+// 管理员单查场景(查看部署信息/编辑回显), 需要返回完整 node_token 和 server_config:
+//   - 部署信息弹窗生成 .env.node 需要 NODE_TOKEN, 否则 agent 注册失败死循环
+//   - parseRealityInfo 从 server_config 提取 public_key/short_id 供部署命令展示
+//
+// 路由层已有 AdminAuth 中间件保护, 非管理员无法访问。
+// 旧版 P0-N8 清空了 node_token/server_config, 导致前端部署信息弹窗
+// NODE_TOKEN 永远为空, 管理员复制的部署命令无法注册节点。
 func (h *AdminNodeHandler) NodeDetail(c *gin.Context) {
 	id := c.Param("id")
 	node, err := h.nodeRepo.GetByID(id)
@@ -287,10 +292,7 @@ func (h *AdminNodeHandler) NodeDetail(c *gin.Context) {
 		response.Fail(c, response.CodeDBError)
 		return
 	}
-	// 清空敏感字段: node_token 是节点身份凭证, ServerConfig 含 reality.private_key_enc
-	// (管理员如需查看完整配置, 应走专门的 GetDecryptedRealityPrivateKey 接口并加 RBAC)
-	node.NodeToken = ""
-	node.ServerConfig = nil
+	// 保留完整字段: 管理员单查场景需要 node_token 和 server_config 生成部署信息
 	response.OK(c, node)
 }
 

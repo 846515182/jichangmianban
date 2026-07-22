@@ -42,17 +42,23 @@
         <div class="np-card section-card">
           <div class="section-title"><el-icon><Link /></el-icon> 订阅配置</div>
           <el-form label-width="130px" label-position="right">
-            <el-form-item label="订阅域名">
-              <el-input v-model="subscribe.domain" placeholder="sub.example.com" />
+            <el-form-item label="订阅基础URL">
+              <el-input v-model="subscribe.sub_base_url" placeholder="https://sub.example.com" />
             </el-form-item>
-            <el-form-item label="订阅端口">
-              <el-input-number v-model="subscribe.port" :min="1" :max="65535" controls-position="right" style="width: 100%" />
+            <el-form-item label="订阅前缀">
+              <el-input v-model="subscribe.sub_prefix" placeholder="如 nexus" />
             </el-form-item>
-            <el-form-item label="HTTPS">
-              <el-switch v-model="subscribe.https" />
+            <el-form-item label="订阅后缀">
+              <el-input v-model="subscribe.sub_suffix" placeholder="如 clash" />
+            </el-form-item>
+            <el-form-item label="订阅信息">
+              <el-input v-model="subscribe.sub_info" placeholder="订阅显示信息" />
+            </el-form-item>
+            <el-form-item label="显示节点信息">
+              <el-switch v-model="subscribe.show_node_info" />
             </el-form-item>
             <el-form-item label="默认格式">
-              <el-select v-model="subscribe.defaultFormat" style="width: 100%">
+              <el-select v-model="subscribe.default_sub_type" style="width: 100%">
                 <el-option label="Clash" value="clash" />
                 <el-option label="Sing-Box" value="singbox" />
                 <el-option label="V2Ray" value="v2ray" />
@@ -369,8 +375,15 @@ const security = reactive({
   hmacKey: '',
 })
 
+// 订阅配置: 字段名与后端 SubConfig 白名单对齐(sub_base_url/sub_prefix/sub_suffix/sub_info/show_node_info/default_sub_type)
+// 旧版用 domain/port/https/defaultFormat, 后端白名单不认, 保存必定 400
 const subscribe = reactive({
-  domain: 'sub.nexus.dev', port: 443, https: true, defaultFormat: 'clash',
+  sub_base_url: '',
+  sub_prefix: '',
+  sub_suffix: '',
+  sub_info: '',
+  show_node_info: false,
+  default_sub_type: 'clash',
 })
 
 const backups = ref<any[]>([])
@@ -411,6 +424,22 @@ const saveSubscribe = async () => {
   } catch {
     // 拦截器已弹错误
   } finally { savingSub.value = false }
+}
+
+// 加载已保存的订阅配置回显
+const loadSubConfig = async () => {
+  try {
+    const res: any = await request.get('/api/v1/admin/system/sub-config')
+    if (res && res.code === 0 && res.data) {
+      const d = res.data
+      subscribe.sub_base_url = d.sub_base_url || ''
+      subscribe.sub_prefix = d.sub_prefix || ''
+      subscribe.sub_suffix = d.sub_suffix || ''
+      subscribe.sub_info = d.sub_info || ''
+      subscribe.show_node_info = !!d.show_node_info
+      subscribe.default_sub_type = d.default_sub_type || 'clash'
+    }
+  } catch { /* 拦截器已提示 */ }
 }
 
 // 加载已保存的支付配置
@@ -875,6 +904,7 @@ const diskCleanup = async () => {
 
 
 onMounted(() => {
+  loadSubConfig()
   loadPaymentConfig()
   loadBackups()
   loadGitStatus()

@@ -15,7 +15,7 @@
         </div>
       </div>
 
-      <el-table :data="pagedList" stripe v-loading="loading">
+      <el-table :data="list" stripe v-loading="loading">
         <el-table-column prop="id" label="工单号" width="90" />
         <el-table-column prop="subject" label="主题" min-width="200" />
         <el-table-column prop="username" label="提交用户" width="120" />
@@ -44,17 +44,15 @@
         </el-table-column>
       </el-table>
 
-      <!-- 修复 P1-FE8: 旧版无分页组件, 工单多了之后表格无限长, 无法快速翻页。
-           后端 /api/v1/admin/tickets 暂未支持 page/size 参数, 这里用前端分页(slice 当前列表),
-           后端支持分页参数后可改为后端分页(传 page/size 给接口, 替换 pagedList 为 list)。
-           TODO: 后端 ListTickets 支持 page/size 后改为后端分页, 移除 pagedList 切片逻辑。 -->
+      <!-- 后端分页: 传 page/size/status 给接口, 切换筛选/翻页都重新请求 -->
       <div class="pagination-wrap">
         <el-pagination
           v-model:current-page="currentPage"
           :page-size="pageSize"
-          :total="totalTickets"
+          :total="total"
           layout="prev, pager, next, total"
           background
+          @current-change="fetchList"
         />
       </div>
     </div>
@@ -92,7 +90,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, watch, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import request from '@/utils/request'
 import { formatTime } from '@/utils/format'
@@ -113,20 +111,15 @@ const loading = ref(false)
 const statusFilter = ref('')
 const list = ref<TicketRow[]>([])
 
-// 修复 P1-FE8: 分页状态(前端分页, 因后端 /admin/tickets 暂未支持 page/size)
+// 后端分页: 传 page/size/status 给 /api/v1/admin/tickets
 const currentPage = ref(1)
 const pageSize = ref(20)
+const total = ref(0)
 
-const filteredList = computed(() => {
-  if (!statusFilter.value) return list.value
-  return list.value.filter((t) => t.status === statusFilter.value)
-})
-
-// 当前页展示数据(slice 当前列表), 总数取 filteredList.length 以联动状态筛选
-const totalTickets = computed(() => filteredList.value.length)
-const pagedList = computed(() => {
-  const start = (currentPage.value - 1) * pageSize.value
-  return filteredList.value.slice(start, start + pageSize.value)
+// 状态筛选变化时回到第1页重新请求
+watch(statusFilter, () => {
+  currentPage.value = 1
+  fetchList()
 })
 
 // el-tag 标签类型
@@ -188,29 +181,37 @@ const handleReply = async () => {
 const closeTicket = async (row: any) => {
   try {
     await request.post(`/api/v1/admin/tickets/${row.id}/close`)
-    row.status = 'closed'
     ElMessage.success('工单已关闭')
+    fetchList()
   } catch (e: any) {
     ElMessage.error(e?.message || '关闭失败')
   }
 }
 
-onMounted(async () => {
+// 后端分页加载工单列表
+const fetchList = async () => {
   loading.value = true
   try {
-    const res: any = await request.get('/api/v1/admin/tickets')
-    if (res && res.data && Array.isArray(res.data.list)) {
-      list.value = res.data.list
-    } else if (res && Array.isArray(res.data)) {
-      list.value = res.data
-    } else if (Array.isArray(res)) {
-      list.value = res
+    const res: any = await request.get('/api/v1/admin/tickets', {
+      params: {
+        page: currentPage.value,
+        size: pageSize.value,
+        status: statusFilter.value || undefined,
+      },
+    })
+    if (res && res.data) {
+      list.value = res.data.list || []
+      total.value = res.data.total || 0
     }
-  } catch (e: any) {
-    ElMessage.error(e?.message || '加载工单列表失败')
+  } catch {
+    /* 拦截器已提示 */
   } finally {
     loading.value = false
   }
+}
+
+onMounted(() => {
+  fetchList()
 })
 </script>
 

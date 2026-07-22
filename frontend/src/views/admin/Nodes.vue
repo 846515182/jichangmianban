@@ -702,6 +702,7 @@ const form = reactive({
   protocol: 'vless',
   server_address: '',
   port: 443,
+  grpc_port: 50051,
   plan_ids: [] as string[],
   trafficLimitGB: 0,
   sshPassword: '',
@@ -724,6 +725,8 @@ const openDialog = (row?: NodeRow) => {
       protocol: row.protocol,
       server_address: row.server_address,
       port: row.port,
+      // 回填 grpc_port, 避免保存时被硬编码 50051 覆盖导致 agent 连不上面板
+      grpc_port: row.grpc_port || 50051,
       plan_ids: row.plan_ids ? [...row.plan_ids] : [],
       trafficLimitGB: row.traffic_limit ? Math.round(row.traffic_limit / 1024 / 1024 / 1024 * 100) / 100 : 0,
       // 安全: 编辑节点时清空密码, 避免上次添加节点时的密码缓存
@@ -737,6 +740,7 @@ const openDialog = (row?: NodeRow) => {
       protocol: 'vless',
       server_address: '',
       port: 443,
+      grpc_port: 50051,
       plan_ids: [],
       trafficLimitGB: 0,
       sshPassword: '',
@@ -752,25 +756,28 @@ const handleSave = async () => {
     if (!valid) return
     saving.value = true
     try {
-      const payload = {
+      const payload: any = {
         name: form.name,
         country_code: form.country_code,
         protocol: form.protocol,
         server_address: form.server_address,
         port: form.port,
-        grpc_port: 50051,
+        grpc_port: form.grpc_port,
         plan_ids: form.plan_ids,
-        traffic_limit: Math.floor(form.trafficLimitGB * 1024 * 1024 * 1024),
-        extra_config: {
-          reality: { dest: 'gateway.icloud.com:443', sni: 'gateway.icloud.com' },
-        },
+        // 修复 P1: 保存用 Math.round 与编辑回填一致, Math.floor 会向下漂移
+        traffic_limit: Math.round(form.trafficLimitGB * 1024 * 1024 * 1024),
       }
       if (editing.value) {
+        // 编辑模式: 不发送 extra_config, 避免覆盖节点原有 REALITY dest/sni 配置
         await request.put(`/api/v1/admin/nodes/${editing.value.id}`, payload)
         ElMessage.success('节点已更新')
         dialogVisible.value = false
         await fetchList()
       } else {
+        // 创建模式: 发送默认 REALITY 配置
+        payload.extra_config = {
+          reality: { dest: 'gateway.icloud.com:443', sni: 'gateway.icloud.com' },
+        }
         const res = await request.post<ApiResponse<NodeRow>>('/api/v1/admin/nodes', payload)
         if (res && res.code === 0 && res.data) {
           ElMessage.success('节点已创建')
