@@ -42,6 +42,10 @@ type Agent struct {
 	xray    *XrayManager
 	traffic *TrafficCounter
 
+	// 用户级流量统计（Xray StatsService）
+	trafficStats *UserTraffic
+	apiPort      int // Xray API 端口
+
 	startTime time.Time
 
 	// 注册后从面板拿到的节点信息
@@ -151,6 +155,9 @@ func main() {
 		}
 	}
 	agent.xray = xm
+	// 初始化用户级流量统计器（Xray API 端口: 10085）
+	agent.apiPort = defaultXrayAPIPort
+	agent.trafficStats = NewUserTraffic(xm.BinaryPath(), agent.apiPort)
 	if err := xm.EnsureBinary(); err != nil {
 		log.Printf("警告: 准备 Xray 二进制失败(将继续尝试): %v", err)
 	}
@@ -406,6 +413,14 @@ func (a *Agent) applyConfig() error {
 	finalCfg, err := OverrideListenPort(cfgJSON, listenPort)
 	if err != nil {
 		return fmt.Errorf("覆盖监听端口失败: %w", err)
+	}
+
+	// 注入 Xray Stats/API 配置，启用用户级流量统计
+	statsCfg, err := InjectStatsConfig(finalCfg, a.apiPort)
+	if err != nil {
+		log.Printf("[WARN] 注入 Stats 配置失败(不影响代理功能): %v", err)
+	} else {
+		finalCfg = statsCfg
 	}
 
 	if err := a.xray.WriteConfig(finalCfg); err != nil {
@@ -688,20 +703,50 @@ func (a *Agent) doTrafficReport() {
 	if atomic.LoadInt32(&a.fatalShutdown) == 1 {
 		return
 	}
+
+	nodeID := a.getNodeID()
+	nodeToken := a.cfg.NodeToken
+
+	// 方案1: 通过 Xray StatsService 获取用户级流量增量（精确）
+	if a.trafficStats != nil {
+		deltas, err := a.trafficStats.QueryDelta()
+		if err != nil {
+			log.Printf("[traffic] Xray Stats 查询失败: %v (跳过本轮上报)", err)
+		} else if len(deltas) > 0 {
+			// 转换为 proto TrafficRecord 并上报
+			records := make([]*proto.TrafficRecord, 0, len(deltas))
+			for _, d := range deltas {
+				records = append(records, &proto.TrafficRecord{
+					UserId:        d.UserID,
+					UploadBytes:   d.Upload,
+					DownloadBytes: d.Download,
+				})
+			}
+			resp, err := a.client.ReportRealtime(nodeID, nodeToken, records)
+			if err != nil {
+				log.Printf("[traffic] 上报流量失败(%d 条记录): %v", len(records), err)
+			} else {
+				r := resp.GetResp()
+				if r != nil && r.GetCode() != 0 {
+					log.Printf("[traffic] 上报流量被拒(%d 条记录): code=%d msg=%s",
+						len(records), r.GetCode(), r.GetMessage())
+				} else {
+					log.Printf("[traffic] 上报成功: %d 个用户, 共 %d 条流量记录",
+						len(deltas), len(records))
+				}
+			}
+			return // Xray Stats 成功上报后不再走节点级流量兜底
+		}
+	}
+
+	// 方案2(兜底): 节点级 /proc/net/dev 流量汇总（仅在 Xray Stats 不可用时）
 	upload, download := a.traffic.Peek()
 	if upload == 0 && download == 0 {
-		return // 无流量变化不上报
+		return
 	}
-	nodeID := a.getNodeID()
-	now := time.Now().Unix()
-	// 修复: 移除 "node:"+nodeID 聚合流量上报 — 面板后端已撤销聚合流量分发逻辑,
-	// 不再接受非 UUID 格式的 user_id, "node:xxx" 会被跳过并产生告警日志。
-	// 当前 agent 仅统计节点级总流量, 无用户维度, 暂不上报。
-	// TODO: 后续实现用户级流量统计后, 按真实 user_id 上报。
-	_ = nodeID
-	_ = now
-	// 消费增量避免内存堆积
+	// 节点级流量作为兜底，以 node_id 为 user_id 上报（面板后端已不处理此格式，仅消费增量避免内存堆积）
 	a.traffic.Commit(upload, download)
+	log.Printf("[traffic] 节点级流量(兜底,未上报): upload=%d download=%d", upload, download)
 }
 
 // getNodeID / getConfigVer 并发安全读取

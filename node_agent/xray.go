@@ -22,6 +22,9 @@ import (
 const (
 	defaultXrayDir    = "/app/xray"
 	defaultConfigPath = "/app/config.json"
+	// defaultXrayAPIPort Xray API 监听端口（用于 statsquery 查询用户级流量）。
+	// 该端口独立于代理端口，仅监听 127.0.0.1，不对外暴露。
+	defaultXrayAPIPort = 10085
 )
 
 // XrayManager 管理 Xray-core 二进制下载与进程生命周期
@@ -142,6 +145,7 @@ func (m *XrayManager) downloadXray() error {
 //   - "SHA256(filename.zip)= <hex>"
 //   - "SHA2-256=filename.zip=<hex>"
 //   - 行内含 "SHA256" / "SHA2-256" 且行尾有 64 位 hex
+//
 // 若未找到返回空字符串
 func extractSHA256(dgstContent string) string {
 	for _, line := range strings.Split(dgstContent, "\n") {
@@ -269,6 +273,114 @@ func OverrideListenPort(cfgJSON string, listenPort int) (string, error) {
 	return string(out), nil
 }
 
+// InjectStatsConfig 向 Xray 配置 JSON 中注入 stats 和 api 配置，使 Xray 启用用户级流量统计
+// 并通过本地 API 端口暴露 StatsService。
+//
+// 注入内容:
+//   - "stats": {} — 启用统计模块
+//   - "api": {"tag": "api", "services": ["StatsService"]} — 启用 API 模块
+//   - "policy": 添加 statsUserUplink/Downlink — 启用用户级流量计数
+//   - inbounds: 添加 dokodemo-door inbound 监听 127.0.0.1:apiPort — API 入口
+//   - routing: 添加 rule 将 api inbound 流量路由到 api outbound
+//
+// 如果配置已包含 stats 段则跳过注入（幂等）。
+func InjectStatsConfig(cfgJSON string, apiPort int) (string, error) {
+	if cfgJSON == "" {
+		return "", fmt.Errorf("配置为空")
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal([]byte(cfgJSON), &cfg); err != nil {
+		return "", fmt.Errorf("解析 Xray 配置 JSON 失败: %w", err)
+	}
+
+	// 幂等：已有 stats 配置则跳过
+	if _, hasStats := cfg["stats"]; hasStats {
+		log.Printf("[xray] 配置已包含 stats 段，跳过注入")
+		return cfgJSON, nil
+	}
+
+	cfg["stats"] = map[string]interface{}{}
+	cfg["api"] = map[string]interface{}{
+		"tag":      "api",
+		"services": []string{"StatsService"},
+	}
+
+	policy, _ := cfg["policy"].(map[string]interface{})
+	if policy == nil {
+		policy = map[string]interface{}{}
+		cfg["policy"] = policy
+	}
+	levels, _ := policy["levels"].(map[string]interface{})
+	if levels == nil {
+		levels = map[string]interface{}{
+			"0": map[string]interface{}{
+				"statsUserUplink":   true,
+				"statsUserDownlink": true,
+			},
+		}
+		policy["levels"] = levels
+	}
+	system, _ := policy["system"].(map[string]interface{})
+	if system == nil {
+		system = map[string]interface{}{
+			"statsInboundUplink":   true,
+			"statsInboundDownlink": true,
+		}
+		policy["system"] = system
+	}
+
+	var inbounds []interface{}
+	if raw, ok := cfg["inbounds"].([]interface{}); ok {
+		inbounds = raw
+	}
+	apiInbound := map[string]interface{}{
+		"tag":      "api",
+		"listen":   "127.0.0.1",
+		"port":     apiPort,
+		"protocol": "dokodemo-door",
+		"settings": map[string]interface{}{
+			"address": "127.0.0.1",
+		},
+	}
+	inbounds = append([]interface{}{apiInbound}, inbounds...)
+	cfg["inbounds"] = inbounds
+
+	var outbounds []interface{}
+	if raw, ok := cfg["outbounds"].([]interface{}); ok {
+		outbounds = raw
+	}
+	outbounds = append(outbounds, map[string]interface{}{
+		"tag":      "api",
+		"protocol": "freedom",
+		"settings": map[string]interface{}{},
+	})
+	cfg["outbounds"] = outbounds
+
+	routing, _ := cfg["routing"].(map[string]interface{})
+	if routing == nil {
+		routing = map[string]interface{}{}
+		cfg["routing"] = routing
+	}
+	var rules []interface{}
+	if raw, ok := routing["rules"].([]interface{}); ok {
+		rules = raw
+	}
+	apiRule := map[string]interface{}{
+		"type":        "field",
+		"inboundTag":  []string{"api"},
+		"outboundTag": "api",
+	}
+	rules = append([]interface{}{apiRule}, rules...)
+	routing["rules"] = rules
+
+	out, err := json.Marshal(cfg)
+	if err != nil {
+		return "", fmt.Errorf("重新序列化 stats 注入配置失败: %w", err)
+	}
+	log.Printf("[xray] Stats/API 配置已注入 (api_port=%d)", apiPort)
+	return string(out), nil
+}
+
 // WriteConfig 写入 Xray 配置文件
 // P1-AG7: 原子写 — 先写到 configPath.tmp, 再 rename, 避免写一半进程崩溃导致配置文件损坏
 // (原实现直接 WriteFile, 进程在写中途崩溃会留下半截 JSON, Xray 启动解析失败)
@@ -288,6 +400,11 @@ func (m *XrayManager) IsRunning() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.cmd != nil
+}
+
+// BinaryPath 返回 Xray 二进制路径
+func (m *XrayManager) BinaryPath() string {
+	return m.binaryPath
 }
 
 // Start 启动 Xray 进程(若已在运行则跳过)
