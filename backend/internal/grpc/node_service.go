@@ -495,16 +495,14 @@ func (s *NodeServiceServer) buildXrayConfig(node *model.Node, users []model.User
 	}
 
 	// clients: 每个用户一条，UUID=user.id，flow=xtls-rprx-vision
-	// [动态限速] 限速值由 LoadScorer 按用途+负载自动计算, 不用手动设
-	// 所有用 level=1, policy.levels.1 配动态限速值; 用途为 download 时不限速
+	// [动态限速] 开关开启(usage_type=="limited")时, 限速值由 LoadScorer 按负载自动计算
+	// 保证每人能聊天+刷短视频, 看不了4K, 下载被限慢。无需手动设值, 也无需域名拦截。
 	clientLevel := 0
-	// 优先用动态限速(从 Redis 缓存读), 若管理员手动设了 SpeedLimitMbps 则用手动值(兼容)
 	dynLimit := 0
-	if s.loadScorer != nil {
+	if s.loadScorer != nil && node.UsageType == "limited" {
 		dynLimit = s.loadScorer.GetDynamicLimitFromCache(context.Background(), node.ID)
 	}
-	// 限速生效条件: 动态限速>0 或 手动限速>0, 且用途不是 download(下载不限速)
-	applyLimit := (dynLimit > 0 || node.SpeedLimitMbps > 0) && node.UsageType != "download"
+	applyLimit := dynLimit > 0
 	if applyLimit {
 		clientLevel = 1
 	}
@@ -554,105 +552,30 @@ func (s *NodeServiceServer) buildXrayConfig(node *model.Node, users []model.User
 		},
 		"outbounds": []map[string]interface{}{
 			{"protocol": "freedom", "tag": "direct"},
-			// [节点策略控制] block outbound: 用于路由规则拦截视频/下载流量
-			{"protocol": "blackhole", "tag": "block"},
 		},
 	}
 
-	// [动态限速] 限速值优先级: 动态计算 > 手动设置 > 不限速
-	// 动态限速由 LoadScorer 心跳时按用途+负载自动算, 写入 Redis 缓存
-	// 这里从缓存读, 生成 Xray policy 配置
+	// [动态限速] 开启时生成 Xray policy 配置
+	// 限速值由 LoadScorer 心跳时按负载自动算(8/5/3/1 Mbps), 写入 Redis 缓存
+	// 限速自然实现: 刷短视频(3-5Mbps)够, 4K(25Mbps+)看不了, 下载被限慢
 	if applyLimit {
-		limitMbps := dynLimit
-		if limitMbps <= 0 {
-			limitMbps = node.SpeedLimitMbps // 回退到手动值
-		}
-		if limitMbps > 0 {
-			// Mbps → bytes/s (Xray policy bufferSize 单位)
-			ratePerSec := int64(limitMbps) * 1000 * 1000 / 8
-			xray["policy"] = map[string]interface{}{
-				"levels": map[string]interface{}{
-					"0": map[string]interface{}{"bufferSize": 0},
-					"1": map[string]interface{}{
-						"bufferSize":     ratePerSec,
-						"headerLimit":    ratePerSec,
-						"uplinkOnly":     0,
-						"downlinkOnly":   0,
-						"refreshSizeSec": ratePerSec,
-					},
+		// Mbps → bytes/s (Xray policy bufferSize 单位)
+		ratePerSec := int64(dynLimit) * 1000 * 1000 / 8
+		xray["policy"] = map[string]interface{}{
+			"levels": map[string]interface{}{
+				"0": map[string]interface{}{"bufferSize": 0},
+				"1": map[string]interface{}{
+					"bufferSize":     ratePerSec,
+					"headerLimit":    ratePerSec,
+					"uplinkOnly":     0,
+					"downlinkOnly":   0,
+					"refreshSizeSec": ratePerSec,
 				},
-			}
-		}
-	}
-
-	// [节点策略控制] 用途路由: 根据节点 usage_type 添加路由规则
-	// browsing(仅浏览): 拦截视频流媒体 + 大文件下载
-	// video(视频): 允许视频流媒体, 拦截大文件下载
-	// download(允许下载): 无限制
-	// general(通用): 无限制
-	routingRules := buildUsageRoutingRules(node.UsageType)
-	if len(routingRules) > 0 {
-		xray["routing"] = map[string]interface{}{
-			"domainStrategy": "AsIs",
-			"rules":          routingRules,
+			},
 		}
 	}
 
 	return json.Marshal(xray)
-}
-
-// buildUsageRoutingRules 根据节点用途类型生成 Xray 路由规则
-// 用于限制节点用途(仅浏览/视频/下载), 实现线路分级运营
-func buildUsageRoutingRules(usageType string) []map[string]interface{} {
-	switch usageType {
-	case "browsing":
-		// 仅浏览: 拦截视频流媒体 + 大文件下载
-		// 视频域名: youtube/netflix/bilibili/iqiyi/tencent video 等
-		// 下载域名: 大型 CDN/网盘
-		return []map[string]interface{}{
-			{
-				"type":        "field",
-				"outboundTag": "block",
-				"domain": []string{
-					// 视频流媒体
-					"youtube.com", "googlevideo.com", "ytimg.com",
-					"netflix.com", "nflxvideo.net", "nflximg.net",
-					"bilibili.com", "bilivideo.com", "bilivideo.cn",
-					"iqiyi.com", "iq.com",
-					"v.qq.com", "wetv.vip",
-					"youku.com", "mgtv.com",
-					"disneyplus.com", "hbomax.com", "hulu.com",
-					"primevideo.com", "twitch.tv",
-					// 下载/网盘
-					"pan.baidu.com", "aliyundrive.net", "alipan.com",
-					"onedrive.live.com",
-					// 大文件 CDN
-					"github.com", "objects.githubusercontent.com",
-					"release-assets.com",
-				},
-			},
-		}
-	case "video":
-		// 视频: 允许视频流媒体, 拦截大文件下载
-		return []map[string]interface{}{
-			{
-				"type":        "field",
-				"outboundTag": "block",
-				"domain": []string{
-					// 下载/网盘(允许视频但禁止下载大文件)
-					"pan.baidu.com", "aliyundrive.net", "alipan.com",
-					"onedrive.live.com",
-					"github.com", "objects.githubusercontent.com",
-					"release-assets.com",
-				},
-			},
-		}
-	case "download", "general", "":
-		// 允许下载/通用: 无限制
-		return nil
-	default:
-		return nil
-	}
 }
 
 // protocolToProto 字符串协议名转 proto 枚举

@@ -60,10 +60,10 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="用途" width="90">
+        <el-table-column label="动态限速" width="100">
           <template #default="{ row }">
-            <el-tag size="small" :type="usageTagType(row.usage_type)" effect="plain">
-              {{ usageText(row.usage_type) }}
+            <el-tag size="small" :type="row.usage_type === 'limited' ? 'warning' : 'info'" effect="plain">
+              {{ row.usage_type === 'limited' ? '已开启' : '关闭' }}
             </el-tag>
           </template>
         </el-table-column>
@@ -165,7 +165,7 @@
             <div class="nc-title-wrap">
               <span class="nc-name">{{ row.name }}</span>
               <el-tag size="small" effect="dark" :type="protocolTagType(row.protocol)">{{ (row.protocol || 'vless').toUpperCase() }}</el-tag>
-              <el-tag size="small" :type="usageTagType(row.usage_type)" effect="plain">{{ usageText(row.usage_type) }}</el-tag>
+              <el-tag size="small" :type="row.usage_type === 'limited' ? 'warning' : 'info'" effect="plain">{{ row.usage_type === 'limited' ? '动态限速' : '不限速' }}</el-tag>
               <el-tag size="small" :type="loadStatusTagType(row.load_status)" effect="dark">{{ loadStatusText(row.load_status) }}</el-tag>
               <el-tag size="small" :type="row.is_enabled ? 'success' : 'info'" effect="plain">{{ row.is_enabled ? '启用' : '停用' }}</el-tag>
             </div>
@@ -293,19 +293,15 @@
           <el-input-number v-model="form.cpuThreshold" :min="1" :max="100" controls-position="right" style="width:100%" />
           <div style="font-size:12px;color:#909399">CPU超过此阈值视为满载，默认80</div>
         </el-form-item>
-        <el-form-item label="用途类型">
-          <el-select v-model="form.usageType" style="width:100%">
-            <el-option label="通用(无限制)" value="general" />
-            <el-option label="仅浏览(禁视频/下载)" value="browsing" />
-            <el-option label="视频流媒体(禁下载)" value="video" />
-            <el-option label="允许下载(无限制)" value="download" />
-          </el-select>
+        <el-form-item label="动态限速">
+          <el-switch v-model="form.dynamicLimit" active-text="开启" inactive-text="关闭" />
           <div style="font-size:12px;color:#909399">
-            控制节点用途。系统根据用途自动动态限速：<br/>
-            • 仅浏览：基础 5Mbps（空闲时7.5，繁忙时3，够看网页不够看视频）<br/>
-            • 视频流媒体：基础 20Mbps（空闲时30，繁忙时12，保证1080P）<br/>
-            • 允许下载/通用：不限速或高带宽<br/>
-            限速值随节点实时负载自动调整，无需手动设置
+            开启后系统自动检测节点负载并动态调整单用户限速：<br/>
+            • 空闲：8 Mbps（刷短视频流畅，4K看不了）<br/>
+            • 正常：5 Mbps（刷短视频够用）<br/>
+            • 繁忙：3 Mbps（聊天+低清短视频）<br/>
+            • 满载：1 Mbps（仅保证聊天浏览）<br/>
+            保证每人能聊天、刷短视频，看不了4K，下载被限慢
           </div>
         </el-form-item>
         <el-divider content-position="left">一键自动部署（可选）</el-divider>
@@ -723,15 +719,9 @@ const loadStatusTagType = (s: string): any => {
   const map: Record<string, string> = { idle: 'success', normal: '', busy: 'warning', full: 'danger' }
   return map[s] || 'success'
 }
-// 节点用途标签: general 通用 / browsing 仅浏览 / video 视频 / download 下载
-const usageText = (t: string) => {
-  const map: Record<string, string> = { general: '通用', browsing: '仅浏览', video: '视频', download: '下载' }
-  return map[t] || '通用'
-}
-const usageTagType = (t: string): any => {
-  const map: Record<string, string> = { general: '', browsing: 'info', video: 'warning', download: 'success' }
-  return map[t] || ''
-}
+// 节点动态限速状态: limited 开启 / general 关闭
+const usageText = (t: string) => (t === 'limited' ? '动态限速' : '不限速')
+const usageTagType = (t: string): any => (t === 'limited' ? 'warning' : 'info')
 
 // 套餐名称查找(用于表格显示绑定的套餐名)
 const planName = (pid: string): string => {
@@ -782,7 +772,7 @@ const form = reactive({
   maxClients: 0,
   maxBandwidthMbps: 0,
   cpuThreshold: 80,
-  usageType: "general",
+  dynamicLimit: false,
   sshPassword: '',
   sshPort: 22,
 })
@@ -810,7 +800,7 @@ const openDialog = (row?: NodeRow) => {
       maxClients: row.max_clients || 0,
       maxBandwidthMbps: row.max_bandwidth_mbps || 0,
       cpuThreshold: row.cpu_threshold || 80,
-      usageType: row.usage_type || "general",
+      dynamicLimit: row.usage_type === "limited",
       // 安全: 编辑节点时清空密码, 避免上次添加节点时的密码缓存
       sshPassword: '',
       sshPort: 22,
@@ -828,7 +818,7 @@ const openDialog = (row?: NodeRow) => {
       maxClients: 0,
       maxBandwidthMbps: 0,
       cpuThreshold: 80,
-      usageType: "general",
+      dynamicLimit: false,
       sshPassword: '',
       sshPort: 22,
     })
@@ -856,7 +846,7 @@ const handleSave = async () => {
         max_clients: form.maxClients,
         max_bandwidth_mbps: form.maxBandwidthMbps,
         cpu_threshold: form.cpuThreshold,
-        usage_type: form.usageType,
+        usage_type: form.dynamicLimit ? "limited" : "general",
       }
       if (editing.value) {
         // 编辑模式: 不发送 extra_config, 避免覆盖节点原有 REALITY dest/sni 配置

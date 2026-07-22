@@ -184,56 +184,38 @@ func (s *LoadScorer) UpdateNodeLoadStatus(ctx context.Context, node *model.Node,
 	return score, nil
 }
 
-// 用途类型对应的基础限速(Mbps)
-// 管理员只选用途, 系统按用途定基础速度, 再按负载动态调整
-const (
-	BaseSpeedBrowsing = 5   // 仅浏览: 够看网页, 不够看视频
-	BaseSpeedVideo    = 20  // 视频: 够1080P(需8-12Mbps)
-	BaseSpeedDownload = 100 // 下载: 大带宽
-	BaseSpeedGeneral  = 50  // 通用: 中等
-)
+// 动态限速基础速度(Mbps)
+// 设计目标: 保证每人能聊天+刷短视频(TikTok 480P/720P 需3-5Mbps),
+// 看不了4K(需25Mbps+), 下载被限慢。管理员只需开关, 系统按负载自动调。
+const BaseSpeedDynamic = 8 // 空闲时上限: 刷短视频流畅, 4K看不了
 
-// CalcDynamicSpeedLimit 根据用途 + 负载评分动态计算单用户限速(Mbps)
-// 管理员不手动设限速值, 系统自动按用途+负载自适应:
-//   - 用途决定基础速度: browsing=5/video=20/download=100/general=50 Mbps
-//   - 负载动态调整:
-//     空闲(score<0.3): 基础×1.5  (放宽,鼓励使用)
-//     正常(0.3~0.6):   基础      (标准)
-//     繁忙(0.6~0.85):  基础×0.6  (收紧,保护体验)
-//     满载(>=0.85):    基础×0.3  (严格限速)
+// CalcDynamicSpeedLimit 根据动态限速开关 + 负载评分计算单用户限速(Mbps)
+// 仅当节点开启动态限速(usage_type=="limited")时生效:
+//   - 空闲(score<0.3): 8 Mbps  (刷短视频流畅, 4K看不了)
+//   - 正常(0.3~0.6):   5 Mbps  (刷短视频够用)
+//   - 繁忙(0.6~0.85):  3 Mbps  (聊天+低清短视频)
+//   - 满载(>=0.85):    1 Mbps  (仅保证聊天浏览)
 //   - 若配了 MaxBandwidthMbps, 还要保证: 限速 <= 总带宽/连接数(均分)
 //
-// 返回 0 表示不限速(未配用途或下载满载时仍给较高速度)
+// 返回 0 表示不限速(未开启动态限速)
 func CalcDynamicSpeedLimit(node *model.Node, score LoadScore, snap *HeartbeatSnapshot) int {
-	// 基础速度按用途定
-	base := BaseSpeedGeneral
-	switch node.UsageType {
-	case "browsing":
-		base = BaseSpeedBrowsing
-	case "video":
-		base = BaseSpeedVideo
-	case "download":
-		base = BaseSpeedDownload
-	case "general", "":
-		base = BaseSpeedGeneral
-	default:
-		base = BaseSpeedGeneral
+	// 未开启动态限速 → 不限速
+	if node.UsageType != "limited" {
+		return 0
 	}
 
-	// 负载动态调整系数
-	var factor float64
+	// 负载分级限速: 空闲8 / 正常5 / 繁忙3 / 满载1
+	var limit int
 	switch {
 	case score.Score < 0.3:
-		factor = 1.5 // 空闲: 放宽
+		limit = 8 // 空闲: 刷短视频流畅, 4K看不了
 	case score.Score < 0.6:
-		factor = 1.0 // 正常: 标准
+		limit = 5 // 正常: 刷短视频够用
 	case score.Score < 0.85:
-		factor = 0.6 // 繁忙: 收紧
+		limit = 3 // 繁忙: 聊天+低清短视频
 	default:
-		factor = 0.3 // 满载: 严格
+		limit = 1 // 满载: 仅保证聊天浏览
 	}
-
-	limit := int(float64(base) * factor)
 
 	// 若配了带宽上限, 保证均分: 单用户限速 <= 总带宽 / 当前连接数
 	if node.MaxBandwidthMbps > 0 && snap != nil && snap.OnlineConnections > 0 {

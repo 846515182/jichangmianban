@@ -264,7 +264,7 @@ type nodeCreateInput struct {
 	MaxBandwidthMbps int    `json:"max_bandwidth_mbps"` // 节点带宽上限Mbps, 0=不限
 	CpuThreshold     int    `json:"cpu_threshold"`      // CPU超载阈值%, 默认80
 	SpeedLimitMbps   int    `json:"speed_limit_mbps"`   // 单用户限速Mbps, 0=不限
-	UsageType        string `json:"usage_type"`         // 用途 general/browsing/video/download
+	UsageType        string `json:"usage_type"`         // 动态限速开关 limited(开启)/general(关闭)
 }
 
 // nodeUpdateInput 更新节点请求体
@@ -276,15 +276,14 @@ type nodeUpdateInput struct {
 	MaxBandwidthMbps *int    `json:"max_bandwidth_mbps"` // 节点带宽上限Mbps, 0=不限
 	CpuThreshold     *int    `json:"cpu_threshold"`      // CPU超载阈值%, 默认80
 	SpeedLimitMbps   *int    `json:"speed_limit_mbps"`   // 单用户限速Mbps, 0=不限
-	UsageType        *string `json:"usage_type"`         // 用途 general/browsing/video/download
+	UsageType        *string `json:"usage_type"`         // 动态限速开关 limited(开启)/general(关闭)
 }
 
-// allowedUsageTypes 节点用途白名单
+// allowedUsageTypes 节点动态限速开关白名单
+// limited=开启动态限速(自动按负载限速), general=关闭(不限速)
 var allowedUsageTypes = map[string]bool{
-	"general":  true,
-	"browsing": true,
-	"video":    true,
-	"download": true,
+	"general": true,
+	"limited": true,
 }
 
 // validateNodeCapacityFields 校验并归一化创建请求中的容量/限速/用途字段。
@@ -292,7 +291,7 @@ var allowedUsageTypes = map[string]bool{
 // 约定:
 //   - MaxClients/MaxBandwidthMbps/SpeedLimitMbps: 0=不限, 仅校验非负
 //   - CpuThreshold: 0 视为默认 80, 有效范围 1-100
-//   - UsageType: 空串视为默认 general, 仅允许 general/browsing/video/download
+//   - UsageType: 空串视为默认 general, 仅允许 limited/general
 //   - LoadStatus 由心跳评分自动计算, 不在此处理
 func validateNodeCapacityFields(maxClients, maxBandwidthMbps, cpuThreshold, speedLimitMbps int, usageType string) (int, int, int, int, string, string) {
 	if maxClients < 0 {
@@ -314,7 +313,7 @@ func validateNodeCapacityFields(maxClients, maxBandwidthMbps, cpuThreshold, spee
 		usageType = "general"
 	}
 	if !allowedUsageTypes[usageType] {
-		return 0, 0, 0, 0, "", "usage_type 只允许 general/browsing/video/download"
+		return 0, 0, 0, 0, "", "usage_type 只允许 limited/general"
 	}
 	return maxClients, maxBandwidthMbps, cpuThreshold, speedLimitMbps, usageType, ""
 }
@@ -346,7 +345,7 @@ func validateNodeCapacityFieldsPtr(maxClients *int, maxBandwidthMbps *int, cpuTh
 			v = "general"
 		}
 		if !allowedUsageTypes[v] {
-			return "usage_type 只允许 general/browsing/video/download"
+			return "usage_type 只允许 limited/general"
 		}
 	}
 	return ""

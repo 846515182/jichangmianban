@@ -181,12 +181,12 @@
             </div>
             <div class="nh-footer-row">
               <span class="nh-foot-label">限速</span>
-              <span class="nh-foot-value">{{ node.usage_type === 'download' ? '不限速' : (node.dynamic_limit_mbps || '-') + ' Mbps' }}</span>
+              <span class="nh-foot-value">{{ node.usage_type === 'limited' ? ((node.dynamic_limit_mbps || '-') + ' Mbps') : '未开启' }}</span>
             </div>
             <div class="nh-footer-row">
-              <span class="nh-foot-label">用途</span>
-              <el-tag size="small" :type="usageTagType(node.usage_type)" effect="plain">
-                {{ usageText(node.usage_type) }}
+              <span class="nh-foot-label">动态限速</span>
+              <el-tag size="small" :type="node.usage_type === 'limited' ? 'warning' : 'info'" effect="plain">
+                {{ node.usage_type === 'limited' ? '已开启' : '关闭' }}
               </el-tag>
             </div>
           </div>
@@ -234,7 +234,8 @@ interface MonitorNode {
   server_address: string
   online: boolean
   load_status: string // idle / normal / busy / full
-  usage_type: string // general / browsing / video / download
+  usage_type: string // limited(开启) / general(关闭)
+  dynamic_limit_mbps: number // 当前动态限速值
   max_clients: number
   runtime: NodeRuntime
   [k: string]: any
@@ -307,25 +308,9 @@ const statusTagType = (s: string): any => {
   return map[s] || 'success'
 }
 
-const usageText = (t: string): string => {
-  const map: Record<string, string> = {
-    general: '通用',
-    browsing: '仅浏览',
-    video: '视频',
-    download: '下载',
-  }
-  return map[t] || '通用'
-}
+const usageText = (t: string): string => (t === 'limited' ? '已开启' : '关闭')
 
-const usageTagType = (t: string): any => {
-  const map: Record<string, string> = {
-    general: '',
-    browsing: 'info',
-    video: 'warning',
-    download: 'success',
-  }
-  return map[t] || ''
-}
+const usageTagType = (t: string): any => (t === 'limited' ? 'warning' : 'info')
 
 // 安全读取 runtime 字段（离线节点可能无 runtime）
 const rtCpu = (n: MonitorNode): number => n.runtime?.cpu_usage || 0
