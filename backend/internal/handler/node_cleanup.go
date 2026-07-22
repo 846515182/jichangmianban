@@ -494,16 +494,26 @@ func (h *NodeCleanupHandler) removeAgentImage(client *ssh.Client, sse *sseWriter
 	}
 	rmiCh := make(chan result, 1)
 	safeGo(func() {
-		// 先尝试正常删除, 失败则 force 删除
-		out, err := sshRun(client, "docker rmi nexus-node-agent:latest 2>/dev/null || docker rmi -f nexus-node-agent:latest 2>/dev/null; echo RMI_DONE")
+		// [P1-同机多节点] 先检查是否有其他 nexus-agent 容器正在使用该镜像,
+		// 有则跳过删除(避免影响同机其他节点), 无则正常删除
+		// docker ps -a --filter ancestor=<image> 会列出所有基于该镜像的容器(含已停止)
+		out, err := sshRun(client,
+			"if docker ps -a --filter ancestor=nexus-node-agent:latest --format '{{.Names}}' 2>/dev/null | grep -q .; then "+
+				"echo 'IMAGE_IN_USE'; "+
+				"else "+
+				"docker rmi nexus-node-agent:latest 2>/dev/null || docker rmi -f nexus-node-agent:latest 2>/dev/null; echo 'RMI_DONE'; "+
+				"fi")
 		rmiCh <- result{out, err}
 	})
 
 	select {
 	case r := <-rmiCh:
-		if r.err != nil {
+		if strings.Contains(r.out, "IMAGE_IN_USE") {
+			sse.event(CleanupPhaseImage, "done",
+				"镜像被同机其他节点使用, 已跳过删除", strings.TrimSpace(r.out))
+		} else if r.err != nil {
 			sse.event(CleanupPhaseImage, "warning",
-				"删除镜像失败(可能正在被其他节点使用): "+r.err.Error(), strings.TrimSpace(r.out))
+				"删除镜像失败: "+r.err.Error(), strings.TrimSpace(r.out))
 		} else {
 			sse.event(CleanupPhaseImage, "done", "镜像已删除", strings.TrimSpace(r.out))
 		}

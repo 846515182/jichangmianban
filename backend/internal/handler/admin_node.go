@@ -366,10 +366,13 @@ func (h *AdminNodeHandler) PingNode(c *gin.Context) {
 		return
 	}
 
-	addr := net.JoinHostPort(node.ServerAddress, strconv.Itoa(node.GrpcPort))
+	// [P0-PingNode] 旧版拨号 node.GrpcPort(50051), 但 agent 不监听 50051,
+	// gRPC 是 agent→面板单向出站, 节点上无任何服务监听 50051 → 必然失败 → 误标离线。
+	// 改为拨号 node.Port(Xray 代理端口, 映射到宿主机), TCP 可达即说明 Xray 在跑。
+	addr := net.JoinHostPort(node.ServerAddress, strconv.Itoa(node.Port))
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
-		// TCP 连接失败 → 节点确实不在线，立即标记离线
+		// TCP 连接失败 → 节点代理端口不可达，立即标记离线
 		now := time.Now()
 		_ = h.nodeRepo.MarkOffline(node.ID)
 		response.OK(c, gin.H{
@@ -382,7 +385,7 @@ func (h *AdminNodeHandler) PingNode(c *gin.Context) {
 	}
 	conn.Close()
 
-	// TCP 连接成功 → 节点 gRPC 端口可达，刷新 last_seen_at + online=true
+	// TCP 连接成功 → Xray 代理端口可达，刷新 last_seen_at + online=true
 	now := time.Now()
 	_ = h.nodeRepo.UpdateOnline(node.ID, true, node.Version, now)
 

@@ -74,6 +74,30 @@ func (s *NodeService) CreateNode(in *CreateNodeInput) (*model.Node, error) {
 		return nil, fmt.Errorf("节点已存在: 名称=%s 地址=%s:%d, 请勿重复创建(可编辑现有节点或先删除旧节点)", in.Name, in.ServerAddress, in.Port)
 	}
 
+	// [P1-同机多节点] 校验 name 唯一(uk_nodes_name 唯一索引), 提前给友好错误而非 raw DB 错误
+	var nameExists int64
+	if err := app.Get().DB.Model(&model.Node{}).
+		Where("name = ? AND is_deleted = false", in.Name).
+		Count(&nameExists).Error; err != nil {
+		return nil, fmt.Errorf("校验节点名称唯一性失败: %w", err)
+	}
+	if nameExists > 0 {
+		return nil, fmt.Errorf("节点名称「%s」已存在, 同机多节点请用不同名称(如 美国01/美国02)", in.Name)
+	}
+
+	// [P1-同机多节点] 校验 (server_address, port) 不与已有节点冲突,
+	// 同地址+同端口会导致部署时端口冲突或运行时容器 bind 失败
+	var addrPortExists int64
+	if err := app.Get().DB.Model(&model.Node{}).
+		Where("server_address = ? AND port = ? AND is_deleted = false",
+			in.ServerAddress, in.Port).
+		Count(&addrPortExists).Error; err != nil {
+		return nil, fmt.Errorf("校验节点地址端口失败: %w", err)
+	}
+	if addrPortExists > 0 {
+		return nil, fmt.Errorf("地址 %s:%d 已被其他节点占用, 同机多节点需用不同端口(如 443/8443)", in.ServerAddress, in.Port)
+	}
+
 	// 验证协议是否支持
 	supportedProtocols := map[string]bool{
 		"vless":       true,

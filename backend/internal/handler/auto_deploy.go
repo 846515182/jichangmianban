@@ -80,6 +80,11 @@ type autoDeployReq struct {
 // node_agent 源码路径，优先使用环境变量 NODE_AGENT_PATH，否则回退值
 var nodeAgentPath = getNodeAgentPath()
 
+// [P1-并发部署] 本地编译互斥锁: agent 二进制和 agent.hash 是所有节点共享的,
+// 并发部署时两个 go build -o /build/agent 同时写同一文件会损坏二进制。
+// 互斥锁保证同一时刻只有一个部署在编译, 第二个部署会等第一个完成后再校验缓存。
+var buildMutex sync.Mutex
+
 func getNodeAgentPath() string {
 	if p := os.Getenv("NODE_AGENT_PATH"); p != "" {
 		return p
@@ -614,10 +619,9 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 		// [P0-同机多节点] 移除 fuser -k: docker stop/rm 已释放容器端口,
 		// preDeployCheck 会检测端口冲突。fuser -k 会误杀同机其他节点或面板 gRPC(50051)
 		// {"释放端口进程", "..."},  ← 已移除
-		// [P0-同机多节点] docker network 只清理 compose down 未清干净的当前项目网络,
-		// 不用 --filter name=node-agent 通配(会尝试删同机其他节点的网络, 虽 in-use 删不掉但报错)
-		// compose down 已清理本项目网络, 此处仅兜底 prune 无容器连接的孤儿网络
-		{"清理孤儿 Docker 网络", fmt.Sprintf("docker network prune -f 2>/dev/null; true")},
+		// [P1-同机多节点] 移除 docker network prune -f: compose down 已清理本项目网络,
+		// prune 是全局操作, 若同机其他节点容器恰好处于 Restarting 状态(短暂释放网络),
+		// 其 compose 网络可能被 prune 删除, 导致该节点恢复时网络不存在重启失败
 		// [P0-同机多节点] swap 只清理当前节点的(/swapfile_np_<UUID>*),
 		// 用 UUID 做前缀通配符(含重试产生的 _2 后缀), 不会匹配其他节点的 swap
 		{"清理本节点 swap 文件", fmt.Sprintf("swapoff /swapfile_np_%s* 2>/dev/null; rm -f /swapfile_np_%s* 2>/dev/null; true", shortID, shortID)},
@@ -878,9 +882,22 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 			"else echo 'NOT_EXISTS'; fi",
 		localNodeAgentPath, localNodeAgentPath, localNodeAgentPath, sourceHash)
 	binStatus, _ := sshRunLocal(checkBinCmd)
-	if strings.Contains(binStatus, "EXISTS_AND_MATCH") {
+	needBuild := !strings.Contains(binStatus, "EXISTS_AND_MATCH")
+	if !needBuild {
 		sse.event(PhaseBuild, "done", "使用缓存的 node-agent 二进制(源码 hash 匹配)", binStatus)
 	} else {
+		// [P1-并发部署] 加互斥锁: 防止并发部署时两个 go build 同时写 agent 二进制损坏文件
+		// 第二个部署会等第一个完成, 然后重新校验缓存(此时 hash 已匹配, 直接命中缓存)
+		buildMutex.Lock()
+		// 拿到锁后重新校验缓存: 可能在等待期间另一个部署已完成编译
+		binStatus2, _ := sshRunLocal(checkBinCmd)
+		if strings.Contains(binStatus2, "EXISTS_AND_MATCH") {
+			buildMutex.Unlock()
+			sse.event(PhaseBuild, "done", "使用缓存的 node-agent 二进制(并发等待期间已编译完成)", binStatus2)
+			needBuild = false
+		}
+	}
+	if needBuild {
 		var buildErr error
 		var buildOut string
 		for retry := 1; retry <= 2; retry++ {
@@ -908,12 +925,14 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 			}
 		}
 		if buildErr != nil {
+			buildMutex.Unlock()
 			sse.eventWithCode(PhaseBuild, "error", "二进制预编译失败(重试2次): "+buildErr.Error(), buildOut, DeployErrBuild)
 			return false, DeployErrBuild, "编译失败: " + buildErr.Error()
 		}
 		// [SEC-05] 保存源码 hash 到文件, 供下次缓存校验
 		saveHashCmd := fmt.Sprintf("echo '%s' > %s/agent.hash 2>/dev/null; echo 'HASH_SAVED'", sourceHash, localNodeAgentPath)
 		sshRunLocal(saveHashCmd)
+		buildMutex.Unlock()
 		sse.event(PhaseBuild, "done", "二进制预编译完成", buildOut)
 	}
 
@@ -997,20 +1016,19 @@ func (h *AutoDeployHandler) runDeployOnce(c *gin.Context, sse *sseWriter, node *
 	var startErr error
 	for retry := 1; retry <= 2; retry++ {
 		if retry > 1 {
-			sse.event(PhaseStart, "log", "", fmt.Sprintf("启动失败, 第 %d 次重试 (先清理旧容器+旧镜像)...", retry))
-			// 修复: 重试时不仅清理容器, 还要清理可能损坏的半截镜像
-			// 旧版只 docker compose down + docker rm, 残留的 nexus-node-agent:latest 镜像
-			// 可能是上次 build 中途 OOM/网络中断产生的损坏镜像, 导致下次 build 缓存命中错误层
+			sse.event(PhaseStart, "log", "", fmt.Sprintf("启动失败, 第 %d 次重试 (先清理旧容器)...", retry))
+			// [P0-同机多节点] 移除 docker rmi -f nexus-node-agent:latest:
+			// 镜像是所有节点共享的, 若同机其他节点容器恰好处于 Restarting 状态(引用计数可能为 0),
+			// rmi -f 会删掉 image tag, 该节点 restart 时找不到镜像 → 永久失联。
+			// compose up --build 会自动重建损坏的镜像层, 无需手动 rmi。
+			// 同时移除 docker builder prune -f(全局清构建缓存, 影响同机其他节点 build 性能)
 			sshRun(client, fmt.Sprintf(
 				"cd %s 2>/dev/null && docker compose -f docker-compose.node.yml --env-file .env.node down --timeout 5 2>/dev/null; "+
-					"docker rm -f %s 2>/dev/null; "+
-					"docker rmi -f nexus-node-agent:latest 2>/dev/null; "+
-					"docker builder prune -f 2>/dev/null; true", deployDir, containerName))
+					"docker rm -f %s 2>/dev/null; true", deployDir, containerName))
 			if !verifyDockerReady(client, sse) {
-				sse.event(PhaseStart, "log", "", "Docker daemon 已挂, 尝试通过 systemd restart 拉起 (不杀容器)...")
-				sshRun(client, "systemctl reset-failed docker docker.socket containerd 2>/dev/null; "+
-					"rm -f /var/run/docker.pid /run/docker.pid /var/run/docker.sock /run/docker.sock; "+
-					"systemctl restart containerd docker 2>/dev/null; sleep 5; true")
+				sse.event(PhaseStart, "log", "", "Docker daemon 已挂, 尝试通过 systemd restart 拉起 (live-restore 不杀容器)...")
+				sshRun(client, "rm -f /var/run/docker.pid /run/docker.pid /var/run/docker.sock /run/docker.sock 2>/dev/null; true")
+				restartDockerSafely(client)
 				if !verifyDockerReady(client, sse) {
 					sse.eventWithCode(PhaseStart, "error", "Docker daemon 修复失败(重试中无法启动docker)", "", DeployErrDockerNotInstalled)
 					return false, DeployErrDockerNotInstalled, "Docker daemon 修复失败"
@@ -1274,19 +1292,21 @@ func preDeployCheck(client *ssh.Client, listenPort, healthPort int, nodeShortID 
 	}
 
 	// 4. 端口冲突检测
-	sse.event(PhaseEnvCheck, "running", fmt.Sprintf("正在检查端口 %d/%d...", listenPort, healthPort), "")
+	// [P1-同机多节点] 只检测 listenPort(映射到宿主机的代理端口),
+	// 不检测 healthPort(50052 是容器内端口, 不映射宿主机, 检测它无意义且可能误报)
+	sse.event(PhaseEnvCheck, "running", fmt.Sprintf("正在检查端口 %d...", listenPort), "")
 	// 兜底: ss → netstat → lsof → 跳过 (逐级降级)
 	portCheck, _ := sshRun(client, fmt.Sprintf(
-		"(ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null || lsof -i -P -n 2>/dev/null | grep LISTEN) | grep -E ':%d|:%d' || echo 'PORTS_AVAILABLE'",
-		listenPort, healthPort))
+		"(ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null || lsof -i -P -n 2>/dev/null | grep LISTEN) | grep -E ':%d' || echo 'PORTS_AVAILABLE'",
+		listenPort))
 	lines = append(lines, "=== 端口 ===")
 	lines = append(lines, portCheck)
 	if !strings.Contains(portCheck, "PORTS_AVAILABLE") && strings.TrimSpace(portCheck) != "" {
 		result.OK = false
 		result.Fatal = true
 		result.ErrCode = DeployErrPortConflict
-		result.Reason = fmt.Sprintf("端口 %d 或 %d 已被占用", listenPort, healthPort)
-		result.FixSuggestion = fmt.Sprintf("1) 释放端口: fuser -k %d/tcp %d/tcp  2) 修改节点端口  3) 停止占用进程", listenPort, healthPort)
+		result.Reason = fmt.Sprintf("端口 %d 已被占用", listenPort)
+		result.FixSuggestion = fmt.Sprintf("1) 修改节点端口(同机多节点需用不同端口)  2) 停止占用端口的进程  3) 释放端口: fuser -k %d/tcp", listenPort, listenPort)
 		result.Output = strings.Join(lines, "\n")
 		return result
 	}
@@ -1768,7 +1788,7 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 			sse.event(PhaseInstallDocker, "log", "", "systemctl 启动失败, 重建 service 文件后重试...")
 			// 重新创建 systemd 服务文件 (可能被 apt 安装的残留覆盖路径)
 			createDockerSystemdService(client)
-			sshRun(client, "systemctl restart containerd docker 2>/dev/null; sleep 5; true")
+			restartDockerSafely(client)
 			for i := 0; i < 10; i++ {
 				time.Sleep(2 * time.Second)
 				vOut, _ := sshRun(client, "timeout 5 docker info 2>&1 | head -3")
@@ -1848,7 +1868,7 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 			if strings.Contains(out2, "INSTALL_OK") {
 				// 注册 systemd 服务, 通过 systemctl 启动 (自动重启, 不依赖 SSH)
 				createDockerSystemdService(client)
-				sshRun(client, "systemctl restart containerd docker 2>/dev/null; sleep 5; true")
+				restartDockerSafely(client)
 				sse.event(PhaseInstallDocker, "done", "Docker 安装完成 (中科大镜像源, 已注册 systemd 服务)", "")
 				return true, "", ""
 			}
@@ -1876,7 +1896,7 @@ func ensureDocker(client *ssh.Client, sse *sseWriter) (bool, string, string) {
 		}
 		if !startedWithSystemd {
 			// 通过 systemd 启动 (静态安装已由 createDockerSystemdService 注册服务)
-			sshRun(client, "systemctl restart containerd docker 2>/dev/null; sleep 5; true")
+			restartDockerSafely(client)
 			// 等待 dockerd 启动 (最多等 20 秒)
 			dockerStarted := false
 			for i := 0; i < 10; i++ {
@@ -1940,7 +1960,7 @@ func verifyDockerReady(client *ssh.Client, sse *sseWriter) bool {
 	containerdOut, _ := sshRun(client, "ps aux 2>/dev/null | grep -v grep | grep containerd | head -1 || echo 'CONTAINERD_DEAD'")
 	if strings.Contains(containerdOut, "CONTAINERD_DEAD") {
 		sse.event(PhaseInstallDocker, "log", "", "containerd 未运行, 通过 systemd 拉起...")
-		sshRun(client, "systemctl restart containerd docker 2>/dev/null; sleep 5; true")
+		restartDockerSafely(client)
 	}
 
 	// 轮询 docker info, 最多 6 次(每次 5s = 30s, 覆盖低配 VPS 场景)
@@ -1968,9 +1988,8 @@ func verifyDockerReady(client *ssh.Client, sse *sseWriter) bool {
 		// (live-restore 模式下 restart 不杀容器; 非 live-restore 场景 docker 已坏, 容器也保不住).
 		// 只清理 stale PID 文件 + reset-failed 状态, 然后重启 daemon.
 		sse.event(PhaseInstallDocker, "log", "", fmt.Sprintf("Docker 异常(尝试修复): %s", strings.TrimSpace(out)))
-		sshRun(client, "systemctl reset-failed docker docker.socket containerd 2>/dev/null; "+
-			"rm -f /var/run/docker.pid /run/docker.pid /var/run/docker.sock /run/docker.sock; "+
-			"systemctl restart containerd docker 2>/dev/null; sleep 5; true")
+		sshRun(client, "rm -f /var/run/docker.pid /run/docker.pid /var/run/docker.sock /run/docker.sock 2>/dev/null; true")
+		restartDockerSafely(client)
 		time.Sleep(5 * time.Second)
 	}
 	// 兜底: 轮询超时, 尝试一键修复脚本
@@ -2314,6 +2333,23 @@ func parsePrivateKey(pemData string) (ssh.Signer, error) {
 		}
 	}
 	return nil, fmt.Errorf("私钥格式无效: %w", err)
+}
+
+// restartDockerSafely [P1-同机多节点] 安全重启 docker: 先确保 daemon.json 含 live-restore:true,
+// 再 restart, 避免 restart 杀掉同机其他正在运行的节点容器。
+// 幂等: 若 daemon.json 已含 live-restore 则不修改; 若无则合并写入。
+func restartDockerSafely(client *ssh.Client) {
+	// 1. 确保 /etc/docker/daemon.json 含 live-restore:true (不杀容器的 restart)
+	sshRun(client, `if [ ! -f /etc/docker/daemon.json ]; then `+
+		`mkdir -p /etc/docker && echo '{"live-restore":true}' > /etc/docker/daemon.json; `+
+		`elif ! grep -q 'live-restore' /etc/docker/daemon.json 2>/dev/null; then `+
+		// 合并: 用 python3 兜底解析 JSON, 无 python3 则粗暴追加(末尾 } 替换为 ,"live-restore":true})
+		`python3 -c "import json,sys; d=json.load(open('/etc/docker/daemon.json')); d['live-restore']=True; json.dump(d,open('/etc/docker/daemon.json','w'))" 2>/dev/null || `+
+		`sed -i 's/}$/,/"live-restore":true}/' /etc/docker/daemon.json 2>/dev/null; `+
+		`fi; true`)
+	// 2. restart (live-restore 模式下不杀容器)
+	sshRun(client, "systemctl reset-failed docker docker.socket containerd 2>/dev/null; "+
+		"systemctl restart containerd docker 2>/dev/null; sleep 5; true")
 }
 
 // sshRunLocal 在面板服务器本地执行 shell 命令(用于预编译镜像)

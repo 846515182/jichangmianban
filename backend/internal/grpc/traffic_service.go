@@ -193,12 +193,16 @@ func (s *TrafficServiceServer) ReportRealtime(ctx context.Context, req *nexuspb.
 
 		// 累加用户流量(忽略单条错误，整体事务保留)
 		exhaustedUIDs := make([]string, 0)
+		// [P0-同机多节点] 同时累加节点流量(nodes.traffic_used), 旧版只累加用户流量,
+		// nodes.traffic_used 永远 0, 管理后台"服务器流量汇总"按 server_address 聚合恒 0
+		var nodeTotalBytes int64
 		for uid, a := range userAgg {
 			if err := s.userRepo.AddTrafficTx(tx, uid, a.upload, a.download); err != nil {
 				s.logger.Warn("累加用户流量失败",
 					zap.String("user_id", uid), zap.Error(err))
 				continue
 			}
+			nodeTotalBytes += a.upload + a.download
 			// 实时检测流量超额: 套餐有上限且已用 >= 上限 → 标记 traffic_exhausted
 			// 标记后用户不再下发到节点(下次心跳触发配置变更剔除其凭证)
 			if a.upload+a.download > 0 {
@@ -209,6 +213,13 @@ func (s *TrafficServiceServer) ReportRealtime(ctx context.Context, req *nexuspb.
 				} else if marked {
 					exhaustedUIDs = append(exhaustedUIDs, uid)
 				}
+			}
+		}
+		// [P0-同机多节点] 累加节点流量, 让管理后台能看到每节点/每服务器的流量消耗
+		if nodeTotalBytes > 0 {
+			if err := s.nodeRepo.AddTrafficTx(tx, req.GetNodeId(), nodeTotalBytes); err != nil {
+				s.logger.Warn("累加节点流量失败",
+					zap.String("node_id", req.GetNodeId()), zap.Error(err))
 			}
 		}
 		// 在事务内提交后日志记录(仅记录 ID，事务提交后状态已生效)
