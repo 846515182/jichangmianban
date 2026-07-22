@@ -25,9 +25,18 @@ type Node struct {
 	LastSeenAt    *time.Time     `gorm:"column:last_seen_at" json:"last_seen_at,omitempty"`
 	Online        bool           `gorm:"default:false" json:"online"`
 	Version       string         `gorm:"type:varchar(32)" json:"version"`
-	IsDeleted     bool           `gorm:"column:is_deleted;default:false" json:"-"`
-	CreatedAt     time.Time      `json:"created_at"`
-	UpdatedAt     time.Time      `json:"updated_at"`
+	// [节点容量管理] 智能负载调度 + 自动踢人保护
+	// MaxClients: 节点最大用户数, 0=不限(不参与调度)
+	// MaxBandwidthMbps: 节点最大带宽Mbps, 0=不限
+	// CpuThreshold: CPU超载阈值%, 默认80, 超过则视为满载
+	// LoadStatus: 负载状态 idle/normal/busy/full, 由心跳评分实时更新
+	MaxClients       int    `gorm:"type:int;default:0" json:"max_clients"`
+	MaxBandwidthMbps int    `gorm:"type:int;default:0" json:"max_bandwidth_mbps"`
+	CpuThreshold     int    `gorm:"type:int;default:80" json:"cpu_threshold"`
+	LoadStatus       string `gorm:"type:varchar(20);default:'idle'" json:"load_status"`
+	IsDeleted        bool   `gorm:"column:is_deleted;default:false" json:"-"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 func (Node) TableName() string { return "nodes" }
