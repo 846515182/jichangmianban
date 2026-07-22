@@ -100,8 +100,10 @@ func (s *LoadScorer) CalculateScore(node *model.Node, snap *HeartbeatSnapshot) L
 		return LoadScore{Score: 0, Status: StatusIdle}
 	}
 
-	// 未配置任何容量上限 → 不参与调度, 返回 idle
-	if node.MaxClients <= 0 && node.MaxBandwidthMbps <= 0 {
+	// 未配置任何容量上限 且 未开动态限速 → 不参与调度, 返回 idle
+	// 开了动态限速(usage_type=="limited")时, 即使没配容量上限也基于CPU/内存算分,
+	// 让限速值随实际负载动态调整(空闲8/正常5/繁忙3/满载1)
+	if node.MaxClients <= 0 && node.MaxBandwidthMbps <= 0 && node.UsageType != "limited" {
 		return LoadScore{Score: 0, Status: StatusIdle}
 	}
 

@@ -181,6 +181,26 @@ func (s *NodeServiceServer) Heartbeat(ctx context.Context, req *nexuspb.Heartbea
 				// 更新 node.UpdatedAt 让 configVer 变化
 				s.nodeRepo.TouchEnabled(node.ID)
 			}
+
+			// [动态限速] 限速值随负载变, 检测变化并触发agent重拉配置
+			// 负载升高时限速值降低(8→5→3→1), 需要agent重拉Xray配置才生效
+			// 用独立Redis key缓存上次下发的限速值, 变化时清configVer强制重拉
+			if node.UsageType == "limited" {
+				newLimit := s.loadScorer.GetDynamicLimitFromCache(ctx, node.ID)
+				lastKey := fmt.Sprintf("node:dynlimit:last:%s", node.ID)
+				lastLimit, _ := rdb.Get(ctx, lastKey).Result()
+				newLimitStr := fmt.Sprintf("%d", newLimit)
+				if lastLimit != newLimitStr {
+					rdb.Set(ctx, lastKey, newLimitStr, 0)
+					rdb.Del(ctx, fmt.Sprintf("node:configver:%s", node.ID))
+					s.logger.Info("动态限速值变化触发配置刷新",
+						zap.String("node_id", node.ID),
+						zap.String("node_name", node.Name),
+						zap.Float64("score", score.Score),
+						zap.Int("old_limit", func() int { n, _ := service.ParseInt64(lastLimit); return int(n) }()),
+						zap.Int("new_limit", newLimit))
+				}
+			}
 		}
 	}
 
