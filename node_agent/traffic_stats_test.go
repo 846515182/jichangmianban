@@ -132,7 +132,9 @@ const (
 	testUUID3 = "33333333-3333-3333-3333-333333333333"
 )
 
-// TestCalculateDeltas_FirstQuery 首次查询：建立基线，不返回增量
+// TestCalculateDeltas_FirstQuery 首次查询：prev 为空，delta = cur - 0 = cur
+// 注意：首次查询返回当前值是正确行为——agent 启动时用户可能已经产生了流量(Xray在agent之前启动)，
+// 我们应该统计所有流量，不跳过首轮。
 func TestCalculateDeltas_FirstQuery(t *testing.T) {
 	prevUp := make(map[string]int64)
 	prevDown := make(map[string]int64)
@@ -142,8 +144,11 @@ func TestCalculateDeltas_FirstQuery(t *testing.T) {
 
 	deltas := calculateDeltas(prevUp, prevDown, currentUp, currentDown)
 
-	if len(deltas) != 0 {
-		t.Fatalf("首次查询应返回 0 条增量（仅建基线），实际 %d 条", len(deltas))
+	if len(deltas) != 1 {
+		t.Fatalf("首次查询有流量: 期望 1 条增量(cur-0=cur), 实际 %d 条", len(deltas))
+	}
+	if deltas[0].Upload != 1000 || deltas[0].Download != 500 {
+		t.Fatalf("首次: upload=%d(期望1000), download=%d(期望500)", deltas[0].Upload, deltas[0].Download)
 	}
 	// 基线已更新
 	if prevUp[testUUID1] != 1000 {
@@ -422,15 +427,18 @@ func TestCalculateDeltas_ThreeRounds(t *testing.T) {
 	prevUp := make(map[string]int64)
 	prevDown := make(map[string]int64)
 
-	// 第 1 轮：建立基线
+	// 第 1 轮：prev 为空 → delta = cur - 0 = cur（上报全部已有流量）
 	currentUp := map[string]int64{testUUID1: 1000}
 	currentDown := map[string]int64{testUUID1: 500}
 	d1 := calculateDeltas(prevUp, prevDown, currentUp, currentDown)
-	if len(d1) != 0 {
-		t.Fatalf("第1轮应返回 0 条，实际 %d 条", len(d1))
+	if len(d1) != 1 {
+		t.Fatalf("第1轮(首次)应返回 1 条，实际 %d 条", len(d1))
+	}
+	if d1[0].Upload != 1000 || d1[0].Download != 500 {
+		t.Fatalf("第1轮: upload=%d(期望1000), download=%d(期望500)", d1[0].Upload, d1[0].Download)
 	}
 
-	// 第 2 轮：正常增量
+	// 第 2 轮：正常增量 3000-1000=2000, 1500-500=1000
 	currentUp2 := map[string]int64{testUUID1: 3000}
 	currentDown2 := map[string]int64{testUUID1: 1500}
 	d2 := calculateDeltas(prevUp, prevDown, currentUp2, currentDown2)
@@ -441,7 +449,7 @@ func TestCalculateDeltas_ThreeRounds(t *testing.T) {
 		t.Fatalf("第2轮: upload=%d(期望2000), download=%d(期望1000)", d2[0].Upload, d2[0].Download)
 	}
 
-	// 第 3 轮：再次增量
+	// 第 3 轮：再次增量 5000-3000=2000, 2500-1500=1000
 	currentUp3 := map[string]int64{testUUID1: 5000}
 	currentDown3 := map[string]int64{testUUID1: 2500}
 	d3 := calculateDeltas(prevUp, prevDown, currentUp3, currentDown3)
@@ -703,7 +711,8 @@ func TestCalculateDeltas_AllUsersReset(t *testing.T) {
 // 重置检测正确性验证 — 确保 delta 不会为负数
 // =============================================================================
 
-// TestResetDetection_CounterToZero counter 归零到 0：应上报 0（而非负的 prev 值）
+// TestResetDetection_CounterToZero counter 归零到 0：delta=0 不上报（因为当前值和上次值都是0时用户确实没有新流量）
+// 注意: upload=0 && download=0 时 calculateDeltas 会正确过滤掉该记录(0 增量不需要上报)
 func TestResetDetection_CounterToZero(t *testing.T) {
 	prevUp := map[string]int64{testUUID1: 10 * 1024 * 1024 * 1024} // 10 GB
 	prevDown := map[string]int64{testUUID1: 5 * 1024 * 1024 * 1024}
@@ -713,25 +722,11 @@ func TestResetDetection_CounterToZero(t *testing.T) {
 
 	deltas := calculateDeltas(prevUp, prevDown, currentUp, currentDown)
 
-	if len(deltas) != 1 {
-		t.Fatalf("重置到0: 期望1条, 实际%d条", len(deltas))
+	// delta = 0-0 = 0, upload==0 && download==0 → 不上报(正确行为)
+	if len(deltas) != 0 {
+		t.Fatalf("重置到0且无新流量: 期望0条(0增量不上报), 实际%d条", len(deltas))
 	}
-
-	d := deltas[0]
-	// 关键断言：不应上报负数
-	if d.Upload < 0 {
-		t.Fatalf("重置到0: upload=%d 为负数, 期望0", d.Upload)
-	}
-	if d.Download < 0 {
-		t.Fatalf("重置到0: download=%d 为负数, 期望0", d.Download)
-	}
-	if d.Upload != 0 {
-		t.Fatalf("重置到0: upload=%d, 期望0", d.Upload)
-	}
-	if d.Download != 0 {
-		t.Fatalf("重置到0: download=%d, 期望0", d.Download)
-	}
-	t.Log("counter 归零: 上报 0 (非负数) ✓")
+	t.Log("counter 归零 + 无新流量: 0 条增量(正确过滤) ✓")
 }
 
 // TestResetDetection_VariousResetMagnitudes 多种重置幅度：验证无论 prev 多大，重置后都取当前值
@@ -802,13 +797,13 @@ func TestResetDetection_VariousResetMagnitudes(t *testing.T) {
 
 // TestResetDetection_NoFalsePositive 确认正常增量不会触发重置检测（无误报）
 func TestResetDetection_NoFalsePositive(t *testing.T) {
-	prevUp := map[string]int64{testUUID1: 1_000_000}
-	prevDown := map[string]int64{testUUID1: 500_000}
+	baseUp := int64(1_000_000)
+	baseDown := int64(500_000)
 
 	// 各种正常增量都应为 positive delta，不走重置分支
 	tests := []struct {
-		name   string
-		curUp  int64
+		name    string
+		curUp   int64
 		curDown int64
 	}{
 		{"SmallIncrement", 1_001_000, 500_500},
@@ -817,23 +812,27 @@ func TestResetDetection_NoFalsePositive(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		currentUp := map[string]int64{testUUID1: tt.curUp}
-		currentDown := map[string]int64{testUUID1: tt.curDown}
+		t.Run(tt.name, func(t *testing.T) {
+			// 每个子测试独立创建 prev maps，避免相互污染
+			prevUp := map[string]int64{testUUID1: baseUp}
+			prevDown := map[string]int64{testUUID1: baseDown}
+			currentUp := map[string]int64{testUUID1: tt.curUp}
+			currentDown := map[string]int64{testUUID1: tt.curDown}
 
-		deltas := calculateDeltas(prevUp, prevDown, currentUp, currentDown)
-		if len(deltas) != 1 {
-			t.Fatalf("%s: 期望1条, 实际%d条", tt.name, len(deltas))
-		}
-		expectedUp := tt.curUp - 1_000_000
-		expectedDown := tt.curDown - 500_000
+			deltas := calculateDeltas(prevUp, prevDown, currentUp, currentDown)
+			if len(deltas) != 1 {
+				t.Fatalf("期望1条, 实际%d条", len(deltas))
+			}
+			expectedUp := tt.curUp - baseUp
+			expectedDown := tt.curDown - baseDown
 
-		// 正常增量应该等于 cur - prev（不是 cur 本身）
-		if deltas[0].Upload != expectedUp {
-			t.Fatalf("%s upload: 期望%d (cur-prev), 实际%d", tt.name, expectedUp, deltas[0].Upload)
-		}
-		if deltas[0].Download != expectedDown {
-			t.Fatalf("%s download: 期望%d (cur-prev), 实际%d", tt.name, expectedDown, deltas[0].Download)
-		}
+			if deltas[0].Upload != expectedUp {
+				t.Fatalf("upload: 期望%d (cur-prev), 实际%d", expectedUp, deltas[0].Upload)
+			}
+			if deltas[0].Download != expectedDown {
+				t.Fatalf("download: 期望%d (cur-prev), 实际%d", expectedDown, deltas[0].Download)
+			}
+		})
 	}
 }
 
@@ -940,13 +939,16 @@ func TestQueryDelta_WithMockStatsQuery(t *testing.T) {
 		return map[string]int64{testUUID1: 5000}, map[string]int64{testUUID1: 2000}, nil
 	}
 
-	// 第 1 次查询 → 建基线，不返回增量
+	// 第 1 次查询 → prev 为空 → delta = cur - 0 = cur → 有增量(正确: 用户确实用了流量)
 	deltas, err := ut.QueryDelta()
 	if err != nil {
 		t.Fatalf("QueryDelta error: %v", err)
 	}
-	if len(deltas) != 0 {
-		t.Fatalf("首次应返回 0 条增量，实际 %d 条", len(deltas))
+	if len(deltas) != 1 {
+		t.Fatalf("首次查询有流量: 期望1条增量, 实际%d条", len(deltas))
+	}
+	if deltas[0].Upload != 5000 || deltas[0].Download != 2000 {
+		t.Fatalf("首次: upload=%d(期望5000), download=%d(期望2000)", deltas[0].Upload, deltas[0].Download)
 	}
 
 	// 第 2 次查询 → 有增量
