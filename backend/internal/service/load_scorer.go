@@ -172,13 +172,95 @@ func (s *LoadScorer) UpdateNodeLoadStatus(ctx context.Context, node *model.Node,
 	}
 
 	// 评分写入 Redis hash(供订阅调度读取, 避免每次查 DB)
+	// [动态限速] 同时写入当前动态限速值, 供 Xray 配置生成读取
+	dynLimit := CalcDynamicSpeedLimit(node, score, snap)
 	scoreKey := fmt.Sprintf("node:loadscore:%s", node.ID)
 	s.rdb.HSet(ctx, scoreKey, "score", fmt.Sprintf("%.4f", score.Score),
 		"status", score.Status,
+		"dynamic_limit_mbps", dynLimit,
 		"updated_at", time.Now().Unix())
 	s.rdb.Expire(ctx, scoreKey, 10*time.Minute)
 
 	return score, nil
+}
+
+// 用途类型对应的基础限速(Mbps)
+// 管理员只选用途, 系统按用途定基础速度, 再按负载动态调整
+const (
+	BaseSpeedBrowsing = 5   // 仅浏览: 够看网页, 不够看视频
+	BaseSpeedVideo    = 20  // 视频: 够1080P(需8-12Mbps)
+	BaseSpeedDownload = 100 // 下载: 大带宽
+	BaseSpeedGeneral  = 50  // 通用: 中等
+)
+
+// CalcDynamicSpeedLimit 根据用途 + 负载评分动态计算单用户限速(Mbps)
+// 管理员不手动设限速值, 系统自动按用途+负载自适应:
+//   - 用途决定基础速度: browsing=5/video=20/download=100/general=50 Mbps
+//   - 负载动态调整:
+//     空闲(score<0.3): 基础×1.5  (放宽,鼓励使用)
+//     正常(0.3~0.6):   基础      (标准)
+//     繁忙(0.6~0.85):  基础×0.6  (收紧,保护体验)
+//     满载(>=0.85):    基础×0.3  (严格限速)
+//   - 若配了 MaxBandwidthMbps, 还要保证: 限速 <= 总带宽/连接数(均分)
+//
+// 返回 0 表示不限速(未配用途或下载满载时仍给较高速度)
+func CalcDynamicSpeedLimit(node *model.Node, score LoadScore, snap *HeartbeatSnapshot) int {
+	// 基础速度按用途定
+	base := BaseSpeedGeneral
+	switch node.UsageType {
+	case "browsing":
+		base = BaseSpeedBrowsing
+	case "video":
+		base = BaseSpeedVideo
+	case "download":
+		base = BaseSpeedDownload
+	case "general", "":
+		base = BaseSpeedGeneral
+	default:
+		base = BaseSpeedGeneral
+	}
+
+	// 负载动态调整系数
+	var factor float64
+	switch {
+	case score.Score < 0.3:
+		factor = 1.5 // 空闲: 放宽
+	case score.Score < 0.6:
+		factor = 1.0 // 正常: 标准
+	case score.Score < 0.85:
+		factor = 0.6 // 繁忙: 收紧
+	default:
+		factor = 0.3 // 满载: 严格
+	}
+
+	limit := int(float64(base) * factor)
+
+	// 若配了带宽上限, 保证均分: 单用户限速 <= 总带宽 / 当前连接数
+	if node.MaxBandwidthMbps > 0 && snap != nil && snap.OnlineConnections > 0 {
+		perUser := node.MaxBandwidthMbps / int(snap.OnlineConnections)
+		if perUser < limit {
+			limit = perUser
+		}
+	}
+
+	// 最低保底 1Mbps(避免限到 0 导致无法使用)
+	if limit < 1 {
+		limit = 1
+	}
+	return limit
+}
+
+// GetDynamicLimitFromCache 从 Redis 读取缓存的动态限速值
+func (s *LoadScorer) GetDynamicLimitFromCache(ctx context.Context, nodeID string) int {
+	key := fmt.Sprintf("node:loadscore:%s", nodeID)
+	v, err := s.rdb.HGet(ctx, key, "dynamic_limit_mbps").Result()
+	if err != nil || v == "" {
+		return 0
+	}
+	if n, e := strconvParseInt(v); e == nil {
+		return int(n)
+	}
+	return 0
 }
 
 // ShouldEvict 判断节点是否需要踢人(满载且有容量上限)

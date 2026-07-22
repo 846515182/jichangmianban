@@ -481,6 +481,9 @@ func (h *AdminNodeHandler) NodeMonitor(c *gin.Context) {
 
 		loadScore := score.Score
 		loadStatus := score.Status
+		// [动态限速] 当前生效的单用户限速(Mbps)。在线节点实时算, 离线节点读缓存。
+		// 管理员不手动设值, 系统按 usage_type 定基础速度 + 负载动态调整, 0 表示不限速。
+		dynamicLimit := 0
 		// 无心跳(离线)时 CalculateScore 返回 0/idle, 回退到评分缓存展示上次负载,
 		// 避免离线节点一律显示 idle 误导运维。
 		if snap == nil {
@@ -490,22 +493,27 @@ func (h *AdminNodeHandler) NodeMonitor(c *gin.Context) {
 			if s := lsMap[n.ID]["status"]; s != "" {
 				loadStatus = s
 			}
+			if v, e := strconv.Atoi(lsMap[n.ID]["dynamic_limit_mbps"]); e == nil {
+				dynamicLimit = v
+			}
+		} else {
+			dynamicLimit = service.CalcDynamicSpeedLimit(n, score, snap)
 		}
 
 		nodes = append(nodes, gin.H{
-			"id":                 n.ID,
-			"name":               n.Name,
-			"server_address":     n.ServerAddress,
-			"port":               n.Port,
-			"online":             n.Online,
-			"load_status":        loadStatus,
-			"load_score":         loadScore,
-			"max_clients":        n.MaxClients,
-			"max_bandwidth_mbps": n.MaxBandwidthMbps,
-			"cpu_threshold":      n.CpuThreshold,
-			"speed_limit_mbps":   n.SpeedLimitMbps,
-			"usage_type":         n.UsageType,
-			"runtime":            h.buildMonitorRuntime(hbMap[n.ID]),
+			"id":                  n.ID,
+			"name":                n.Name,
+			"server_address":      n.ServerAddress,
+			"port":                n.Port,
+			"online":              n.Online,
+			"load_status":         loadStatus,
+			"load_score":          loadScore,
+			"max_clients":         n.MaxClients,
+			"max_bandwidth_mbps":  n.MaxBandwidthMbps,
+			"cpu_threshold":       n.CpuThreshold,
+			"usage_type":          n.UsageType,
+			"dynamic_limit_mbps":  dynamicLimit,
+			"runtime":             h.buildMonitorRuntime(hbMap[n.ID]),
 			"ratios": gin.H{
 				"client_ratio":    score.ClientRatio,
 				"bandwidth_ratio": score.BandwidthRto,

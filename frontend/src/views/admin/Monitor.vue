@@ -88,6 +88,16 @@
           </el-card>
         </el-col>
       </el-row>
+
+      <!-- 动态限速说明 -->
+      <el-alert
+        type="info"
+        :closable="false"
+        show-icon
+        class="dynamic-limit-tip"
+      >
+        <template #title>系统根据节点用途+实时负载自动动态限速，无需手动配置</template>
+      </el-alert>
     </div>
 
     <!-- 节点负载热力图 -->
@@ -168,6 +178,10 @@
             <div class="nh-footer-row">
               <span class="nh-foot-label">速度</span>
               <span class="nh-foot-value nh-speed">{{ formatSpeed(rtSpeed(node)) }}</span>
+            </div>
+            <div class="nh-footer-row">
+              <span class="nh-foot-label">限速</span>
+              <span class="nh-foot-value">{{ node.usage_type === 'download' ? '不限速' : (node.dynamic_limit_mbps || '-') + ' Mbps' }}</span>
             </div>
             <div class="nh-footer-row">
               <span class="nh-foot-label">用途</span>
@@ -437,6 +451,9 @@ onUnmounted(() => {
 /* ---- 顶部汇总卡片 ---- */
 .summary-row {
   margin-top: 4px;
+}
+.dynamic-limit-tip {
+  margin-top: 12px;
 }
 .summary-card {
   border-radius: 10px;

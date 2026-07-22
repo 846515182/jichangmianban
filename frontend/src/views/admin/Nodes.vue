@@ -293,10 +293,6 @@
           <el-input-number v-model="form.cpuThreshold" :min="1" :max="100" controls-position="right" style="width:100%" />
           <div style="font-size:12px;color:#909399">CPU超过此阈值视为满载，默认80</div>
         </el-form-item>
-        <el-form-item label="单用户限速(Mbps)">
-          <el-input-number v-model="form.speedLimitMbps" :min="0" controls-position="right" style="width:100%" />
-          <div style="font-size:12px;color:#909399">0=不限。通过Xray policy限制单用户速度，适合优质轻量线路</div>
-        </el-form-item>
         <el-form-item label="用途类型">
           <el-select v-model="form.usageType" style="width:100%">
             <el-option label="通用(无限制)" value="general" />
@@ -304,7 +300,13 @@
             <el-option label="视频流媒体(禁下载)" value="video" />
             <el-option label="允许下载(无限制)" value="download" />
           </el-select>
-          <div style="font-size:12px;color:#909399">控制节点用途。轻量线路选"仅浏览"，大带宽线路选"允许下载"</div>
+          <div style="font-size:12px;color:#909399">
+            控制节点用途。系统根据用途自动动态限速：<br/>
+            • 仅浏览：基础 5Mbps（空闲时7.5，繁忙时3，够看网页不够看视频）<br/>
+            • 视频流媒体：基础 20Mbps（空闲时30，繁忙时12，保证1080P）<br/>
+            • 允许下载/通用：不限速或高带宽<br/>
+            限速值随节点实时负载自动调整，无需手动设置
+          </div>
         </el-form-item>
         <el-divider content-position="left">一键自动部署（可选）</el-divider>
         <el-form-item label="SSH 密码">
@@ -515,7 +517,6 @@ interface NodeRow {
   max_clients: number
   max_bandwidth_mbps: number
   cpu_threshold: number
-  speed_limit_mbps: number
   usage_type: string
   // 节点实时负载状态: idle/normal/busy/full
   load_status: string
@@ -781,7 +782,6 @@ const form = reactive({
   maxClients: 0,
   maxBandwidthMbps: 0,
   cpuThreshold: 80,
-  speedLimitMbps: 0,
   usageType: "general",
   sshPassword: '',
   sshPort: 22,
@@ -810,7 +810,6 @@ const openDialog = (row?: NodeRow) => {
       maxClients: row.max_clients || 0,
       maxBandwidthMbps: row.max_bandwidth_mbps || 0,
       cpuThreshold: row.cpu_threshold || 80,
-      speedLimitMbps: row.speed_limit_mbps || 0,
       usageType: row.usage_type || "general",
       // 安全: 编辑节点时清空密码, 避免上次添加节点时的密码缓存
       sshPassword: '',
@@ -829,7 +828,6 @@ const openDialog = (row?: NodeRow) => {
       maxClients: 0,
       maxBandwidthMbps: 0,
       cpuThreshold: 80,
-      speedLimitMbps: 0,
       usageType: "general",
       sshPassword: '',
       sshPort: 22,
@@ -858,7 +856,6 @@ const handleSave = async () => {
         max_clients: form.maxClients,
         max_bandwidth_mbps: form.maxBandwidthMbps,
         cpu_threshold: form.cpuThreshold,
-        speed_limit_mbps: form.speedLimitMbps,
         usage_type: form.usageType,
       }
       if (editing.value) {

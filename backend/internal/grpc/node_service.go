@@ -293,7 +293,7 @@ func (s *NodeServiceServer) GetConfig(ctx context.Context, req *nexuspb.GetConfi
 		zap.String("node_id", node.ID),
 		zap.Int("user_count", len(users)))
 
-	xrayCfg, err := buildXrayConfig(node, users)
+	xrayCfg, err := s.buildXrayConfig(node, users)
 	if err != nil {
 		s.logger.Error("构造 Xray 配置失败", zap.String("node_id", node.ID), zap.Error(err))
 		return nil, status.Error(codes.Internal, "构造配置失败")
@@ -430,7 +430,7 @@ func buildNodeInfoWithDecryptedKey(node *model.Node) (*nexuspb.NodeInfo, error) 
 }
 
 // buildXrayConfig 构造 VLESS+REALITY+XTLS-Vision 的 Xray 服务端配置 JSON
-func buildXrayConfig(node *model.Node, users []model.User) ([]byte, error) {
+func (s *NodeServiceServer) buildXrayConfig(node *model.Node, users []model.User) ([]byte, error) {
 	// 解析节点 server_config 取 REALITY 配置
 	var cfgMap map[string]interface{}
 	_ = json.Unmarshal(node.ServerConfig, &cfgMap)
@@ -495,10 +495,17 @@ func buildXrayConfig(node *model.Node, users []model.User) ([]byte, error) {
 	}
 
 	// clients: 每个用户一条，UUID=user.id，flow=xtls-rprx-vision
-	// [节点策略控制] 若节点配置了限速(speed_limit_mbps>0), 给 client 设 level=1,
-	// 配合 policy.levels.1 的限速规则实现单用户限速; level=0 不限速
+	// [动态限速] 限速值由 LoadScorer 按用途+负载自动计算, 不用手动设
+	// 所有用 level=1, policy.levels.1 配动态限速值; 用途为 download 时不限速
 	clientLevel := 0
-	if node.SpeedLimitMbps > 0 {
+	// 优先用动态限速(从 Redis 缓存读), 若管理员手动设了 SpeedLimitMbps 则用手动值(兼容)
+	dynLimit := 0
+	if s.loadScorer != nil {
+		dynLimit = s.loadScorer.GetDynamicLimitFromCache(context.Background(), node.ID)
+	}
+	// 限速生效条件: 动态限速>0 或 手动限速>0, 且用途不是 download(下载不限速)
+	applyLimit := (dynLimit > 0 || node.SpeedLimitMbps > 0) && node.UsageType != "download"
+	if applyLimit {
 		clientLevel = 1
 	}
 	clients := make([]map[string]interface{}, 0, len(users))
@@ -552,27 +559,29 @@ func buildXrayConfig(node *model.Node, users []model.User) ([]byte, error) {
 		},
 	}
 
-	// [节点策略控制] 限速: 通过 Xray policy levels 实现
-	// level 1 的用户受 speedLimit 限制, level 0 不限
-	if node.SpeedLimitMbps > 0 {
-		// Xray policy bufferSize 单位 bytes, 0=不限
-		// 限速通过 bufferSize 间接控制(更严格用 stats+observatory, 这里用简化方案)
-		// 实际限速由 Xray 内置 rate limit 实现: level 越高限制越严
-		// SpeedLimitMbps → bufferSize 转换: Mbps * 1e6 / 8 = bytes/s
-		// 但 Xray policy 不直接支持 Mbps, 用 bufferSize 控制缓冲区大小近似限速
-		// 更精确的限速用 socksOpt/tcpCongestion 或外部 tc, 这里用 policy level
-		ratePerSec := int64(node.SpeedLimitMbps) * 1000 * 1000 / 8 // bytes/s
-		xray["policy"] = map[string]interface{}{
-			"levels": map[string]interface{}{
-				"0": map[string]interface{}{"bufferSize": 0},
-				"1": map[string]interface{}{
-					"bufferSize":     ratePerSec,
-					"headerLimit":    ratePerSec,
-					"uplinkOnly":     0,
-					"downlinkOnly":   0,
-					"refreshSizeSec": ratePerSec,
+	// [动态限速] 限速值优先级: 动态计算 > 手动设置 > 不限速
+	// 动态限速由 LoadScorer 心跳时按用途+负载自动算, 写入 Redis 缓存
+	// 这里从缓存读, 生成 Xray policy 配置
+	if applyLimit {
+		limitMbps := dynLimit
+		if limitMbps <= 0 {
+			limitMbps = node.SpeedLimitMbps // 回退到手动值
+		}
+		if limitMbps > 0 {
+			// Mbps → bytes/s (Xray policy bufferSize 单位)
+			ratePerSec := int64(limitMbps) * 1000 * 1000 / 8
+			xray["policy"] = map[string]interface{}{
+				"levels": map[string]interface{}{
+					"0": map[string]interface{}{"bufferSize": 0},
+					"1": map[string]interface{}{
+						"bufferSize":     ratePerSec,
+						"headerLimit":    ratePerSec,
+						"uplinkOnly":     0,
+						"downlinkOnly":   0,
+						"refreshSizeSec": ratePerSec,
+					},
 				},
-			},
+			}
 		}
 	}
 
