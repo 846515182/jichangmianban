@@ -293,10 +293,15 @@ func InjectStatsConfig(cfgJSON string, apiPort int) (string, error) {
 		return "", fmt.Errorf("解析 Xray 配置 JSON 失败: %w", err)
 	}
 
-	// 幂等：已有 stats 配置则跳过
-	if _, hasStats := cfg["stats"]; hasStats {
-		log.Printf("[xray] 配置已包含 stats 段，跳过注入")
-		return cfgJSON, nil
+	// 幂等：已有有效的 stats 配置则跳过（面板可能下发空对象 {}）
+	if existingStats, hasStats := cfg["stats"]; hasStats {
+		// 尝试解析为 map，如果是非空 map 则保留
+		if statsMap, ok := existingStats.(map[string]interface{}); ok && len(statsMap) > 0 {
+			log.Printf("[xray] 配置已包含有效 stats 段，跳过注入")
+			return cfgJSON, nil
+		}
+		// 空对象或非 map 类型 → 重新注入
+		log.Printf("[xray] stats 段为空，重新注入")
 	}
 
 	cfg["stats"] = map[string]interface{}{}
