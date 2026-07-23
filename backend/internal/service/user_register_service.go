@@ -83,6 +83,7 @@ func (s *UserRegisterService) Register(in *RegisterInput) (*model.User, error) {
 
 	u := &model.User{
 		Username:     in.Username,
+		Email:        in.Email,
 		PasswordHash: string(hash),
 		TrafficLimit: trialTrafficLimit,
 		Status:       "active",

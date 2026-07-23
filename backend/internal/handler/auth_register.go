@@ -105,19 +105,31 @@ func (h *AuthRegisterHandler) Register(c *gin.Context) {
 }
 
 // registerWithTx 在事务内完成用户创建
-func (h *AuthRegisterHandler) registerWithTx(c *gin.Context, db *gorm.DB, req *registerRequest, ip string) (*service.RegisteredUser, error) {
+// 兜底设计:
+//   - 任何 panic 自动回滚事务并转为 error, 不暴露内部堆栈
+//   - 事务失败自动 rollback, 避免长时间持有连接
+//   - 错误返回给上层做统一提示, 不泄漏 SQL/内部状态
+func (h *AuthRegisterHandler) registerWithTx(c *gin.Context, db *gorm.DB, req *registerRequest, ip string) (u *service.RegisteredUser, err error) {
 	tx := db.Begin()
 	if tx.Error != nil {
 		return nil, tx.Error
 	}
 	committed := false
 	defer func() {
+		if r := recover(); r != nil {
+			// 兜底: 注册流程 panic 时回滚事务, 把 panic 转为内部错误返回
+			log.Printf("[auth_register] panic recovered username=%s ip=%s: %v", req.Username, ip, r)
+			_ = tx.Rollback()
+			u = nil
+			err = errors.New("注册流程异常, 请稍后重试")
+			return
+		}
 		if !committed {
-			tx.Rollback()
+			_ = tx.Rollback()
 		}
 	}()
 
-	u, err := h.registerSvc.Register(&service.RegisterInput{
+	u, err = h.registerSvc.Register(&service.RegisterInput{
 		Username: req.Username,
 		Password: req.Password,
 		Email:    req.Email,

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"nexus-panel/internal/app"
@@ -1672,6 +1673,35 @@ func (h *AdminSystemHandler) AutoOpsCleanup(c *gin.Context) {
 		}
 	}
 
+	// 3. 脏数据修复: 历史 bug 导致部分用户 email 为空字符串, 触发唯一索引冲突,
+	//    新用户注册失败。自动为空 email 生成占位邮箱, 释放唯一索引。
+	summary = append(summary, "=== 用户脏数据自动修复 ===")
+	fixedUsers := 0
+	if h.userRepo != nil && app.Get().DB != nil {
+		var emptyEmailUsers []model.User
+		if err := app.Get().DB.Model(&model.User{}).
+			Where("is_deleted = false AND (email IS NULL OR email = '')").
+			Find(&emptyEmailUsers).Error; err != nil {
+			summary = append(summary, "查询空邮箱用户失败: "+err.Error())
+		} else {
+			for _, u := range emptyEmailUsers {
+				newEmail := uuid.New().String() + "@placeholder.local"
+				if err := app.Get().DB.Model(&model.User{}).
+					Where("id = ?", u.ID).
+					Update("email", newEmail).Error; err != nil {
+					summary = append(summary, fmt.Sprintf("修复用户 %s 邮箱失败: %v", u.Username, err))
+				} else {
+					fixedUsers++
+				}
+			}
+			if fixedUsers > 0 {
+				summary = append(summary, fmt.Sprintf("已修复 %d 个空邮箱用户, 避免注册唯一索引冲突", fixedUsers))
+			} else {
+				summary = append(summary, "未检测到空邮箱用户")
+			}
+		}
+	}
+
 	// 3. Stale Redis 配置缓存清理(已删除节点残留的 configver/usershash)
 	summary = append(summary, "=== Stale 缓存清理 ===")
 	staleCleaned := 0
@@ -1724,6 +1754,7 @@ func (h *AdminSystemHandler) AutoOpsCleanup(c *gin.Context) {
 		"summary":         summary,
 		"output":          strings.Join(summary, "\n"),
 		"fixed_configs":   fixedConfigs,
+		"fixed_users":     fixedUsers,
 		"stale_cleaned":   staleCleaned,
 	})
 }
