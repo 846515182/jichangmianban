@@ -58,14 +58,13 @@ func JWTAuth(allowedRoles ...string) gin.HandlerFunc {
 		if rdb := app.Get().RDB; app.Get().IsRedisAvailable() {
 			exists, err := rdb.Exists(c.Request.Context(), blacklistKey).Result()
 			if err != nil {
-				// Redis 操作出错: 对 admin 接口 fail-closed, 对 user 接口 fail-open
-				// (admin 安全优先, user 可用性优先)
-				if strings.HasPrefix(c.Request.URL.Path, "/api/v1/admin/") {
-					response.FailWithHTTP(c, http.StatusServiceUnavailable, response.CodeTokenInvalid)
-					c.Abort()
-					return
-				}
-				c.Set("jwt_blacklist_check_error", err.Error())
+				// P0-JWT-Blacklist: Redis 操作出错时对所有 JWT 接口统一 fail-closed
+				// 旧版仅对 admin 接口 fail-closed, 对 user 接口 fail-open(仅 set error context),
+				// 导致用户登出后 access token 在 Redis 抖动时仍可继续使用 user 接口。
+				// Redis 故障是短暂的, 短暂不可用比安全漏洞好, 故统一 fail-closed。
+				response.FailWithHTTP(c, http.StatusServiceUnavailable, response.CodeTokenInvalid)
+				c.Abort()
+				return
 			} else if exists > 0 {
 				response.Fail(c, response.CodeTokenInvalid)
 				c.Abort()

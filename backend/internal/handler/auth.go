@@ -93,18 +93,19 @@ func (h *AuthHandler) adminLogin(c *gin.Context, ctx context.Context, req *login
 	// admin 账号维度的 key 加 "admin:" 前缀, 与 user 账号隔离
 	adminAccKey := "admin:" + req.Username
 
+	// P0-LoginBrute: 先检查锁定状态再查 DB, 避免攻击者用大量不存在的用户名打 DB / 枚举。
+	// 检查账号锁定(admin 账号维度 + IP 维度)
+	// P0-LoginIP: 同时检查 IP 维度, 防分布式撞库
+	if locked, _ := middleware.CheckLoginLocked(ctx, ip, adminAccKey); locked {
+		response.Fail(c, response.CodeAccountLocked)
+		return
+	}
 	admin, err := h.adminRepo.GetByUsername(req.Username)
 	if err != nil {
 		// 记录失败(用 admin: 前缀的 key, 不影响 user 账号)
 		middleware.RecordLoginFail(ctx, ip, adminAccKey)
 		h.recordAudit(ctx, "admin", "", req.Username, ip, ua, false)
 		response.Fail(c, response.CodeAccountPwdError)
-		return
-	}
-	// 检查账号锁定(admin 账号维度 + IP 维度)
-	// P0-LoginIP: 同时检查 IP 维度, 防分布式撞库
-	if locked, _ := middleware.CheckLoginLocked(ctx, ip, adminAccKey); locked {
-		response.Fail(c, response.CodeAccountLocked)
 		return
 	}
 	if admin.Status == "disabled" {
@@ -152,16 +153,17 @@ func (h *AuthHandler) adminLogin(c *gin.Context, ctx context.Context, req *login
 
 // userLogin 用户登录
 func (h *AuthHandler) userLogin(c *gin.Context, ctx context.Context, req *loginRequest, ip, ua string) {
+	// P0-LoginBrute: 先检查锁定状态再查 DB, 避免攻击者用大量不存在的用户名打 DB / 枚举。
+	// P0-LoginIP: 同时检查账号维度 + IP 维度锁定
+	if locked, _ := middleware.CheckLoginLocked(ctx, ip, req.Username); locked {
+		response.Fail(c, response.CodeAccountLocked)
+		return
+	}
 	user, err := h.userRepo.GetByUsername(req.Username)
 	if err != nil {
 		middleware.RecordLoginFail(ctx, ip, req.Username)
 		h.recordAudit(ctx, "user", "", req.Username, ip, ua, false)
 		response.Fail(c, response.CodeAccountPwdError)
-		return
-	}
-	// P0-LoginIP: 同时检查账号维度 + IP 维度锁定
-	if locked, _ := middleware.CheckLoginLocked(ctx, ip, req.Username); locked {
-		response.Fail(c, response.CodeAccountLocked)
 		return
 	}
 	if user.Status == "disabled" {
@@ -377,6 +379,19 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 	var req changePasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.Fail(c, response.CodeParamError)
+		return
+	}
+	// P1-AUTH: 改密时校验密码强度(必须包含字母+数字), 与注册逻辑对齐
+	hasLetter, hasDigit := false, false
+	for _, ch := range req.NewPassword {
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') {
+			hasLetter = true
+		} else if ch >= '0' && ch <= '9' {
+			hasDigit = true
+		}
+	}
+	if !hasLetter || !hasDigit {
+		response.FailMsg(c, response.CodeParamError, "密码必须包含字母和数字")
 		return
 	}
 	claims := middleware.GetClaims(c)

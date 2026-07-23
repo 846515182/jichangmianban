@@ -588,36 +588,31 @@ func (s *OrderService) AdminRefund(orderID, reason string) error {
 			}
 			// otherPaid > 0 之外: 用户仍有其它有效订阅, 保留套餐不重置(仅退款本笔金额)
 		} else {
-			// 修复 P0-F3: 跨套餐退款 - 用户当前 plan 与本订单 plan 不同,
-			// 旧版静默放过导致用户白嫖已发放的权益(天数/流量)。现按本订单 plan
-			// 实际发放的 DurationDays/TrafficLimit 扣减, 钳制不为负, 到期则标记过期。
-			changed := false
-			if plan.DurationDays > 0 && u.ExpiredAt != nil {
-				newExp := u.ExpiredAt.AddDate(0, 0, -plan.DurationDays)
-				if newExp.Before(now) {
-					newExp = now
-					// 有效期已过, 标记过期
-					u.Status = "expired"
-				}
-				u.ExpiredAt = &newExp
-				changed = true
-			}
-			if plan.TrafficLimit > 0 {
-				newLimit := u.TrafficLimit - plan.TrafficLimit
-				// 不低于已用量, 否则用户立即超额(保护用户)
-				if newLimit < u.TrafficUsed {
-					newLimit = u.TrafficUsed
-				}
-				if newLimit < 0 {
-					newLimit = 0
-				}
-				u.TrafficLimit = newLimit
-				changed = true
-			}
-			if changed {
-				if err := tx.Save(&u).Error; err != nil {
-					return fmt.Errorf("跨套餐退款回退权益失败: %w", err)
-				}
+			// 修复 P0 资金漏洞: 跨套餐退款(u.PlanID != locked.PlanID)。
+			// 升级/降级时 setUserPlanWithMode 走的是 RESET 分支(非 isRenewSamePlan):
+			//   - 旧套餐剩余流量被清零(TrafficUsed/UploadBytes/DownloadBytes 重置)
+			//   - TrafficLimit 直接覆盖为新套餐额度, 旧套餐剩余额度被丢弃
+			//   - ExpiredAt 从 now 起算(旧套餐剩余有效期未叠加到新套餐)
+			// 即旧订单 plan 的 DurationDays/TrafficLimit 在升级时已被 RESET 丢弃,
+			// 从未叠加到当前套餐。若在此处按旧订单 plan 从当前套餐的
+			// ExpiredAt/TrafficLimit 扣减, 等于扣的是从未被叠加过的天数/流量,
+			// 会误杀用户当前套餐(有效期回退/流量被扣)。
+			// 因此跨套餐退款只退钱(订单标记 refunded + EPay 退款流程 + 审计日志),
+			// 不修改用户当前套餐的有效期和流量, 避免影响用户已支付的当前订阅。
+		}
+		// 修复 P1 资金漏洞(简化处理): 退款全额退不按已使用天数核减。
+		// EPay 退款流程复杂, 此处不改变退款金额(仍全额退), 仅记录审计日志
+		// 供运营者参考: 退款金额=全额, 用户已使用 X 天。运营可据此人工追差。
+		if locked.PaidAt != nil {
+			usedDays := int64(now.Sub(*locked.PaidAt).Hours() / 24)
+			if logger := app.Get().Logger; logger != nil {
+				logger.Info("退款审计: 退款金额=全额, 已使用天数",
+					zap.String("order_id", locked.ID),
+					zap.String("user_id", locked.UserID),
+					zap.Int64("amount_cents", locked.AmountCents),
+					zap.Int64("used_days", usedDays),
+					zap.String("reason", reason),
+				)
 			}
 		}
 		return nil
@@ -718,6 +713,16 @@ func (s *OrderService) setUserPlanWithMode(tx *gorm.DB, userID string, plan *mod
 	if err := queryDB.Clauses(clause.Locking{Strength: "UPDATE"}).
 		Where("id = ? AND is_deleted = false", userID).First(&u).Error; err != nil {
 		return err
+	}
+
+	// 修复 P1 资金漏洞: 0 元订单(allowRenew=false, 即 100% 折扣券或 0 元套餐)
+	// 不覆盖已有付费套餐。当用户已有有效付费套餐(PlanID 非空且未过期)且本订单为
+	// 不同套餐时, 直接 return 不修改任何字段, 保留用户当前付费订阅, 避免 0 元订单
+	// RESET 用户有效期和流量造成资金损失(用户用 0 元券白嫖覆盖他人付费套餐的场景)。
+	// 同套餐场景仍允许 0 元订单(走下方 RESET 分支, 不叠加, 符合 P0-3 防刷逻辑)。
+	if !allowRenew && u.PlanID != nil && *u.PlanID != plan.ID &&
+		u.ExpiredAt != nil && u.ExpiredAt.After(now) {
+		return nil
 	}
 
 	isRenewSamePlan := allowRenew && u.PlanID != nil && *u.PlanID == plan.ID &&

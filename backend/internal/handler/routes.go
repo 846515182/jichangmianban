@@ -138,7 +138,10 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 	auth := api.Group("/auth")
 	{
 		auth.POST("/login", authH.Login)
-		auth.POST("/register", authRegisterH.Register)
+		// P0-RegAbuse: 注册接口加 IP 限流中间件(3 次/小时), 防代理池批量注册薅试用套餐
+		auth.POST("/register",
+			middleware.RateLimitByIP("reg:ip:", 3, time.Hour),
+			authRegisterH.Register)
 		auth.POST("/refresh", authH.Refresh)
 		auth.POST("/logout", middleware.AnyAuth(), authH.Logout)
 		auth.POST("/change-password", middleware.AnyAuth(), authH.ChangePassword)
@@ -233,7 +236,8 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 	admin.Use(middleware.AdminAuth())
 	{
 		admin.GET("/nodes", adminNodeH.NodeList)
-		admin.GET("/nodes/:id", adminNodeH.NodeDetail)
+		// P1-RBAC: NodeDetail 返回 node_token + REALITY 私钥, 需 PermKeyManage 权限
+		admin.GET("/nodes/:id", middleware.RBAC(middleware.PermKeyManage), adminNodeH.NodeDetail)
 		// 节点负载监控大盘: 返回所有节点实时负载评分 + 状态汇总, 供前端 Monitor.vue 使用
 		admin.GET("/nodes/monitor", adminNodeH.NodeMonitor)
 		admin.POST("/nodes", middleware.AuditAction("node.create"), adminNodeH.NodeCreate)
@@ -258,8 +262,9 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 		admin.DELETE("/users/:id/hard", middleware.RBAC(middleware.PermFundManage), middleware.AuditAction("user.hard_delete"), adminUserH.UserHardDelete)
 		admin.POST("/users/import", middleware.RBAC(middleware.PermFundManage), middleware.AuditAction("user.import"), adminUserH.UserImport)
 		admin.POST("/users/:id/reset-traffic", middleware.RBAC(middleware.PermFundManage), middleware.AuditAction("user.reset_traffic"), adminUserH.UserResetTraffic)
-		admin.GET("/subscriptions", NewAdminSubscriptionHandler(deps.SubRepo, deps.SubSvc).List)
-		admin.GET("/users/:id/subscription", NewAdminSubscriptionHandler(deps.SubRepo, deps.SubSvc).GetByUserID)
+		// P1-RBAC: 订阅查询返回 sub_token, 需 PermFundManage 权限
+		admin.GET("/subscriptions", middleware.RBAC(middleware.PermFundManage), NewAdminSubscriptionHandler(deps.SubRepo, deps.SubSvc).List)
+		admin.GET("/users/:id/subscription", middleware.RBAC(middleware.PermFundManage), NewAdminSubscriptionHandler(deps.SubRepo, deps.SubSvc).GetByUserID)
 		admin.POST("/users/:id/status", middleware.RBAC(middleware.PermFundManage), middleware.AuditAction("user.toggle_status"), adminUserH.UserToggleStatus)
 		admin.POST("/users/:id/activate-plan", middleware.RBAC(middleware.PermFundManage), middleware.AuditAction("user.activate_plan"), adminUserH.UserActivatePlan)
 

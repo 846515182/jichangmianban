@@ -143,6 +143,18 @@ func (s *ReferralService) BindInviter(inviteeID, inviteCode string) error {
 	if db == nil {
 		return errors.New("数据库不可用")
 	}
+	// P0-首单约束: 邀请码必须在首单支付前绑定。
+	// 防止用户先下小单试探/履约, 再绑定邀请码下大单放大返利。
+	// 已有任何 status='paid' 的订单(含已软删)则拒绝绑定。
+	var paidCount int64
+	if err := db.Model(&model.Order{}).
+		Where("user_id = ? AND status = ?", inviteeID, model.OrderStatusPaid).
+		Count(&paidCount).Error; err != nil {
+		return fmt.Errorf("检查首单约束失败: %w", err)
+	}
+	if paidCount > 0 {
+		return errors.New("首单后无法绑定邀请码")
+	}
 	return db.Transaction(func(tx *gorm.DB) error {
 		existing, err := s.referralRepo.GetByInviteeIDTx(tx, inviteeID)
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -204,6 +216,19 @@ func (s *ReferralService) HandleOrderPaid(tx *gorm.DB, order *model.Order) error
 	// 加锁后重新检查 status
 	if ref.Status != model.ReferralStatusPending {
 		return nil // 已处理, 幂等
+	}
+	// P0-首单判定: 真正校验当前订单是否为用户首笔支付订单。
+	// 旧实现仅凭 ref.Status==pending 判定, 无法阻止"绑定邀请码后下小单履约、
+	// 再下大单"类场景下对小单发放返利(本应只对首单发放)。
+	// 当前订单已在 PaySuccess 事务内被更新为 status='paid', 故查询时排除当前订单 ID。
+	var paidCount int64
+	if err := tx.Model(&model.Order{}).
+		Where("user_id = ? AND status = ? AND id <> ?", order.UserID, model.OrderStatusPaid, order.ID).
+		Count(&paidCount).Error; err != nil {
+		return fmt.Errorf("首单判定查询失败: %w", err)
+	}
+	if paidCount > 0 {
+		return nil // 非首单, 不发放返利
 	}
 	// 计算返利金额
 	rewardCents := int64(float64(order.AmountCents) * rate)

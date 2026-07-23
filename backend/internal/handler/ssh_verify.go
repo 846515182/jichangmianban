@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -11,6 +12,8 @@ import (
 	"strings"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/redis/go-redis/v9"
 
 	"nexus-panel/internal/app"
 )
@@ -23,17 +26,28 @@ func trustOnFirstUse(prefix string) ssh.HostKeyCallback {
 		redisKey := prefix + hostname
 
 		rdb := app.Get().RDB
-		if rdb == nil {
-			log.Printf("[SSH-TOFU] Redis 不可用，信任首次连接 %s (%s)", hostname, fingerprint)
-			return nil
+		// P0-SSH-TOFU: Redis 不可用时 fail-closed(拒绝连接, 不信任未知主机)
+		// 旧版仅判断 rdb == nil, 且把 rdb.Get 的任意 err(含 Redis 不可达)误判为"首次连接"
+		// 导致 Redis 故障窗口内 SSH 到任意主机(含中间人)都被自动信任。
+		// 现用 IsRedisAvailable()(后台 Ping 健康检查)判断可达性, 不可达时拒绝连接。
+		if rdb == nil || !app.Get().IsRedisAvailable() {
+			log.Printf("[SSH-TOFU] Redis 不可用, fail-closed 拒绝连接 %s (指纹: %s)", hostname, fingerprint)
+			return fmt.Errorf("主机密钥验证失败: 认证服务暂不可用, 请稍后再试")
 		}
 
 		stored, err := rdb.Get(context.Background(), redisKey).Result()
 		if err != nil {
-			// 首次连接：存储指纹
+			if !errors.Is(err, redis.Nil) {
+				// Redis 可达但查询出错(非 key 不存在): fail-closed, 避免误判为首次连接
+				log.Printf("[SSH-TOFU] Redis 查询主机密钥出错 %s: %v", hostname, err)
+				return fmt.Errorf("主机密钥验证失败: 认证服务暂不可用")
+			}
+			// redis.Nil: 真正的首次连接, 存储指纹并信任
 			encoded := base64.StdEncoding.EncodeToString(key.Marshal())
 			if setErr := rdb.Set(context.Background(), redisKey, encoded, 0).Err(); setErr != nil {
+				// 存储失败则 fail-closed: 否则下次仍判为首次连接, 攻击者可逐次轮换密钥
 				log.Printf("[SSH-TOFU] 存储主机密钥失败 %s: %v", hostname, setErr)
+				return fmt.Errorf("主机密钥验证失败: 无法持久化主机指纹")
 			}
 			log.Printf("[SSH-TOFU] 首次信任主机 %s，指纹: %s", hostname, fingerprint)
 			return nil

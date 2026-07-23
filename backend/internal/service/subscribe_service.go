@@ -625,7 +625,7 @@ func (s *SubscribeService) GetByToken(token string) (*model.Subscription, error)
 }
 
 // filterAndSortByLoad [节点容量管理] 订阅侧负载调度
-// 过滤 full 状态节点(满载拒绝新用户), 按 load_status 优先级排序(idle > normal > busy)
+// 过滤 full 状态节点(满载拒绝新用户) + 离线节点, 按 load_status 优先级排序(idle > normal > busy)
 // 保留原 created_at 顺序作为同优先级内的稳定排序
 func filterAndSortByLoad(nodes []model.Node) []model.Node {
 	if len(nodes) == 0 {
@@ -633,6 +633,7 @@ func filterAndSortByLoad(nodes []model.Node) []model.Node {
 	}
 
 	// 负载状态优先级: idle(0) < normal(1) < busy(2) < full(3, 过滤掉)
+	// P0-Offline: 离线/未知状态也给 3(过滤掉), 防止 LoadStatus 不在 map 中时返回 0 被当 idle 优先下发
 	statusPriority := map[string]int{
 		"idle":   0,
 		"normal": 1,
@@ -640,9 +641,13 @@ func filterAndSortByLoad(nodes []model.Node) []model.Node {
 		"full":   3,
 	}
 
-	// 过滤掉 full 状态节点(满载, 拒绝新用户)
+	// 过滤掉 full 状态节点(满载, 拒绝新用户) + 离线节点(不下发死节点给用户)
 	filtered := make([]model.Node, 0, len(nodes))
 	for _, n := range nodes {
+		// P0-Offline: 离线节点直接跳过, 不下发给用户(否则客户端连死节点超时)
+		if !n.Online {
+			continue
+		}
 		prio := statusPriority[n.LoadStatus]
 		if prio >= 3 {
 			// full 状态, 跳过(不下发给新用户)

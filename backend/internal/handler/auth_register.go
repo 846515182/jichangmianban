@@ -62,9 +62,11 @@ func (h *AuthRegisterHandler) Register(c *gin.Context) {
 	}
 
 	// IP 注册频率限制
+	// P0-Redis: 用 IsRedisAvailable() 替代 rdb != nil(rdb 恒非 nil, 但 Redis 可能不可达)
+	// 参考 middleware/login_lock.go 的写法, 与全局限流策略保持一致
 	ip := c.ClientIP()
 	rdb := app.Get().RDB
-	if rdb != nil {
+	if app.Get().IsRedisAvailable() {
 		key := fmt.Sprintf("register:ip:%s", ip)
 		count, err := rdb.Incr(c.Request.Context(), key).Result()
 		if err == nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sync"
 	"time"
 
 	"nexus-panel/internal/app"
@@ -195,6 +196,20 @@ func (s *LoadScorer) UpdateNodeLoadStatus(ctx context.Context, node *model.Node,
 // 管理员只需开关, 系统自动检测负载, 只有满载才降级。
 const BaseSpeedDynamic = 15 // 空闲时上限: 1080P流畅, 4K看不了
 
+// dynamicLimitDebounce 用于 CPU 毛刺去抖动: 记录每个节点上一次的 status 和限速值。
+// CPU 是瞬时采样值, 一次毛刺会立即触发 StatusFull, 导致所有限速用户降到 5Mbps
+// 并触发全节点配置重载。去抖动策略: 只有连续多次心跳都是满载(StatusFull)才真正降速
+// 到 5Mbps, 单次毛刺(上一次非满载)保持上一次的限速值不变。
+type dynamicLimitState struct {
+	lastStatus string
+	lastLimit  int
+}
+
+var (
+	dynamicLimitMu    sync.Mutex
+	dynamicLimitCache = make(map[string]dynamicLimitState)
+)
+
 // CalcDynamicSpeedLimit 根据动态限速开关 + 负载评分计算单用户限速(Mbps)
 // 仅当节点开启动态限速(usage_type=="limited")时生效。
 // 底线: 空闲/正常/繁忙都保证 1080P(12Mbps), 只有满载才降级保流畅。
@@ -203,6 +218,9 @@ const BaseSpeedDynamic = 15 // 空闲时上限: 1080P流畅, 4K看不了
 //   - 繁忙(0.6~0.85):  12 Mbps  (1080P底线, 不降)
 //   - 满载(>=0.85):    5 Mbps   (降级保720P+聊天)
 //   - 若配了 MaxBandwidthMbps, 还要保证: 限速 <= 总带宽/连接数(均分)
+//
+// CPU 毛刺去抖动: 仅当上一次心跳也是满载(StatusFull)时才真正降速到 5Mbps,
+// 单次毛刺(上一次非满载)保持上一次的限速值不变, 避免误触发限速降级 + 全节点配置重载。
 //
 // 返回 0 表示不限速(未开启动态限速)
 func CalcDynamicSpeedLimit(node *model.Node, score LoadScore, snap *HeartbeatSnapshot) int {
@@ -223,6 +241,26 @@ func CalcDynamicSpeedLimit(node *model.Node, score LoadScore, snap *HeartbeatSna
 	default:
 		limit = 5 // 满载: 降级保720P+聊天
 	}
+
+	// CPU 毛刺去抖动: 只有连续多次心跳都是满载才真正降速到 5Mbps。
+	// 单次毛刺(上一次非满载)保持上一次的限速值不变, 避免误触发全节点配置重载。
+	dynamicLimitMu.Lock()
+	prev, hasPrev := dynamicLimitCache[node.ID]
+	if score.Status == StatusFull {
+		if hasPrev && prev.lastStatus != StatusFull {
+			// 单次毛刺: 保持上一次限速, 不降级到 5Mbps
+			limit = prev.lastLimit
+			if limit < 1 {
+				limit = 12 // 兜底: 无有效历史值时保 1080P 底线
+			}
+		}
+	}
+	// 记录本次状态与限速, 供下一次心跳去抖动判断
+	dynamicLimitCache[node.ID] = dynamicLimitState{
+		lastStatus: score.Status,
+		lastLimit:  limit,
+	}
+	dynamicLimitMu.Unlock()
 
 	// 若配了带宽上限, 保证均分: 单用户限速 <= 总带宽 / 当前连接数
 	if node.MaxBandwidthMbps > 0 && snap != nil && snap.OnlineConnections > 0 {

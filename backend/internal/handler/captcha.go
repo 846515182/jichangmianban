@@ -163,6 +163,8 @@ func buildCaptchaSVG(code string, w, h int) string {
 }
 
 // VerifyCaptcha 校验图形验证码
+// [安全修复 P1] 验证码一次性校验: 无论成功失败, 校验后立即从内存和 Redis 删除,
+// 防止对同一 captcha_id 暴力枚举。验证码不存在(已过期或已删除)视为校验失败。
 func VerifyCaptcha(c *gin.Context, captchaID, captchaCode string) bool {
 	if captchaID == "" || captchaCode == "" {
 		return false
@@ -170,34 +172,29 @@ func VerifyCaptcha(c *gin.Context, captchaID, captchaCode string) bool {
 	// 统一转大写比较（字符集不含小写字母，前端可能输入小写）
 	captchaCode = strings.ToUpper(strings.TrimSpace(captchaCode))
 
-	// 1) 内存校验（线程安全）
+	// 1) 内存校验（线程安全）— 一次性: 取出后立即删除, 防止暴力枚举
 	captchaMu.Lock()
 	entry, ok := captchaStore[captchaID]
-	// 修复: 只在匹配成功时才删除，避免输错一次后内存中验证码被误删
+	if ok {
+		delete(captchaStore, captchaID)
+	}
 	captchaMu.Unlock()
 
-	if ok {
-		// 检查是否过期
-		if time.Now().After(entry.expiresAt) {
-			captchaMu.Lock()
-			delete(captchaStore, captchaID)
-			captchaMu.Unlock()
-			return false
-		}
+	if ok && !time.Now().After(entry.expiresAt) {
 		if subtle.ConstantTimeCompare([]byte(entry.code), []byte(captchaCode)) == 1 {
-			captchaMu.Lock()
-			delete(captchaStore, captchaID)
-			captchaMu.Unlock()
 			return true
 		}
 	}
 
-	// 2) Redis 兜底
+	// 2) Redis 兜底 — 一次性: Get 后立即 Del, 无论是否匹配
 	rdb := getRedis()
 	if rdb != nil {
-		saved, err := rdb.Get(c.Request.Context(), "captcha:"+captchaID).Result()
+		ctx := c.Request.Context()
+		key := "captcha:" + captchaID
+		saved, err := rdb.Get(ctx, key).Result()
+		// 无论命中与否, 立即删除, 防止再次尝试
+		rdb.Del(ctx, key)
 		if err == nil && strings.EqualFold(saved, captchaCode) {
-			rdb.Del(c.Request.Context(), "captcha:"+captchaID)
 			return true
 		}
 	}

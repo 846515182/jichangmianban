@@ -71,10 +71,16 @@ func main() {
 	}
 
 	// 5. 初始化 Redis
-	rdb := initRedis(cfg, logger)
+	// [安全修复 P1] initRedis 返回初始 Ping 是否成功, 用于校正 app.Init 的乐观初值
+	rdb, redisOK := initRedis(cfg, logger)
 
 	// 6. 初始化全局容器
 	app.Init(cfg, db, rdb, logger)
+	// app.Init 默认将 redisHealthy 乐观置为 true, 但 initRedis 在 app.Init 之前调用,
+	// 其内部对 app.Get().SetRedisHealth(false) 是空操作(app.Get() 此时为 nil)。
+	// 用 initRedis 实际 Ping 结果校正, 避免 Redis 启动即不可用时, 第一次后台 Ping
+	// 校正前(10s)的窗口内 fail-closed 守卫误判为可用。
+	app.Get().SetRedisHealth(redisOK)
 
 	// 7. 确保存在默认超级管理员(首次启动)
 	ensureSuperAdmin(db, cfg, logger)
@@ -352,19 +358,22 @@ func initDB(cfg *config.Config, logger *zap.Logger) (*gorm.DB, error) {
 }
 
 // initRedis 初始化 Redis 客户端
-func initRedis(cfg *config.Config, logger *zap.Logger) *redis.Client {
+// 返回 (client, initialHealthy): initialHealthy 表示初始 Ping 是否成功,
+// 供调用方在 app.Init 之后校正 redisHealthy 初值(避免乐观置 true 的窗口)。
+func initRedis(cfg *config.Config, logger *zap.Logger) (*redis.Client, bool) {
 	rdb := redis.NewClient(&redis.Options{
 		Addr:     cfg.RedisAddr,
 		Password: cfg.RedisPass,
 		DB:       0,
 	})
+	healthy := true
 	if err := rdb.Ping(context.Background()).Err(); err != nil {
-		// P0-Redis: 连接失败时立即标记 Redis 不可用
-		// (go-redis 会在后台自动重连, 但在重连成功前 IsRedisAvailable() 返回 false,
+		// P0-Redis: 连接失败时标记不可用
+		// (go-redis 会在后台自动重连, 但在重连成功前 IsRedisAvailable() 应返回 false,
 		//  让 login_lock/rate_limit 等关键路径走降级策略而非静默失败)
-		if app.Get() != nil {
-			app.Get().SetRedisHealth(false)
-		}
+		// 注意: 此处 app.Get() 通常为 nil(initRedis 在 app.Init 之前调用),
+		// 故通过返回值由 main 在 app.Init 之后校正健康状态。
+		healthy = false
 		logger.Warn("Redis 连接失败(部分功能不可用, 后台自动重连)", zap.String("addr", cfg.RedisAddr), zap.Error(err))
 	} else {
 		logger.Info("Redis 已连接", zap.String("addr", cfg.RedisAddr))
@@ -373,7 +382,7 @@ func initRedis(cfg *config.Config, logger *zap.Logger) *redis.Client {
 	// P0-Redis: 启动后台健康检查 goroutine, 每 10s Ping 一次更新健康状态
 	// 替代全代码的 `rdb == nil` 死代码守卫(rdb 恒非 nil, 但 Redis 可能不可达)
 	go startRedisHealthCheck(rdb, logger)
-	return rdb
+	return rdb, healthy
 }
 
 // startRedisHealthCheck 后台 Redis 健康检查

@@ -597,15 +597,17 @@ func (s *CronService) ResetTrafficMonthly() {
 	}
 
 	// 3) Redis 当日幂等键, 防止同一天重复执行(每小时检查一次)
+	// P1 业务连续性: 区分"获取锁冲突"(!ok, 正常跳过) 与 "Redis 错误"(err != nil, 降级执行)。
+	// Redis 不可用时不应阻断月初流量重置(否则月付用户全月无法使用), 仅告警并继续,
+	// 依赖 DB 层幂等(UPDATE traffic_used=0 可重复执行)避免重复重置造成业务影响。
 	rdb := app.Get().RDB
 	lockKey := fmt.Sprintf("cron:traffic:reset:%d-%02d-%02d", now.Year(), int(now.Month()), now.Day())
 	if rdb != nil {
 		ok, err := rdb.SetNX(context.Background(), lockKey, "1", 23*time.Hour).Result()
 		if err != nil {
-			s.logger.Warn("周期流量重置加锁失败,跳过本次", zap.Error(err))
-			return
-		}
-		if !ok {
+			// Redis 错误: 不跳过, 降级执行(无幂等锁保护, 依赖 DB 幂等)
+			s.logger.Warn("Redis 不可用, 周期流量重置降级执行(无幂等锁保护, 依赖 DB 幂等)", zap.Error(err))
+		} else if !ok {
 			// 今天已经执行过, 跳过(避免多副本/重启重复重置)
 			return
 		}
@@ -863,7 +865,19 @@ func (s *CronService) AutoBackupDatabase() {
 		}
 	}
 	if !done {
-		s.logger.Warn("数据库全量备份未能完成(本机无 pg_dump 且 docker exec 失败)")
+		msg := "数据库全量备份未能完成(本机无 pg_dump 且 docker exec 失败), 请立即检查备份环境, 否则灾备形同虚设"
+		s.logger.Warn(msg)
+		// P1 业务连续性: 备份失败不能静默, 发邮件/Telegram 紧急告警(参考 CheckDiskThreshold)
+		if ns := s.notifSvc(); ns != nil && ns.IsEnabled() {
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						s.logger.Error("NotifyAll goroutine panic", zap.Any("panic", r))
+					}
+				}()
+				ns.NotifyAll("Nexus-Panel 备份失败告警", msg)
+			}()
+		}
 	}
 
 	// 无论 pg_dump 是否成功, 都执行备份轮转(清理旧文件, 保留最新 1 份)
