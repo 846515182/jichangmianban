@@ -123,7 +123,12 @@
           <div class="chart-header">
             <span class="chart-title">服务日志监控</span>
             <el-tag v-if="logMonitor.available" size="small" type="success" effect="dark">
-              ERROR {{ logStats.error_count }} · WARN {{ logStats.warn_count }} · 共 {{ logStats.total_lines }} 行
+              <template v-if="logMonitor.aggregateMode">
+                错误 {{ logStats.unique_errors }} 种 · 警告 {{ logStats.unique_warns }} 种 · 共 {{ logStats.total_lines }} 种
+              </template>
+              <template v-else>
+                ERROR {{ logStats.error_count }} · WARN {{ logStats.warn_count }} · 共 {{ logStats.total_lines }} 行
+              </template>
             </el-tag>
             <el-tag v-else size="small" type="info" effect="plain">docker 不可用</el-tag>
           </div>
@@ -171,17 +176,44 @@
               {{ logMonitor.aggregateMode ? `聚合扫描 ${logStats.containers_scanned} 个容器` : `最后拉取: ${formatTime(logMonitor.lastFetch)}` }}
               <span v-if="logStats.cached" class="log-stats-cached">(命中缓存)</span>
             </span>
-            <span class="log-stats-text" v-if="logMonitor.aggregateMode && logStats.total_errors > 0" style="color: var(--np-danger)">
-              ⚠ 发现 {{ logStats.total_errors }} 条错误 · {{ logStats.total_warns }} 条警告
-            </span>
-            <span class="log-stats-text" v-else-if="logMonitor.aggregateMode && logStats.total_errors === 0" style="color: var(--np-primary)">
-              ✓ 近期无错误日志
+            <span class="log-stats-text" v-if="logMonitor.aggregateMode" style="color: var(--np-primary)">
+              去重后 {{ logStats.unique_errors }} 种错误 · {{ logStats.unique_warns }} 种警告
+              <template v-if="logStats.total_errors + logStats.total_warns > 0">
+                (原始 {{ logStats.total_errors + logStats.total_warns }} 条)
+              </template>
             </span>
             <span class="log-stats-text" v-if="!logMonitor.aggregateMode && logStats.failed" style="color: var(--np-danger)">
               ⚠ 拉取失败(容器可能已停止或 docker 不可用)
             </span>
           </div>
-          <pre class="log-view" ref="logViewRef"><span v-if="!logMonitor.highlightEnabled">{{ logMonitor.filteredLogs || (logMonitor.aggregateMode ? '点击刷新扫描所有容器错误日志…' : '请选择容器查看日志…') }}</span><span v-else v-html="logMonitor.highlightedLogs || (logMonitor.aggregateMode ? '点击刷新扫描所有容器错误日志…' : '请选择容器查看日志…')"></span></pre>
+          <div class="log-view" ref="logViewRef">
+            <!-- 聚合模式: 去重后的错误卡片列表(相同错误只展示一次) -->
+            <div v-if="logMonitor.aggregateMode" class="aggregate-list">
+              <div v-if="aggregatedErrors.length === 0" class="log-empty">
+                ✓ 近期无错误/警告日志
+              </div>
+              <div
+                v-for="(item, idx) in aggregatedErrors"
+                :key="idx"
+                :class="['aggregate-item', item.level === 'error' ? 'aggregate-error' : 'aggregate-warn']"
+              >
+                <div class="aggregate-meta">
+                  <span :class="['aggregate-badge', item.level]">{{ item.level.toUpperCase() }}</span>
+                  <span class="aggregate-count">×{{ item.count }}</span>
+                  <span v-if="item.last_at" class="aggregate-last">最后: {{ formatTime(item.last_at) }}</span>
+                  <span v-if="item.containers.length" class="aggregate-containers">来源: {{ item.containers.join(', ') }}</span>
+                  <span v-if="item.sources.length" class="aggregate-sources">日志源: {{ item.sources.join(', ') }}</span>
+                </div>
+                <pre class="aggregate-sample">{{ item.sample }}</pre>
+                <div class="aggregate-fingerprint">指纹: {{ item.fingerprint }}</div>
+              </div>
+            </div>
+            <!-- 单容器模式: 原始日志 -->
+            <pre v-else class="log-text">
+              <span v-if="!logMonitor.highlightEnabled">{{ logMonitor.filteredLogs || '请选择容器查看日志…' }}</span>
+              <span v-else v-html="logMonitor.highlightedLogs || '请选择容器查看日志…'"></span>
+            </pre>
+          </div>
         </div>
       </el-col>
     </el-row>
@@ -268,6 +300,17 @@ const logMonitor = reactive({
   lastFetch: 0 as number | 0,
 })
 
+// 聚合错误条目类型(与后端 AggregatedError 对应)
+interface AggregatedErrorItem {
+  fingerprint: string
+  level: 'error' | 'warn'
+  sample: string
+  count: number
+  last_at: string
+  containers: string[]
+  sources: string[]
+}
+
 const logStats = reactive({
   error_count: 0,
   warn_count: 0,
@@ -278,7 +321,12 @@ const logStats = reactive({
   containers_scanned: 0,
   total_errors: 0,
   total_warns: 0,
+  unique_errors: 0,
+  unique_warns: 0,
 })
+
+// 聚合模式下的错误列表(去重后)
+const aggregatedErrors = ref<AggregatedErrorItem[]>([])
 
 const logViewRef = ref<HTMLElement | null>(null)
 let logTimer: number | null = null
@@ -337,8 +385,8 @@ const fetchContainerLogs = async (silent = false) => {
   }
 }
 
-// fetchErrorsAggregate 智能聚合: 自动扫描所有容器, 提取 ERROR/WARN 行
-// 一次请求拉取 nexus-panel/postgres/redis/frontend 等所有容器的错误日志
+// fetchErrorsAggregate 智能聚合: 自动发现同 project 容器 + 系统日志,
+// 提取 ERROR/WARN 行并按指纹去重, 相同错误只展示一次。
 // silent: 定时器触发时静默
 const fetchErrorsAggregate = async (silent = false) => {
   logMonitor.loading = true
@@ -353,26 +401,25 @@ const fetchErrorsAggregate = async (silent = false) => {
       logStats.containers_scanned = d.containers_scanned || 0
       logStats.total_errors = d.total_errors || 0
       logStats.total_warns = d.total_warns || 0
+      logStats.unique_errors = d.unique_errors || 0
+      logStats.unique_warns = d.unique_warns || 0
       logStats.error_count = d.total_errors || 0
       logStats.warn_count = d.total_warns || 0
-      // 将聚合的错误条目格式化为日志文本(带容器名前缀)
-      const errors = d.errors || []
-      if (errors.length === 0) {
-        logMonitor.rawLogs = '✓ 近期所有容器无错误/警告日志'
-      } else {
-        logMonitor.rawLogs = errors.map((e: any) => {
-          const ts = e.timestamp ? e.timestamp.split('T').join(' ').replace('Z', '') + ' ' : ''
-          const lvl = e.level === 'error' ? '[ERROR]' : '[WARN] '
-          return `${ts}${lvl} [${e.container}] ${e.line}`
-        }).join('\n')
-      }
-      logStats.total_lines = errors.length
+      logStats.total_lines = (d.errors || []).length
       logStats.cached = false
       logStats.failed = false
+      aggregatedErrors.value = (d.errors || []).map((e: any) => ({
+        fingerprint: e.fingerprint || '',
+        level: e.level === 'error' ? 'error' : 'warn',
+        sample: e.sample || '',
+        count: e.count || 1,
+        last_at: e.last_at || '',
+        containers: e.containers || [],
+        sources: e.sources || [],
+      }))
       logMonitor.lastFetch = Date.now()
-      // 聚合模式固定为 all(已只含 error/warn), 直接渲染高亮
-      logMonitor.level = 'all'
-      applyLogFilter()
+      // 自动滚动到底部(最新错误在底部)
+      scrollToLogBottom()
     }
   } catch {
     if (!silent) ElMessage.error('聚合扫描失败')
@@ -523,8 +570,23 @@ const stopLogTimer = () => {
 }
 
 // 复制日志到剪贴板(三层兜底: clipboard API → execCommand → 选中)
+// 获取当前要复制的日志文本
+const getLogText = (): string => {
+  if (logMonitor.aggregateMode) {
+    if (aggregatedErrors.value.length === 0) return ''
+    return aggregatedErrors.value.map(item => {
+      const lines: string[] = []
+      lines.push(`[${item.level.toUpperCase()}] ×${item.count} 最后: ${item.last_at ? formatTime(item.last_at) : '-'} 来源: ${item.containers.join(', ')} 日志源: ${item.sources.join(', ')}`)
+      lines.push(item.sample)
+      lines.push(`指纹: ${item.fingerprint}`)
+      return lines.join('\n')
+    }).join('\n\n')
+  }
+  return logMonitor.filteredLogs || logMonitor.rawLogs
+}
+
 const copyLogs = async () => {
-  const text = logMonitor.filteredLogs || logMonitor.rawLogs
+  const text = getLogText()
   if (!text) {
     ElMessage.warning('暂无日志可复制')
     return
@@ -792,5 +854,80 @@ onBeforeUnmount(() => {
   background: rgba(255, 217, 61, 0.1);
   display: inline;
   border-radius: 2px;
+}
+
+/* 智能运维聚合错误列表样式 */
+.aggregate-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.aggregate-empty {
+  color: var(--np-primary);
+  padding: 20px 0;
+  text-align: center;
+}
+.aggregate-item {
+  border-radius: 6px;
+  padding: 10px;
+  border-left: 4px solid;
+}
+.aggregate-error {
+  background: rgba(255, 107, 107, 0.08);
+  border-left-color: #ff6b6b;
+}
+.aggregate-warn {
+  background: rgba(255, 217, 61, 0.08);
+  border-left-color: #ffd93d;
+}
+.aggregate-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 11px;
+}
+.aggregate-badge {
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-weight: bold;
+  color: #000;
+}
+.aggregate-badge.error {
+  background: #ff6b6b;
+}
+.aggregate-badge.warn {
+  background: #ffd93d;
+}
+.aggregate-count {
+  font-weight: bold;
+  color: var(--np-text-primary);
+}
+.aggregate-last {
+  color: var(--np-text-secondary);
+}
+.aggregate-containers,
+.aggregate-sources {
+  color: var(--np-text-secondary);
+  background: rgba(128, 128, 128, 0.15);
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+.aggregate-sample {
+  margin: 0;
+  padding: 6px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--np-text-primary);
+  font-size: 11px;
+}
+.aggregate-fingerprint {
+  margin-top: 6px;
+  color: var(--np-text-secondary);
+  font-size: 10px;
+  opacity: 0.8;
 }
 </style>
