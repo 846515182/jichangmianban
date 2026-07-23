@@ -97,7 +97,7 @@ func NewDeps() *Deps {
 		OrderSvc:       orderSvc,
 		PaymentSvc:     paymentSvc,
 		EmailSvc:       emailSvc,
-		RegisterSvc:    service.NewUserRegisterService(userRepo, planRepo),
+		RegisterSvc:    service.NewUserRegisterService(userRepo, planRepo, subRepo),
 		SysStatsSvc:    service.NewSystemStatsService(nodeRepo, userRepo),
 		TicketSvc:      service.NewTicketService(ticketRepo, userRepo, adminRepo),
 		ReferralSvc:    referralSvc,
@@ -214,6 +214,10 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 		tickets.POST("/:id/reply", ticketH.ReplyAlias)
 		tickets.POST("/:id/close", ticketH.CloseAlias)
 	}
+
+	// 公开试用套餐信息(注册页展示, 无需登录)
+	// 修复 P1-TRIAL-03: 注册页动态展示真实试用套餐。
+	api.GET("/plans/trial", planH.PublicTrialPlan)
 
 	userPub := api.Group("")
 	userPub.Use(middleware.UserAuth())

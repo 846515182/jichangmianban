@@ -67,11 +67,13 @@ func (s *SubscribeService) GenerateSignedURL(userID, baseURL, clientIP string) (
 
 // FetchResult 订阅获取结果
 type FetchResult struct {
-	Content     string
-	ContentType string
-	Filename    string
-	Blocked     bool   // 账号是否被阻断(到期/超流量/禁用)
-	BlockReason string // 阻断原因
+	Content      string
+	ContentType  string
+	Filename     string
+	Blocked      bool   // 账号是否被阻断(到期/超流量/禁用)
+	BlockReason  string // 阻断原因
+	EmptyNodes   bool   // 节点列表为空
+	EmptyReason  string // 空节点原因提示
 }
 
 // Fetch 获取订阅内容
@@ -135,30 +137,54 @@ func (s *SubscribeService) Fetch(userID, subType, sig, userAgent, clientIP strin
 
 	// 5. 按类型生成
 	res := &FetchResult{}
-	switch subType {
-	case SubTypeClash:
-		res.Content = s.generateClashYAML(nodes, userID)
-		res.ContentType = "application/x-yaml; charset=utf-8"
-		res.Filename = "clash.yaml"
-	case SubTypeSingBox:
-		res.Content = s.generateSingBoxJSON(nodes, userID)
-		res.ContentType = "application/json; charset=utf-8"
-		res.Filename = "sing-box.json"
-	case SubTypeSIP008:
-		res.Content = s.generateSIP008(nodes)
-		res.ContentType = "application/json; charset=utf-8"
-		res.Filename = "sip008.json"
-	case SubTypeV2Ray:
-		fallthrough
-	default:
-		res.ContentType = "text/plain; charset=utf-8"
-		res.Filename = "v2ray.txt"
-		res.Content = base64.StdEncoding.EncodeToString([]byte(s.generateV2RayURIs(nodes, userID)))
+	if !blocked && len(nodes) == 0 {
+		res.EmptyNodes = true
+		res.EmptyReason = "当前套餐未分配可用节点，请联系管理员检查节点绑定"
+		res.Content = generateEmptyNodesContent(subType, res.EmptyReason)
+	} else {
+		switch subType {
+		case SubTypeClash:
+			res.Content = s.generateClashYAML(nodes, userID)
+			res.ContentType = "application/x-yaml; charset=utf-8"
+			res.Filename = "clash.yaml"
+		case SubTypeSingBox:
+			res.Content = s.generateSingBoxJSON(nodes, userID)
+			res.ContentType = "application/json; charset=utf-8"
+			res.Filename = "sing-box.json"
+		case SubTypeSIP008:
+			res.Content = s.generateSIP008(nodes)
+			res.ContentType = "application/json; charset=utf-8"
+			res.Filename = "sip008.json"
+		case SubTypeV2Ray:
+			fallthrough
+		default:
+			res.ContentType = "text/plain; charset=utf-8"
+			res.Filename = "v2ray.txt"
+			res.Content = base64.StdEncoding.EncodeToString([]byte(s.generateV2RayURIs(nodes, userID)))
+		}
 	}
 	// 阻断时在响应头标记原因(订阅生成器透传)
 	res.Blocked = blocked
 	res.BlockReason = reason
 	return res, nil
+}
+
+// generateEmptyNodesContent 节点为空时生成一段可读提示,
+// 让客户端(V2RayN/Clash/sing-box)订阅列表中能看到提示而不是空白。
+func generateEmptyNodesContent(subType, reason string) string {
+	text := "# " + reason + "\n# 请登录用户面板查看详情\n"
+	switch subType {
+	case SubTypeClash:
+		return text + "proxies: []\n"
+	case SubTypeSingBox:
+		return "{\n  \"log\": {\"level\": \"info\"},\n  \"outbounds\": [{\"type\": \"direct\", \"tag\": \"direct\"}, {\"type\": \"selector\", \"tag\": \"Nexus\", \"outbounds\": [\"direct\"], \"default\": \"direct\"}],\n  \"route\": {\"final\": \"direct\"}\n}\n"
+	case SubTypeSIP008:
+		return "[]\n"
+	case SubTypeV2Ray:
+		fallthrough
+	default:
+		return base64.StdEncoding.EncodeToString([]byte(text))
+	}
 }
 
 // detectSubType 根据客户端 User-Agent 识别订阅类型

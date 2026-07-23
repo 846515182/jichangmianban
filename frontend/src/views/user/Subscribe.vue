@@ -46,25 +46,38 @@
         <div class="np-card sub-card">
           <div class="card-header">
             <div class="card-title">订阅链接</div>
-            <el-radio-group v-model="format" @change="updateUrl" size="small">
-              <el-radio-button value="clash">Clash</el-radio-button>
-              <el-radio-button value="sing-box">Sing-Box</el-radio-button>
-              <el-radio-button value="v2ray">V2Ray</el-radio-button>
-            </el-radio-group>
+            <div class="header-actions">
+              <el-radio-group v-model="format" @change="updateUrl" size="small">
+                <el-radio-button value="clash">Clash</el-radio-button>
+                <el-radio-button value="sing-box">Sing-Box</el-radio-button>
+                <el-radio-button value="v2ray">V2Ray</el-radio-button>
+              </el-radio-group>
+              <!-- 修复 P0-FE8: 刷新订阅链接 -->
+              <el-button size="small" text type="primary" @click="fetchUserInfo" :icon="Refresh" :loading="!qrReady && !!subscribeError">
+                刷新
+              </el-button>
+            </div>
           </div>
 
-          <el-input :model-value="subscribeUrl" readonly size="large" class="sub-input">
+          <el-input :model-value="subscribeUrl" readonly size="large" class="sub-input" :disabled="!!subscribeError">
             <template #append>
-              <el-button @click="copyLink" :icon="CopyDocument">复制链接</el-button>
+              <el-button @click="copyLink" :icon="CopyDocument" :disabled="!!subscribeError">复制链接</el-button>
             </template>
           </el-input>
+
+          <!-- 修复 P0-FE8: 错误提示 -->
+          <div v-if="subscribeError" class="sub-error">
+            <el-icon><Warning /></el-icon>
+            <span>{{ subscribeError }}</span>
+          </div>
 
           <div class="qr-section">
             <div class="qr-box">
               <canvas ref="qrCanvas"></canvas>
               <div v-if="!qrReady" class="qr-placeholder">
-                <el-icon class="is-loading"><Loading /></el-icon>
-                <span>生成中...</span>
+                <el-icon v-if="!subscribeError" class="is-loading"><Loading /></el-icon>
+                <el-icon v-else><Warning /></el-icon>
+                <span>{{ subscribeError ? '订阅链接异常' : '生成中...' }}</span>
               </div>
             </div>
             <div class="qr-tip">
@@ -165,7 +178,7 @@
 import { ref, onMounted, nextTick, watch } from 'vue'
 import QRCode from 'qrcode'
 import { ElMessage } from 'element-plus'
-import { CopyDocument, Download, Refresh, Loading, DataLine, Timer, Cpu, CircleCheck, FullScreen } from '@element-plus/icons-vue'
+import { CopyDocument, Download, Refresh, Loading, DataLine, Timer, Cpu, CircleCheck, FullScreen, Warning } from '@element-plus/icons-vue'
 import { formatTime, formatTraffic } from '@/utils/format'
 import { copyToClipboard, utf8ToBase64 } from '@/utils/clipboard'
 import request from '@/utils/request'
@@ -213,6 +226,8 @@ const activeGuide = ref('Clash')
 
 const rawSubscribeUrl = ref('')
 const subscribeUrl = ref('')
+// 修复 P0-FE8: 订阅链接为空/获取失败时的错误提示与重试
+const subscribeError = ref('')
 
 const trafficUsed = ref(0)
 const trafficLimit = ref(0)
@@ -247,6 +262,7 @@ const updateUrl = () => {
 // 通用复制函数已抽到 @/utils/clipboard
 
 const fetchUserInfo = async () => {
+  subscribeError.value = ''
   try {
     const res = await request.get<ApiResponse<UserInfo>>('/api/v1/user/info')
     if (res && res.code === 0 && res.data) {
@@ -254,6 +270,10 @@ const fetchUserInfo = async () => {
         rawSubscribeUrl.value = res.data.subscribe_url
         subscribeUrl.value = buildUrlByFormat(res.data.subscribe_url, format.value)
         await renderQr()
+      } else {
+        // 修复 P0-FE8: 订阅链接为空时给出明确提示, 便于用户重试或联系管理员
+        subscribeError.value = '订阅链接为空，请刷新重试或联系管理员'
+        qrReady.value = false
       }
       trafficUsed.value = res.data.traffic_used || 0
       trafficLimit.value = res.data.traffic_limit || 0
@@ -273,7 +293,10 @@ const fetchUserInfo = async () => {
         statusClass.value = 'ok'
       }
     }
-  } catch { /* 拦截器处理 */ }
+  } catch {
+    subscribeError.value = '订阅信息获取失败，请刷新重试'
+    qrReady.value = false
+  }
 }
 
 const refreshNodes = async () => {
@@ -499,6 +522,20 @@ watch(format, () => updateUrl())
 .sub-card { padding: 20px; height: 100%; box-sizing: border-box; }
 .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 10px; }
 .card-title { font-size: 15px; font-weight: 600; color: var(--np-text, #e7ecf3); }
+.header-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.sub-error {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: rgba(245, 108, 108, 0.12);
+  border: 1px solid rgba(245, 108, 108, 0.3);
+  border-radius: 8px;
+  color: #f56c6c;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 
 .sub-input :deep(.el-input__inner) { font-size: 13px; }
 

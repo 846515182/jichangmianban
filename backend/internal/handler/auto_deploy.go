@@ -1306,7 +1306,7 @@ func preDeployCheck(client *ssh.Client, listenPort, healthPort int, nodeShortID 
 		result.Fatal = true
 		result.ErrCode = DeployErrPortConflict
 		result.Reason = fmt.Sprintf("端口 %d 已被占用", listenPort)
-		result.FixSuggestion = fmt.Sprintf("1) 修改节点端口(同机多节点需用不同端口)  2) 停止占用端口的进程  3) 释放端口: fuser -k %d/tcp", listenPort, listenPort)
+		result.FixSuggestion = fmt.Sprintf("1) 修改节点端口(同机多节点需用不同端口)  2) 停止占用端口的进程  3) 释放端口: fuser -k %d/tcp", listenPort)
 		result.Output = strings.Join(lines, "\n")
 		return result
 	}

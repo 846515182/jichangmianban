@@ -102,6 +102,8 @@ func (s *PlanService) CreatePlan(in *CreatePlanInput) (*model.Plan, error) {
 // 原代码无条件同步, 导致管理员只改 name/is_enabled/sort_order 时,
 // 用户手动调整的 traffic_limit 被静默覆盖回套餐默认值
 // 修复 P1-4: 同步增加 original_price >= price 校验
+// 修复 P1-TRIAL-01: 启用试用套餐前必须至少绑定一个可用节点,
+// 否则用户注册后自动绑定试用套餐却拉不到任何节点。
 func (s *PlanService) UpdatePlan(id string, in *UpdatePlanInput) (*model.Plan, error) {
 	p, err := s.repo.GetByID(id)
 	if err != nil {
@@ -118,6 +120,19 @@ func (s *PlanService) UpdatePlan(id string, in *UpdatePlanInput) (*model.Plan, e
 	}
 	if newOriginalPriceCents > 0 && newOriginalPriceCents < newPriceCents {
 		return nil, errors.New("原价不能小于售价")
+	}
+
+	// 修复 P1-TRIAL-01: 设置为试用套餐时强制校验节点绑定
+	willBeTrial := p.IsTrial
+	if in.IsTrial != nil {
+		willBeTrial = *in.IsTrial
+	}
+	if willBeTrial {
+		if count, err := s.repo.CountNodesByPlanID(id); err != nil {
+			return nil, fmt.Errorf("校验节点绑定失败: %w", err)
+		} else if count == 0 {
+			return nil, errors.New("试用套餐必须绑定至少一个可用节点")
+		}
 	}
 
 	// 记录旧 TrafficLimit, 用于判断是否需要同步用户配额
@@ -212,6 +227,11 @@ func (s *PlanService) GetPlan(id string) (*model.Plan, error) {
 // ListEnabledPlans 用户端列表(只返回启用)
 func (s *PlanService) ListEnabledPlans() ([]model.Plan, error) {
 	return s.repo.ListEnabled()
+}
+
+// GetTrialPlan 获取当前启用的试用套餐
+func (s *PlanService) GetTrialPlan() (*model.Plan, error) {
+	return s.repo.GetTrialPlan()
 }
 
 // CountNodesByPlanID 统计绑定该套餐的节点数量

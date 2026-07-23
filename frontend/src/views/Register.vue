@@ -89,7 +89,7 @@
 
       <div class="register-tip">
         <el-icon><InfoFilled /></el-icon>
-        <span>注册即享 5GB 试用流量，开通立即使用</span>
+        <span>{{ trialText }}</span>
       </div>
 
       <div class="login-link">
@@ -101,11 +101,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { User, Lock, InfoFilled, Key, Refresh } from '@element-plus/icons-vue'
 import request from '@/utils/request'
+import { formatTraffic } from '@/utils/format'
 
 const router = useRouter()
 
@@ -120,6 +121,28 @@ const captchaLoading = ref(false)
 // 弹到页面顶部的 ElMessage 误读为"邀请码错误"等其他字段错误
 const captchaError = ref('')
 
+// 修复 P1-TRIAL-03: 动态展示试用套餐信息
+interface TrialPlan {
+  has_trial: boolean
+  name?: string
+  traffic_limit?: number
+  duration_days?: number
+  node_count?: number
+}
+const trialInfo = ref<TrialPlan>({ has_trial: false })
+const trialLoading = ref(false)
+
+const trialText = computed(() => {
+  const t = trialInfo.value
+  if (!t.has_trial) {
+    return '注册即享 5GB 试用流量，开通立即使用'
+  }
+  const name = t.name || '试用套餐'
+  const traffic = t.traffic_limit && t.traffic_limit > 0 ? formatTraffic(t.traffic_limit) : '5GB'
+  const days = t.duration_days && t.duration_days > 0 ? `${t.duration_days} 天` : '30 天'
+  return `注册即享 ${name}：${traffic} / ${days}`
+})
+
 const form = reactive({
   username: '',
   password: '',
@@ -133,10 +156,32 @@ const rules: FormRules = {
     { required: true, message: '请输入用户名', trigger: 'blur' },
     { min: 3, max: 20, message: '用户名长度 3-20 个字符', trigger: 'blur' },
     { pattern: /^[a-zA-Z0-9_]+$/, message: '仅支持字母、数字和下划线', trigger: 'blur' },
+    // 修复 P0-FE6: 用户名至少包含一个字母, 与后端规则一致
+    {
+      validator: (_rule, value, callback) => {
+        if (!/[a-zA-Z]/.test(value)) {
+          callback(new Error('用户名至少包含一个字母'))
+        } else {
+          callback()
+        }
+      },
+      trigger: 'blur',
+    },
   ],
   password: [
     { required: true, message: '请输入密码', trigger: 'blur' },
     { min: 8, max: 32, message: '密码长度 8-32 个字符', trigger: 'blur' },
+    // 修复 P0-FE5: 密码规则同步后端, 必须同时包含字母和数字
+    {
+      validator: (_rule, value, callback) => {
+        if (!/[a-zA-Z]/.test(value) || !/[0-9]/.test(value)) {
+          callback(new Error('密码必须同时包含字母和数字'))
+        } else {
+          callback()
+        }
+      },
+      trigger: 'blur',
+    },
   ],
   confirmPassword: [
     { required: true, message: '请再次输入密码', trigger: 'blur' },
@@ -175,8 +220,24 @@ const loadCaptcha = async () => {
   }
 }
 
+// 修复 P1-TRIAL-03: 拉取公开试用套餐信息
+const fetchTrialPlan = async () => {
+  trialLoading.value = true
+  try {
+    const res: any = await request.get('/api/v1/plans/trial')
+    if (res && res.code === 0 && res.data) {
+      trialInfo.value = res.data
+    }
+  } catch {
+    trialInfo.value = { has_trial: false }
+  } finally {
+    trialLoading.value = false
+  }
+}
+
 onMounted(() => {
   loadCaptcha()
+  fetchTrialPlan()
 })
 
 // 注册处理
@@ -194,7 +255,8 @@ const handleRegister = async () => {
         captcha_code: form.captchaCode,
       })
       ElMessage.success('注册成功，请登录')
-      router.push('/login')
+      // 修复 P0-FE7: 跳转登录页时预填用户名
+      router.push({ path: '/login', query: { username: form.username } })
     } catch (e: any) {
       // 注册失败(含验证码错误)后刷新验证码, 避免旧 captcha_id 失效导致一直失败
       loadCaptcha()

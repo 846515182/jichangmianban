@@ -35,20 +35,20 @@ func (h *PlanHandler) AdminPlanList(c *gin.Context) {
 	for _, p := range list {
 		count, _ := h.planSvc.CountNodesByPlanID(p.ID)
 		result = append(result, gin.H{
-			"id":                  p.ID,
-			"name":                p.Name,
-			"description":         p.Description,
-			"features":            p.Features,
-			"limitations":         p.Limitations,
-			"traffic_limit":       p.TrafficLimit,
-			"duration_days":       p.DurationDays,
-			"price_cents":         p.PriceCents,
+			"id":                   p.ID,
+			"name":                 p.Name,
+			"description":          p.Description,
+			"features":             p.Features,
+			"limitations":          p.Limitations,
+			"traffic_limit":        p.TrafficLimit,
+			"duration_days":        p.DurationDays,
+			"price_cents":          p.PriceCents,
 			"original_price_cents": p.OriginalPriceCents,
-			"device_limit":        p.DeviceLimit,
-			"sort_order":          p.SortOrder,
-			"is_enabled":          p.IsEnabled,
-			"is_trial":            p.IsTrial,
-			"node_count":          count,
+			"device_limit":         p.DeviceLimit,
+			"sort_order":           p.SortOrder,
+			"is_enabled":           p.IsEnabled,
+			"is_trial":             p.IsTrial,
+			"node_count":           count,
 		})
 	}
 	response.OK(c, gin.H{"list": result, "total": total})
@@ -116,21 +116,51 @@ func (h *PlanHandler) UserPlanList(c *gin.Context) {
 	for _, p := range list {
 		count, _ := h.planSvc.CountNodesByPlanID(p.ID)
 		result = append(result, gin.H{
-			"id":                  p.ID,
-			"name":                p.Name,
-			"description":         p.Description,
-			"features":            p.Features,
-			"limitations":         p.Limitations,
-			"traffic_limit":       p.TrafficLimit,
-			"duration_days":       p.DurationDays,
-			"price_cents":         p.PriceCents,
+			"id":                   p.ID,
+			"name":                 p.Name,
+			"description":          p.Description,
+			"features":             p.Features,
+			"limitations":          p.Limitations,
+			"traffic_limit":        p.TrafficLimit,
+			"duration_days":        p.DurationDays,
+			"price_cents":          p.PriceCents,
 			"original_price_cents": p.OriginalPriceCents,
-			"device_limit":        p.DeviceLimit,
-			"sort_order":          p.SortOrder,
-			"is_enabled":          p.IsEnabled,
-			"is_trial":            p.IsTrial,
-			"node_count":          count,
+			"device_limit":         p.DeviceLimit,
+			"sort_order":           p.SortOrder,
+			"is_enabled":           p.IsEnabled,
+			"is_trial":             p.IsTrial,
+			"node_count":           count,
 		})
 	}
 	response.OK(c, gin.H{"list": result, "total": len(result)})
+}
+
+// PublicTrialPlan [33] GET /api/v1/plans/trial
+// 公开接口: 返回当前启用的试用套餐信息, 供注册页动态展示
+// 修复 P1-TRIAL-03: 注册页原写死 "5GB 试用流量", 与实际试用套餐不一致。
+func (h *PlanHandler) PublicTrialPlan(c *gin.Context) {
+	p, err := h.planSvc.GetTrialPlan()
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			response.OK(c, gin.H{"has_trial": false})
+			return
+		}
+		response.Fail(c, response.CodeDBError)
+		return
+	}
+	count, _ := h.planSvc.CountNodesByPlanID(p.ID)
+	response.OK(c, gin.H{
+		"has_trial":            true,
+		"id":                   p.ID,
+		"name":                 p.Name,
+		"description":          p.Description,
+		"features":             p.Features,
+		"limitations":          p.Limitations,
+		"traffic_limit":        p.TrafficLimit,
+		"duration_days":        p.DurationDays,
+		"price_cents":          p.PriceCents,
+		"original_price_cents": p.OriginalPriceCents,
+		"device_limit":         p.DeviceLimit,
+		"node_count":           count,
+	})
 }

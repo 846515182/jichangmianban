@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
@@ -22,10 +23,11 @@ var usernameRegex = regexp.MustCompile(`^[a-zA-Z0-9_]{3,20}$`)
 type UserRegisterService struct {
 	userRepo *repo.UserRepo
 	planRepo *repo.PlanRepo
+	subRepo  *repo.SubscriptionRepo
 }
 
-func NewUserRegisterService(u *repo.UserRepo, p *repo.PlanRepo) *UserRegisterService {
-	return &UserRegisterService{userRepo: u, planRepo: p}
+func NewUserRegisterService(u *repo.UserRepo, p *repo.PlanRepo, s *repo.SubscriptionRepo) *UserRegisterService {
+	return &UserRegisterService{userRepo: u, planRepo: p, subRepo: s}
 }
 
 type RegisterInput struct {
@@ -43,6 +45,17 @@ func (s *UserRegisterService) Register(in *RegisterInput) (*model.User, error) {
 	// 后端必须重复校验用户名规则 (前端校验不可信)
 	if !usernameRegex.MatchString(in.Username) {
 		return nil, errors.New("用户名长度 3-20 个字符, 仅支持字母、数字和下划线")
+	}
+	// 修复 P0-REG-03: 用户名至少包含一个字母, 避免纯数字用户名造成混淆/排序/安全审计问题。
+	hasAlpha := false
+	for _, ch := range in.Username {
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') {
+			hasAlpha = true
+			break
+		}
+	}
+	if !hasAlpha {
+		return nil, errors.New("用户名至少包含一个字母")
 	}
 	if len(in.Password) < 8 {
 		return nil, errors.New("密码长度至少 8 位")
@@ -89,18 +102,23 @@ func (s *UserRegisterService) Register(in *RegisterInput) (*model.User, error) {
 		Status:       "active",
 	}
 	// 注册即享试用: 查找试用套餐(name 含"试用"且 enabled), 找到则绑定
+	// 修复 P1-TRIAL-02: 试用套餐若没有绑定任何节点, 不绑定该套餐,
+	// 避免用户注册后订阅内容为空。此时仍给默认 5GB + 30 天试用。
 	trialPlan, pErr := s.planRepo.GetTrialPlan()
 	if pErr == nil && trialPlan != nil {
-		u.PlanID = &trialPlan.ID
-		if trialPlan.TrafficLimit > 0 {
-			u.TrafficLimit = trialPlan.TrafficLimit
+		if nodeCount, nErr := s.planRepo.CountNodesByPlanID(trialPlan.ID); nErr == nil && nodeCount > 0 {
+			u.PlanID = &trialPlan.ID
+			if trialPlan.TrafficLimit > 0 {
+				u.TrafficLimit = trialPlan.TrafficLimit
+			}
+			if trialPlan.DurationDays > 0 {
+				t := time.Now().AddDate(0, 0, trialPlan.DurationDays)
+				u.ExpiredAt = &t
+			}
 		}
-		if trialPlan.DurationDays > 0 {
-			t := time.Now().AddDate(0, 0, trialPlan.DurationDays)
-			u.ExpiredAt = &t
-		}
-	} else {
-		// 没有试用套餐, 仍然给 5GB + 30 天试用
+	}
+	if u.ExpiredAt == nil {
+		// 没有试用套餐或未绑定节点, 仍然给 5GB + 30 天试用
 		t := time.Now().AddDate(0, 0, trialDurationDays)
 		u.ExpiredAt = &t
 	}
@@ -113,7 +131,7 @@ func (s *UserRegisterService) Register(in *RegisterInput) (*model.User, error) {
 		// 修复 P0-10: 用 errors.Is 判断唯一约束冲突, 替代脆弱的字符串匹配。
 		// gorm v2 支持 gorm.ErrDuplicatedKey (需配置 TranslateError)。
 		if errors.Is(err, gorm.ErrDuplicatedKey) || isDuplicateError(err) {
-			// 区分是 username 还是 email 冲���: 再查一次定位
+			// 区分是 username 还是 email 冲突: 再查一次定位
 			if ex, e2 := s.userRepo.GetByEmail(in.Email); e2 == nil && ex != nil {
 				return nil, ErrDuplicateEmail
 			}
@@ -121,6 +139,24 @@ func (s *UserRegisterService) Register(in *RegisterInput) (*model.User, error) {
 		}
 		return nil, err
 	}
+
+	// 修复 P0-REG-02: 注册成功时立即在事务内创建 subscription。
+	// 旧版 subscription 由 UserInfo 接口懒创建, 若用户注册后不访问 Dashboard
+	// 或 UserInfo 失败, 则用户没有订阅链接, 无法导入节点。
+	// 提前创建后, 任何调用 EnsureSubscription 的地方都能命中并复用。
+	tok, err := generateNodeToken()
+	if err != nil {
+		return nil, fmt.Errorf("生成订阅 token 失败: %w", err)
+	}
+	sub := &model.Subscription{
+		UserID:   u.ID,
+		SubToken: tok,
+		SubType:  "clash",
+	}
+	if err := s.subRepo.CreateInDB(db, sub); err != nil {
+		return nil, fmt.Errorf("创建订阅失败: %w", err)
+	}
+
 	return u, nil
 }
 
@@ -162,7 +198,6 @@ func (s *UserRegisterService) SetUserPlan(userID string, planID string) error {
 	}
 	return s.userRepo.Update(u)
 }
-
 
 // GetUserRepo [S9 fix 2026-07-14] 暴露 userRepo, 用于 handler 获取 db 句柄
 func (s *UserRegisterService) GetUserRepo() *repo.UserRepo {

@@ -45,6 +45,11 @@ func (r *SubscriptionRepo) Create(s *model.Subscription) error {
 	return r.db.Create(s).Error
 }
 
+// CreateInDB 使用指定 DB 创建订阅(用于事务)
+func (r *SubscriptionRepo) CreateInDB(db *gorm.DB, s *model.Subscription) error {
+	return db.Create(s).Error
+}
+
 // Update 更新订阅
 func (r *SubscriptionRepo) Update(s *model.Subscription) error {
 	return r.db.Save(s).Error
