@@ -61,24 +61,7 @@ func (h *AuthRegisterHandler) Register(c *gin.Context) {
 		req.Email = uuid.New().String() + "@placeholder.local"
 	}
 
-	// IP 注册频率限制
-	// P0-Redis: 用 IsRedisAvailable() 替代 rdb != nil(rdb 恒非 nil, 但 Redis 可能不可达)
-	// 参考 middleware/login_lock.go 的写法, 与全局限流策略保持一致
 	ip := c.ClientIP()
-	rdb := app.Get().RDB
-	if app.Get().IsRedisAvailable() {
-		key := fmt.Sprintf("register:ip:%s", ip)
-		count, err := rdb.Incr(c.Request.Context(), key).Result()
-		if err == nil {
-			if count == 1 {
-				rdb.Expire(c.Request.Context(), key, 1*time.Hour)
-			}
-			if count > 3 {
-				response.FailMsg(c, response.CodeRateLimit, "该 IP 注册过于频繁，请稍后再试")
-				return
-			}
-		}
-	}
 
 	// 事务内创建用户
 	db := h.registerSvc.GetUserRepo().GetDB()
@@ -101,6 +84,24 @@ func (h *AuthRegisterHandler) Register(c *gin.Context) {
 		log.Printf("[auth_register] register failed username=%s ip=%s: %v", req.Username, ip, err)
 		response.FailMsg(c, response.CodeServerError, "注册失败")
 		return
+	}
+
+	// IP 注册频率限制 (成功后才计数)
+	// 兜底: 校验/重复/验证码失败不计数, 避免用户输错后触发限流导致大面积无法注册。
+	// P0-Redis: 用 IsRedisAvailable() 替代 rdb != nil(rdb 恒非 nil, 但 Redis 可能不可达)
+	if app.Get().IsRedisAvailable() {
+		rdb := app.Get().RDB
+		key := fmt.Sprintf("register:ip:%s", ip)
+		count, err := rdb.Incr(c.Request.Context(), key).Result()
+		if err == nil {
+			if count == 1 {
+				rdb.Expire(c.Request.Context(), key, 1*time.Hour)
+			}
+			if count > 3 {
+				// 虽已创建成功, 但已超过阈值; 为严格防刷, 回滚不太可能, 仅记录告警。
+				log.Printf("[auth_register] IP %s 注册成功但已超过每小时阈值(%d)", ip, count)
+			}
+		}
 	}
 
 	// 精简响应: 只返回用户名, 不泄漏内部 id/占位邮箱/状态
