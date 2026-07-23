@@ -26,11 +26,11 @@
 import { ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { useUserStore } from '@/stores/user'
+import { useAuthStore } from '@/stores/auth'
 
 const router = useRouter()
 const route = useRoute()
-const userStore = useUserStore()
+const authStore = useAuthStore()
 
 // 修复 P0-FE3: 从注册页跳转过来时预填用户名
 const form = ref({ username: String(route.query.username || ''), password: '' })
@@ -46,16 +46,19 @@ const onSubmit = async () => {
   await formRef.value.validate()
   loading.value = true
   try {
-    // 修复 P0-FE4: 登录页不再盲调 admin 再试 user,
-    // 改为用户专用登录, 避免 admin 失败消耗用户账号锁定次数。
-    await userStore.login(form.value.username, form.value.password)
+    // 修复 P0-FE4 回归: 同一个登录页需要同时支持管理员和普通用户。
+    // 后端已用 admin:{username} 前缀隔离 admin 登录失败计数, 不会再消耗 user 锁定次数,
+    // 因此恢复先 admin 后 user 的自动探测逻辑。
+    await authStore.loginAuto(form.value.username, form.value.password)
     ElMessage.success('登录成功')
     // 修复 P0-FE2: 开放重定向漏洞。旧版直接信任 route.query.redirect,
     // 攻击者可构造 /login?redirect=https://evil.com 钓鱼, 登录后跳到恶意站点。
     // 现仅允许以单个 '/' 开头的相对路径, 拒绝 '//evil.com' 与 '/\\evil.com' 等协议相对 URL。
     const rawRedirect = String(route.query.redirect || '')
     const isSafeRedirect = rawRedirect.startsWith('/') && !rawRedirect.startsWith('//') && !rawRedirect.startsWith('/\\')
-    const redirect = isSafeRedirect ? rawRedirect : '/'
+    const role = authStore.role
+    const defaultPath = role === 'admin' ? '/admin/dashboard' : '/'
+    const redirect = isSafeRedirect ? rawRedirect : defaultPath
     router.push(redirect)
   } catch (e: any) {
     ElMessage.error(e?.msg || '登录失败')
