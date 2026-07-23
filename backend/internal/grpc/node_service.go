@@ -609,19 +609,44 @@ func (s *NodeServiceServer) buildXrayConfig(node *model.Node, users []model.User
 	// [动态限速] 开启时生成 Xray policy 配置
 	// 限速值由 LoadScorer 心跳时按负载自动算(8/5/3/1 Mbps), 写入 Redis 缓存
 	// 限速自然实现: 刷短视频(3-5Mbps)够, 4K(25Mbps+)看不了, 下载被限慢
+	//
+	// FIX traffic-stats: 必须在 policy.system 和每个 level 中都带
+	// statsUserUplink/statsUserDownlink, 否则 Xray 不收集用户级流量
+	// (agent 的 InjectStatsConfig 看到 levels 已存在就跳过注入, 导致统计失效)
 	if applyLimit {
 		// Mbps → bytes/s (Xray policy bufferSize 单位)
 		ratePerSec := int64(dynLimit) * 1000 * 1000 / 8
 		xray["policy"] = map[string]interface{}{
 			"levels": map[string]interface{}{
-				"0": map[string]interface{}{"bufferSize": 0},
+				"0": map[string]interface{}{"bufferSize": 0, "statsUserUplink": true, "statsUserDownlink": true},
 				"1": map[string]interface{}{
-					"bufferSize":     ratePerSec,
-					"headerLimit":    ratePerSec,
-					"uplinkOnly":     0,
-					"downlinkOnly":   0,
-					"refreshSizeSec": ratePerSec,
+					"bufferSize":       ratePerSec,
+					"headerLimit":      ratePerSec,
+					"uplinkOnly":       0,
+					"downlinkOnly":     0,
+					"refreshSizeSec":   ratePerSec,
+					"statsUserUplink":   true,
+					"statsUserDownlink": true,
 				},
+			},
+			"system": map[string]interface{}{
+				"statsInboundUplink":   true,
+				"statsInboundDownlink": true,
+				"statsUserUplink":      true,
+				"statsUserDownlink":    true,
+			},
+		}
+	} else {
+		// 无限速时也要确保用户级流量统计开启
+		xray["policy"] = map[string]interface{}{
+			"levels": map[string]interface{}{
+				"0": map[string]interface{}{"statsUserUplink": true, "statsUserDownlink": true},
+			},
+			"system": map[string]interface{}{
+				"statsInboundUplink":   true,
+				"statsInboundDownlink": true,
+				"statsUserUplink":      true,
+				"statsUserDownlink":    true,
 			},
 		}
 	}

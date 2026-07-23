@@ -329,24 +329,33 @@ func InjectStatsConfig(cfgJSON string, apiPort int) (string, error) {
 		policy = map[string]interface{}{}
 		cfg["policy"] = policy
 	}
+	// FIX traffic-stats: 始终确保每个 level 都带 statsUserUplink/statsUserDownlink
+	// 旧代码仅在 levels==nil 时创建, 面板下发限速 policy(含 levels)后此处跳过,
+	// 导致用户级流量统计失效(Xray 不收集 user>>> 统计项)
 	levels, _ := policy["levels"].(map[string]interface{})
 	if levels == nil {
-		levels = map[string]interface{}{
-			"0": map[string]interface{}{
-				"statsUserUplink":   true,
-				"statsUserDownlink": true,
-			},
-		}
+		levels = map[string]interface{}{}
 		policy["levels"] = levels
 	}
+	for lvlKey, lvlVal := range levels {
+		lvl, ok := lvlVal.(map[string]interface{})
+		if !ok {
+			lvl = map[string]interface{}{}
+		}
+		lvl["statsUserUplink"] = true
+		lvl["statsUserDownlink"] = true
+		levels[lvlKey] = lvl
+	}
+	// 始终确保 system 带 statsUserUplink/statsUserDownlink + statsInboundUplink/statsInboundDownlink
 	system, _ := policy["system"].(map[string]interface{})
 	if system == nil {
-		system = map[string]interface{}{
-			"statsInboundUplink":   true,
-			"statsInboundDownlink": true,
-		}
-		policy["system"] = system
+		system = map[string]interface{}{}
 	}
+	system["statsInboundUplink"] = true
+	system["statsInboundDownlink"] = true
+	system["statsUserUplink"] = true
+	system["statsUserDownlink"] = true
+	policy["system"] = system
 
 	var inbounds []interface{}
 	if raw, ok := cfg["inbounds"].([]interface{}); ok {
