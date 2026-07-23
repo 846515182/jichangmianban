@@ -20,6 +20,7 @@ const (
 	CodeDuplicate          = 40901
 	CodeRateLimit          = 42901
 	CodeIPBlacklist        = 42902
+	CodeDeviceLimit        = 42903 // P0-DeviceLimit: 设备数超限
 	CodeServerError        = 50001
 	CodeDBError            = 50002
 	CodeConfigGenFailed    = 50004
@@ -39,6 +40,7 @@ var codeMsg = map[int]string{
 	CodeDuplicate:        "资源重复",
 	CodeRateLimit:        "请求过于频繁",
 	CodeIPBlacklist:      "IP 已被拉黑",
+	CodeDeviceLimit:      "设备数超限，请退出其他设备后重试",
 	CodeServerError:      "服务异常",
 	CodeDBError:          "数据库错误",
 	CodeConfigGenFailed:  "配置生成失败",

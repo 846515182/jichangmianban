@@ -163,7 +163,15 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 	}
 
 	// 公开订阅拉取(无需 JWT, 通过 token+sig 认证)
-	api.GET("/subscribe", userH.PublicSubscribe)
+	// P0-PublicSubscribe: 双维度限流防 DB 被打爆
+	//   - IP 维度: 10 次/分钟(正常用户 1-2 次, 允许重试)
+	//   - token 维度: 6 次/分钟(Clash/V2RayN 自动刷新通常 1 次足够)
+	// 两者独立计数, 任一超限即拒绝(429)
+	// Redis 故障时 fail-open(放行), 避免全站订阅不可用
+	api.GET("/subscribe",
+		middleware.RateLimitByIP("sub:ip:", 10, time.Minute),
+		middleware.RateLimitByParam("token", "sub:tok:", 6, time.Minute),
+		userH.PublicSubscribe)
 
 	user := api.Group("/user")
 	user.Use(middleware.UserAuth())

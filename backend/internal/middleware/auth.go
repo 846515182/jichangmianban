@@ -44,18 +44,27 @@ func JWTAuth(allowedRoles ...string) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		// Redis 不可用时, 对敏感管理接口采取 fail-closed: 避免黑名单/Token版本校验失效后被吊销的 token 仍可用
-		if app.Get().RDB == nil && strings.HasPrefix(c.Request.URL.Path, "/api/v1/admin/") {
+		// P0-Redis: Redis 不可用时, 对敏感管理接口采取 fail-closed
+		// 旧版用 `RDB == nil` 判断, 但 initRedis 恒返回非 nil client, 导致此守卫是死代码。
+		// 现改用 IsRedisAvailable()(后台 Ping 健康检查), Redis 真挂时管理员接口返回 503,
+		// 避免被吊销的 token / 黑名单 token 在 Redis 故障窗口内复活。
+		if !app.Get().IsRedisAvailable() && strings.HasPrefix(c.Request.URL.Path, "/api/v1/admin/") {
 			response.FailWithHTTP(c, http.StatusServiceUnavailable, response.CodeTokenInvalid)
 			c.Abort()
 			return
 		}
 		// 登出黑名单校验（使用纯 token，与 extractToken 返回一致）
 		blacklistKey := "jwtblack:" + token
-		if rdb := app.Get().RDB; rdb != nil {
+		if rdb := app.Get().RDB; app.Get().IsRedisAvailable() {
 			exists, err := rdb.Exists(c.Request.Context(), blacklistKey).Result()
 			if err != nil {
-				// Redis 错误时仅记录日志，不拒绝请求（避免 Redis 故障导致全部 401）
+				// Redis 操作出错: 对 admin 接口 fail-closed, 对 user 接口 fail-open
+				// (admin 安全优先, user 可用性优先)
+				if strings.HasPrefix(c.Request.URL.Path, "/api/v1/admin/") {
+					response.FailWithHTTP(c, http.StatusServiceUnavailable, response.CodeTokenInvalid)
+					c.Abort()
+					return
+				}
 				c.Set("jwt_blacklist_check_error", err.Error())
 			} else if exists > 0 {
 				response.Fail(c, response.CodeTokenInvalid)
@@ -74,8 +83,10 @@ func JWTAuth(allowedRoles ...string) gin.HandlerFunc {
 		//   Redis 不可用时 fail-closed 返回 503, 避免被吊销的 token 在 Redis 故障窗口内复活
 		// - claims.TokenVer == 0: 旧 token(从未 bump 过版本), Redis 不可用时放行(向后兼容, 不阻断登录)
 		if claims.TokenVer > 0 {
+			// P0-Redis: rdb 恒非 nil(initRedis 自动重连), 用 IsRedisAvailable() 判断实际可达性
+			// Redis 不可用时 fail-closed 返回 503, 避免被吊销的 token 在故障窗口内复活
 			rdb := app.Get().RDB
-			if rdb == nil {
+			if !app.Get().IsRedisAvailable() {
 				response.FailWithHTTP(c, http.StatusServiceUnavailable, response.CodeServerError)
 				c.Abort()
 				return

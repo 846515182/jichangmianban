@@ -298,6 +298,11 @@ func (h *UserHandler) PublicSubscribe(c *gin.Context) {
 			response.Fail(c, response.CodeSubSigExpired)
 			return
 		}
+		// P0-DeviceLimit: 设备数超限返回专属错误码, 让客户端提示用户
+		if errors.Is(err, service.ErrDeviceLimitExceeded) {
+			response.Fail(c, response.CodeDeviceLimit)
+			return
+		}
 		response.Fail(c, response.CodeConfigGenFailed)
 		return
 	}

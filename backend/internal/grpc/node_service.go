@@ -324,10 +324,38 @@ func (s *NodeServiceServer) GetConfig(ctx context.Context, req *nexuspb.GetConfi
 	// 被攻破的节点可拿这些信息冒充用户或分析业务数据。
 	// 节点 agent 只需要 UUID(Xray clients[].id)和 flow, 其余字段对节点无业务价值。
 	// 计费/到期判定均在面板侧完成, 节点侧无需感知。
+	//
+	// P0-DeviceLimit: 额外下发 device_limit 供 node agent 做连接级设备数限制
+	// (解析 access log 统计每用户源 IP 数, 超限时踢出连接)
 	creds := make([]map[string]interface{}, 0, len(users))
+	// 批量查 plan DeviceLimit (避免 N+1 查询)
+	planIDs := make(map[string]bool, len(users))
 	for _, u := range users {
+		if u.PlanID != nil && *u.PlanID != "" {
+			planIDs[*u.PlanID] = true
+		}
+	}
+	planDeviceLimit := make(map[string]int, len(planIDs))
+	if len(planIDs) > 0 {
+		var plans []model.Plan
+		ids := make([]string, 0, len(planIDs))
+		for id := range planIDs {
+			ids = append(ids, id)
+		}
+		if err := app.Get().DB.Where("id IN ? AND is_deleted = false", ids).Find(&plans).Error; err == nil {
+			for _, p := range plans {
+				planDeviceLimit[p.ID] = p.DeviceLimit
+			}
+		}
+	}
+	for _, u := range users {
+		dl := 0
+		if u.PlanID != nil && *u.PlanID != "" {
+			dl = planDeviceLimit[*u.PlanID]
+		}
 		creds = append(creds, map[string]interface{}{
-			"uuid": u.ID, // users.id 即为 uuid, 仅用于 Xray clients[].id
+			"uuid":         u.ID, // users.id 即为 uuid, 仅用于 Xray clients[].id
+			"device_limit": dl,  // P0-DeviceLimit: 0=不限
 		})
 	}
 	metaMap := map[string]interface{}{
@@ -542,6 +570,9 @@ func (s *NodeServiceServer) buildXrayConfig(node *model.Node, users []model.User
 	xray := map[string]interface{}{
 		"log": map[string]interface{}{
 			"loglevel": "warning",
+			// P0-DeviceLimit: 启用 access log, 供 node agent 解析每个用户的源 IP 数实现连接级设备数限制
+			// (订阅层限制已生效, 这是连接层的补充: 阻止已导入订阅的设备被分享给更多人)
+			"access": "/app/xray-access.log",
 		},
 		"inbounds": []map[string]interface{}{
 			{

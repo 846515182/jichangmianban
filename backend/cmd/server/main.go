@@ -359,11 +359,48 @@ func initRedis(cfg *config.Config, logger *zap.Logger) *redis.Client {
 		DB:       0,
 	})
 	if err := rdb.Ping(context.Background()).Err(); err != nil {
-		logger.Warn("Redis 连接失败(部分功能不可用)", zap.String("addr", cfg.RedisAddr), zap.Error(err))
+		// P0-Redis: 连接失败时立即标记 Redis 不可用
+		// (go-redis 会在后台自动重连, 但在重连成功前 IsRedisAvailable() 返回 false,
+		//  让 login_lock/rate_limit 等关键路径走降级策略而非静默失败)
+		if app.Get() != nil {
+			app.Get().SetRedisHealth(false)
+		}
+		logger.Warn("Redis 连接失败(部分功能不可用, 后台自动重连)", zap.String("addr", cfg.RedisAddr), zap.Error(err))
 	} else {
 		logger.Info("Redis 已连接", zap.String("addr", cfg.RedisAddr))
 	}
+
+	// P0-Redis: 启动后台健康检查 goroutine, 每 10s Ping 一次更新健康状态
+	// 替代全代码的 `rdb == nil` 死代码守卫(rdb 恒非 nil, 但 Redis 可能不可达)
+	go startRedisHealthCheck(rdb, logger)
 	return rdb
+}
+
+// startRedisHealthCheck 后台 Redis 健康检查
+// 每 10s Ping 一次, 更新 app.Container.redisHealthy 标志
+// P0-Redis: 让 IsRedisAvailable() 准确反映 Redis 实际可达性,
+// 关键路径(login_lock/rate_limit/admin auth)据此决定 fail-open/fail-closed
+func startRedisHealthCheck(rdb *redis.Client, logger *zap.Logger) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		err := rdb.Ping(ctx).Err()
+		cancel()
+		if app.Get() == nil {
+			continue
+		}
+		wasHealthy := app.Get().IsRedisAvailable()
+		nowHealthy := err == nil
+		if wasHealthy != nowHealthy {
+			if nowHealthy {
+				logger.Info("Redis 已恢复可用")
+			} else {
+				logger.Warn("Redis 不可达, 关键路径将走降级策略", zap.Error(err))
+			}
+		}
+		app.Get().SetRedisHealth(nowHealthy)
+	}
 }
 
 // autoMigrate 自动迁移表结构

@@ -101,8 +101,9 @@ func (h *AuthHandler) adminLogin(c *gin.Context, ctx context.Context, req *login
 		response.Fail(c, response.CodeAccountPwdError)
 		return
 	}
-	// 检查账号锁定(admin 账号维度)
-	if locked, _ := middleware.CheckAccountLocked(ctx, adminAccKey); locked {
+	// 检查账号锁定(admin 账号维度 + IP 维度)
+	// P0-LoginIP: 同时检查 IP 维度, 防分布式撞库
+	if locked, _ := middleware.CheckLoginLocked(ctx, ip, adminAccKey); locked {
 		response.Fail(c, response.CodeAccountLocked)
 		return
 	}
@@ -158,7 +159,8 @@ func (h *AuthHandler) userLogin(c *gin.Context, ctx context.Context, req *loginR
 		response.Fail(c, response.CodeAccountPwdError)
 		return
 	}
-	if locked, _ := middleware.CheckAccountLocked(ctx, req.Username); locked {
+	// P0-LoginIP: 同时检查账号维度 + IP 维度锁定
+	if locked, _ := middleware.CheckLoginLocked(ctx, ip, req.Username); locked {
 		response.Fail(c, response.CodeAccountLocked)
 		return
 	}

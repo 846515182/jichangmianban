@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 
 	"nexus-panel/internal/app"
@@ -101,6 +104,14 @@ func (s *SubscribeService) Fetch(userID, subType, sig, userAgent, clientIP strin
 		blocked, reason = true, "subscription expired"
 	} else if u.TrafficLimit > 0 && u.TrafficUsed >= u.TrafficLimit {
 		blocked, reason = true, "traffic exhausted"
+	}
+
+	// P0-DeviceLimit: 订阅拉取维度设备数限制(仅对活跃用户生效)
+	// 超过套餐 DeviceLimit 个不同 IP 在 1h 内拉取 → 拒绝(阻止新增设备)
+	if !blocked {
+		if err := s.enforceDeviceLimit(userID, clientIP); err != nil {
+			return nil, err
+		}
 	}
 
 	// 3. 识别订阅类型
@@ -532,6 +543,10 @@ func (s *SubscribeService) EnsureSubscription(userID string) (*model.Subscriptio
 // ErrSubSigExpired 订阅签名过期/无效
 var ErrSubSigExpired = errors.New("sub sig expired")
 
+// ErrDeviceLimitExceeded 设备数超限
+// P0-DeviceLimit: 用户在 1 小时窗口内从超过套餐 DeviceLimit 个不同 IP 拉取订阅
+var ErrDeviceLimitExceeded = errors.New("device limit exceeded")
+
 // PublicFetch 公开订阅(通过 sub_token + sig 认证, 无需 JWT)
 // clientIP 用于校验 IP 绑定签名
 func (s *SubscribeService) PublicFetch(token, subType, sig, userAgent, clientIP string) (*FetchResult, error) {
@@ -540,6 +555,68 @@ func (s *SubscribeService) PublicFetch(token, subType, sig, userAgent, clientIP 
 		return nil, ErrSubSigExpired
 	}
 	return s.Fetch(sub.UserID, subType, sig, userAgent, clientIP)
+}
+
+// enforceDeviceLimit P0-DeviceLimit: 订阅拉取维度设备数限制
+//
+// 原理: 每台新设备使用订阅前必须先拉取订阅(获取节点列表)。
+// 用 Redis sorted set 记录用户最近 1 小时内拉取订阅的不同 IP:
+//   - key:   sub:ips:{userID}
+//   - score: 时间戳(unix 秒)
+//   - member: clientIP
+//
+// ZADD 自然去重(同一 IP 只保留最新 score), ZREMRANGEBYSCORE 清过期, ZCARD 计数。
+// 超过套餐 DeviceLimit 时拒绝拉取, 阻止新增设备。
+//
+// 注意: 这是订阅层限制, 已导入订阅的设备仍可直连节点。
+// 完整的连接级限制需要 node agent 解析 Xray access log(已预留 device_limit 到 Meta)。
+func (s *SubscribeService) enforceDeviceLimit(userID, clientIP string) error {
+	// 查用户套餐的 DeviceLimit
+	u, err := s.userRepo.GetByID(userID)
+	if err != nil || u == nil {
+		return nil // 查不到用户不阻断(后面 Fetch 会再查)
+	}
+	deviceLimit := 0
+	if u.PlanID != nil && *u.PlanID != "" {
+		var plan model.Plan
+		if err := app.Get().DB.Where("id = ? AND is_deleted = false", *u.PlanID).First(&plan).Error; err == nil {
+			deviceLimit = plan.DeviceLimit
+		}
+	}
+	// DeviceLimit=0 表示不限
+	if deviceLimit <= 0 {
+		return nil
+	}
+	rdb := app.Get().RDB
+	if rdb == nil || clientIP == "" {
+		return nil // Redis 不可用或无 IP 时不阻断(避免误杀)
+	}
+
+	ctx := context.Background()
+	key := fmt.Sprintf("sub:ips:%s", userID)
+	now := time.Now().Unix()
+
+	// 1. 清理 1 小时前的记录
+	cutoff := now - 3600
+	_ = rdb.ZRemRangeByScore(ctx, key, "0", fmt.Sprintf("%d", cutoff)).Err()
+	// 2. 记录当前 IP (ZADD 会更新已有 member 的 score)
+	_ = rdb.ZAdd(ctx, key, redis.Z{Score: float64(now), Member: clientIP}).Err()
+	// 3. 设置 TTL 避免冷用户 key 永留
+	_ = rdb.Expire(ctx, key, 2*time.Hour).Err()
+	// 4. 统计不同 IP 数
+	count, err := rdb.ZCard(ctx, key).Result()
+	if err != nil {
+		return nil // Redis 出错不阻断
+	}
+	if int(count) > deviceLimit {
+		app.Get().Logger.Warn("设备数超限, 拒绝订阅拉取",
+			zap.String("user_id", userID),
+			zap.Int("device_limit", deviceLimit),
+			zap.Int64("current_ip_count", count),
+			zap.String("client_ip", clientIP))
+		return ErrDeviceLimitExceeded
+	}
+	return nil
 }
 
 // GetByToken 通过 sub_token 反查订阅记录(用于 PublicSubscribe 填充响应头)
