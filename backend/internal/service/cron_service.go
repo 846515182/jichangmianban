@@ -265,6 +265,31 @@ func (s *CronService) CleanOrphanData() {
 	s.CleanUpdateLogs()
 }
 
+// extractPruneSummary 从 docker prune 输出中提取有效摘要,
+// 过滤 legacy builder deprecation 等多余信息, 避免日志刷屏。
+func extractPruneSummary(out string) string {
+	lines := strings.Split(out, "\n")
+	var filtered []string
+	for _, line := range lines {
+		trim := strings.TrimSpace(line)
+		if trim == "" {
+			continue
+		}
+		// 过滤 legacy builder 废弃提示
+		if strings.Contains(trim, "DEPRECATED:") ||
+			strings.Contains(trim, "legacy builder") ||
+			strings.Contains(trim, "BuildKit") ||
+			strings.Contains(trim, "go/buildx") {
+			continue
+		}
+		filtered = append(filtered, trim)
+	}
+	if len(filtered) == 0 {
+		return ""
+	}
+	return strings.Join(filtered, "; ")
+}
+
 // AutoOpsMaintenance 智能运维自动维护(每 6 小时执行一次)
 //
 // 设计目标: 让面板"自己照顾自己", 自动清理累积的缓存/脏数据/旧配置,
@@ -295,12 +320,22 @@ func (s *CronService) AutoOpsMaintenance() {
 	staleCleaned := 0
 
 	// 1. Docker build cache 清理(存储杀手, 每次 docker build 累积一层)
-	if out, err := exec.Command("docker", "builder", "prune", "-af").CombinedOutput(); err != nil {
-		s.logger.Debug("docker builder prune 失败(容器内无 docker.sock 时正常)",
-			zap.Error(err))
-	} else {
-		s.logger.Info("智能运维: 已清理 Docker build cache",
-			zap.String("output", strings.TrimSpace(string(out))))
+	// 修复 P1-OPS-01: 优先使用 buildx prune(避免 legacy builder 废弃警告);
+	// 若 buildx 未安装则回退到 builder prune, 并过滤掉 deprecation 信息, 只保留有效摘要。
+	pruned := false
+	if out, err := exec.Command("docker", "buildx", "prune", "-af").CombinedOutput(); err == nil {
+		pruned = true
+		if summary := extractPruneSummary(string(out)); summary != "" {
+			s.logger.Info("智能运维: 已清理 Docker buildx cache", zap.String("output", summary))
+		}
+	}
+	if !pruned {
+		if out, err := exec.Command("docker", "builder", "prune", "-af").CombinedOutput(); err != nil {
+			s.logger.Debug("docker builder prune 失败(容器内无 docker.sock 时正常)",
+				zap.Error(err))
+		} else if summary := extractPruneSummary(string(out)); summary != "" {
+			s.logger.Info("智能运维: 已清理 Docker build cache", zap.String("output", summary))
+		}
 	}
 
 	// 2. Docker 悬空镜像 + 停止容器(不用 --volumes 保护业务卷)
