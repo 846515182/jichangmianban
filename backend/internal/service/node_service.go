@@ -182,7 +182,16 @@ func (s *NodeService) CreateNode(in *CreateNodeInput) (*model.Node, error) {
 	if strings.ToLower(in.Protocol) == "vless" {
 		if dest := extractRealityDest(cfgMap); dest != "" {
 			if err := CheckRealityDest(dest); err != nil {
-				return nil, fmt.Errorf("REALITY dest 校验失败: %w", err)
+				// [P1-NODE-07] 黑名单命中(如 microsoft.com)必须失败;
+				// TLS 连通性失败(网络抖动/测试环境)仅记录警告, 不阻塞节点创建。
+				if isRealityBlacklistedDest(err) {
+					return nil, fmt.Errorf("REALITY dest 校验失败: %w", err)
+				}
+				if logger := app.Get().Logger; logger != nil {
+					logger.Warn("REALITY dest TLS 连通性检查未通过, 继续创建节点",
+						zap.String("dest", dest),
+						zap.Error(err))
+				}
 			}
 		}
 	}
@@ -314,7 +323,15 @@ func (s *NodeService) UpdateNode(id string, in *UpdateNodeInput) (*model.Node, e
 		if strings.ToLower(node.Protocol) == "vless" {
 			if dest := extractRealityDest(existing); dest != "" {
 				if err := CheckRealityDest(dest); err != nil {
-					return nil, fmt.Errorf("REALITY dest 校验失败: %w", err)
+					// [P1-NODE-07] 黑名单命中必须失败; TLS 连通性失败仅警告。
+					if isRealityBlacklistedDest(err) {
+						return nil, fmt.Errorf("REALITY dest 校验失败: %w", err)
+					}
+					if logger := app.Get().Logger; logger != nil {
+						logger.Warn("REALITY dest TLS 连通性检查未通过, 继续更新节点",
+							zap.String("dest", dest),
+							zap.Error(err))
+					}
 				}
 			}
 		}

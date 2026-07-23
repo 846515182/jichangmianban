@@ -88,16 +88,19 @@ func (s *UserSyncServiceServer) SyncUsers(ctx context.Context, req *nexuspb.Sync
 // listActiveUsersForNode 查询节点可见的活跃用户
 // P1-SyncUsers口径: 与 grpc/node_service.go 中同名方法逻辑一致,
 // 按节点套餐绑定过滤用户。复制实现以避免跨 server 类型耦合(两 server 都持有相同 repo)。
+// [P2-NODE-06] 节点未绑定套餐时不再回退到所有用户, 避免权限模型被静默放宽。
 func (s *UserSyncServiceServer) listActiveUsersForNode(node *model.Node) ([]model.User, error) {
 	planIDs, err := s.nodeRepo.GetPlanIDsByNode(node.ID)
 	if err != nil {
 		return nil, err
 	}
-	if len(planIDs) > 0 {
-		return s.userRepo.ListActiveForPlans(planIDs)
+	if len(planIDs) == 0 {
+		s.logger.Warn("SyncUsers: 节点未绑定任何套餐, 不下发用户凭证",
+			zap.String("node_id", node.ID),
+			zap.String("node_name", node.Name))
+		return []model.User{}, nil
 	}
-	// 回退: 节点未配置绑定 → 返回所有活跃用户
-	return s.userRepo.ListActive()
+	return s.userRepo.ListActiveForPlans(planIDs)
 }
 
 // userStatusToProto 数据库 status 字符串转 proto 枚举

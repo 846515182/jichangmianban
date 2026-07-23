@@ -44,9 +44,10 @@ func CheckRealityDest(dest string) error {
 		}
 	}
 
-	// 2. TLS 连通性检查(5s 超时)
+	// 2. TLS 连通性检查(2s 超时)。节点创建/更新是管理操作, 2s 足够判断;
+	// 过长的超时会阻塞 UI, 且在弱网/测试环境体验差。
 	conn, err := tls.DialWithDialer(
-		&net.Dialer{Timeout: 5 * time.Second},
+		&net.Dialer{Timeout: 2 * time.Second},
 		"tcp",
 		dest,
 		&tls.Config{
@@ -67,6 +68,17 @@ func CheckRealityDest(dest string) error {
 	}
 
 	return nil
+}
+
+// isRealityBlacklistedDest 判断错误是否由黑名单命中导致。
+// CheckRealityDest 对黑名单返回明确错误; 对 TLS 连通性失败也返回错误。
+// 调用方可用此函数区分: 黑名单必须阻断, TLS 失败可降级为警告。
+func isRealityBlacklistedDest(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "不兼容") || strings.Contains(msg, "akamaighost") || strings.Contains(msg, "cloudfront")
 }
 
 // extractRealityDest 从 server_config map 中提取 reality.dest

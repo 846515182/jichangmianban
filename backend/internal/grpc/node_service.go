@@ -484,6 +484,11 @@ func (s *NodeServiceServer) buildXrayConfig(node *model.Node, users []model.User
 	if strings.ToLower(node.Protocol) != "vless" {
 		return nil, fmt.Errorf("不支持的节点协议: %s, 当前仅支持 vless", node.Protocol)
 	}
+	// [P2-NODE-06-关联] 节点未绑定套餐时, 不下发空 clients 的 Xray 配置(会导致 Xray 启动失败),
+	// 直接返回明确错误, 让 agent 进入等待而不是启动一个不可用配置。
+	if len(users) == 0 {
+		return nil, fmt.Errorf("节点未绑定任何套餐或没有可用用户, 不下发 Xray 配置")
+	}
 
 	// 解析节点 server_config 取 REALITY 配置
 	var cfgMap map[string]interface{}

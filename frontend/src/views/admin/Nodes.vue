@@ -253,11 +253,10 @@
         </el-form-item>
         <el-form-item label="协议" prop="protocol">
           <el-select v-model="form.protocol" style="width: 100%">
+            <!-- 当前后端 buildXrayConfig 仅支持 VLESS+REALITY，暂只开放该选项 -->
             <el-option label="VLESS (推荐)" value="vless" />
-            <el-option label="VMess" value="vmess" />
-            <el-option label="Trojan" value="trojan" />
-            <el-option label="Shadowsocks" value="shadowsocks" />
           </el-select>
+          <div class="form-tip">当前仅支持 VLESS+REALITY，其他协议后续版本开放。</div>
         </el-form-item>
         <el-form-item label="服务器IP" prop="server_address">
           <el-input v-model="form.server_address" placeholder="节点服务器的公网IP" />
@@ -1164,6 +1163,7 @@ onUnmounted(() => {
 .page-title { margin: 0; font-size: 18px; color: var(--np-text); }
 .page-desc { margin: 6px 0 0; font-size: 13px; color: var(--np-text-secondary); }
 .header-actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.form-tip { margin-top: 6px; font-size: 12px; color: var(--np-text-secondary); line-height: 1.4; }
 
 /* 节点流量使用展示 */
 .traffic-cell { display: flex; flex-direction: column; gap: 2px; }
