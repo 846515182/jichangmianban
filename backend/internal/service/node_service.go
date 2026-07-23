@@ -98,16 +98,13 @@ func (s *NodeService) CreateNode(in *CreateNodeInput) (*model.Node, error) {
 		return nil, fmt.Errorf("地址 %s:%d 已被其他节点占用, 同机多节点需用不同端口(如 443/8443)", in.ServerAddress, in.Port)
 	}
 
-	// 验证协议是否支持
+	// [P1-NODE-02] 当前 buildXrayConfig 仅支持 VLESS+REALITY, 为防止创建其他协议节点后
+	// agent 拿到错误配置无法启动, 暂时只允许创建 vless。后续扩展多协议时再放开。
 	supportedProtocols := map[string]bool{
-		"vless":       true,
-		"vmess":       true,
-		"trojan":      true,
-		"shadowsocks": true,
-		"ss":          true,
+		"vless": true,
 	}
 	if !supportedProtocols[strings.ToLower(in.Protocol)] {
-		return nil, errors.New("不支持的协议类型")
+		return nil, fmt.Errorf("当前仅支持 vless 协议, %s 协议的配置生成尚未完成, 请先选择 vless", in.Protocol)
 	}
 
 	aesMgr, err := security.NewAESManager(app.Get().Cfg.AESMasterKey)
@@ -195,13 +192,19 @@ func (s *NodeService) CreateNode(in *CreateNodeInput) (*model.Node, error) {
 		return nil, err
 	}
 
+	// [P1-NODE-05] GrpcPort 兜底: 0 表示使用默认值 50051
+	grpcPort := in.GrpcPort
+	if grpcPort == 0 {
+		grpcPort = 50051
+	}
+
 	node := &model.Node{
 		Name:          in.Name,
 		CountryCode:   in.CountryCode,
 		Protocol:      in.Protocol,
 		ServerAddress: in.ServerAddress,
 		Port:          in.Port,
-		GrpcPort:      in.GrpcPort,
+		GrpcPort:      grpcPort,
 		TrafficLimit:  in.TrafficLimit,
 		IsEnabled:     true,
 		NodeToken:     nodeToken,
@@ -260,7 +263,23 @@ func (s *NodeService) UpdateNode(id string, in *UpdateNodeInput) (*model.Node, e
 	}
 	if in.IsEnabled != nil {
 		node.IsEnabled = *in.IsEnabled
+		// [P1-NODE-03] 禁用节点时同步置为离线, 避免后台仍显示在线直到心跳超时(最长 8 分钟)
+		if !node.IsEnabled {
+			node.Online = false
+		}
 	}
+
+	// [P1-NODE-01] 更新名称/地址/端口时, 必须校验唯一性, 否则违反 uk_nodes_name / uq_nodes_name_addr_port_active
+	// 导致返回 raw DB 错误。排除自身, 只与未删除节点比较。
+	if err := s.checkNodeUniquenessOnUpdate(node); err != nil {
+		return nil, err
+	}
+
+	// [P1-NODE-05] GrpcPort 兜底: 0 表示使用默认值 50051, 避免 agent 注册后无法连接 gRPC
+	if node.GrpcPort == 0 {
+		node.GrpcPort = 50051
+	}
+
 	if in.ExtraConfig != nil {
 		var existing map[string]interface{}
 		if err := json.Unmarshal(node.ServerConfig, &existing); err != nil {
@@ -328,6 +347,46 @@ func (s *NodeService) UpdateNode(id string, in *UpdateNodeInput) (*model.Node, e
 	return node, nil
 }
 
+// checkNodeUniquenessOnUpdate 在 UpdateNode 保存前校验 name / address+port / name+address+port 唯一性
+// 排除当前节点自身, 只与未软删除节点比较。
+func (s *NodeService) checkNodeUniquenessOnUpdate(node *model.Node) error {
+	var count int64
+
+	// 1. 名称唯一 (uk_nodes_name)
+	if err := app.Get().DB.Model(&model.Node{}).
+		Where("name = ? AND is_deleted = false AND id != ?", node.Name, node.ID).
+		Count(&count).Error; err != nil {
+		return fmt.Errorf("校验节点名称唯一性失败: %w", err)
+	}
+	if count > 0 {
+		return fmt.Errorf("节点名称「%s」已被其他节点使用", node.Name)
+	}
+
+	// 2. 地址+端口唯一
+	if err := app.Get().DB.Model(&model.Node{}).
+		Where("server_address = ? AND port = ? AND is_deleted = false AND id != ?",
+			node.ServerAddress, node.Port, node.ID).
+		Count(&count).Error; err != nil {
+		return fmt.Errorf("校验节点地址端口失败: %w", err)
+	}
+	if count > 0 {
+		return fmt.Errorf("地址 %s:%d 已被其他节点占用", node.ServerAddress, node.Port)
+	}
+
+	// 3. name+address+port 组合唯一 (uq_nodes_name_addr_port_active)
+	if err := app.Get().DB.Model(&model.Node{}).
+		Where("name = ? AND server_address = ? AND port = ? AND is_deleted = false AND id != ?",
+			node.Name, node.ServerAddress, node.Port, node.ID).
+		Count(&count).Error; err != nil {
+		return fmt.Errorf("校验节点组合唯一性失败: %w", err)
+	}
+	if count > 0 {
+		return fmt.Errorf("节点组合信息重复: 名称=%s 地址=%s:%d", node.Name, node.ServerAddress, node.Port)
+	}
+
+	return nil
+}
+
 // DeleteNode 软删除节点，并执行联动清理:
 // 1. 软删除节点(is_deleted=true)
 // 2. 清零 online 状态(避免后台显示 stale 在线)
@@ -380,6 +439,11 @@ func (s *NodeService) DeleteNode(id string) error {
 			fmt.Sprintf("node:status:%s", id),
 			fmt.Sprintf("node:configver:%s", id),
 			fmt.Sprintf("node:usershash:%s", id),
+			// [P1-NODE-04] 负载/限速/状态相关缓存也需清理, 避免删除节点后 Redis 残留
+			fmt.Sprintf("node:loadscore:%s", id),
+			fmt.Sprintf("node:speed_snap:%s", id),
+			fmt.Sprintf("node:dynlimit:last:%s", id),
+			fmt.Sprintf("node:old_token:%s", id),
 		}
 		// 清理 SSH host key 指纹(部署 TOFU + 终端)，避免节点重装后无法重新部署/连接
 		// 部署 key: deploy:{host}:{host}:{sshPort}，终端 key: sshterm:{host}:{sshPort}

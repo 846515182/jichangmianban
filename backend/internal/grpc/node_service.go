@@ -479,6 +479,12 @@ func buildNodeInfoWithDecryptedKey(node *model.Node) (*nexuspb.NodeInfo, error) 
 
 // buildXrayConfig 构造 VLESS+REALITY+XTLS-Vision 的 Xray 服务端配置 JSON
 func (s *NodeServiceServer) buildXrayConfig(node *model.Node, users []model.User) ([]byte, error) {
+	// [P1-NODE-02] 当前仅支持 VLESS+REALITY; 若节点协议不是 vless, 明确报错,
+	// 避免 agent 拿到错误配置后 Xray 启动失败。CreateNode/UpdateNode 已限制只允许创建 vless。
+	if strings.ToLower(node.Protocol) != "vless" {
+		return nil, fmt.Errorf("不支持的节点协议: %s, 当前仅支持 vless", node.Protocol)
+	}
+
 	// 解析节点 server_config 取 REALITY 配置
 	var cfgMap map[string]interface{}
 	_ = json.Unmarshal(node.ServerConfig, &cfgMap)
@@ -671,20 +677,21 @@ func protocolToProto(p string) nexuspb.Protocol {
 }
 
 // listActiveUsersForNode 查询节点可见的活跃用户
-// 优先使用 node_plan_bindings 命中(用户 plan_id 在节点绑定列表中)；
-// 若节点未配置任何绑定，则回退到所有活跃用户(避免历史节点失联)
+// 仅通过 node_plan_bindings 命中(用户 plan_id 在节点绑定列表中)。
+// [P2-NODE-06] 节点未配置绑定时不再回退到所有用户, 避免历史节点/误删绑定后导致全量用户泄露到该节点。
+// 若确实需要兼容历史节点, 应显式给这些节点绑定通用套餐, 而不是在代码里静默放宽权限。
 func (s *NodeServiceServer) listActiveUsersForNode(node *model.Node) ([]model.User, error) {
 	planIDs, err := s.nodeRepo.GetPlanIDsByNode(node.ID)
 	if err != nil {
 		return nil, err
 	}
-	var users []model.User
-	if len(planIDs) > 0 {
-		users, err = s.userRepo.ListActiveForPlans(planIDs)
-	} else {
-		// 回退: 节点未配置绑定 → 返回所有活跃用户
-		users, err = s.userRepo.ListActive()
+	if len(planIDs) == 0 {
+		s.logger.Warn("节点未绑定任何套餐, 不下发用户凭证",
+			zap.String("node_id", node.ID),
+			zap.String("node_name", node.Name))
+		return []model.User{}, nil
 	}
+	users, err := s.userRepo.ListActiveForPlans(planIDs)
 	if err != nil {
 		return nil, err
 	}
