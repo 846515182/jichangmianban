@@ -94,12 +94,29 @@ func (s *UserRegisterService) Register(in *RegisterInput) (*model.User, error) {
 	const trialTrafficLimit int64 = 5 * 1024 * 1024 * 1024
 	const trialDurationDays = 30
 
+	// 修复 P0-REG-04: 注册时必须生成唯一邀请码, 避免多个用户 invite_code='' 触发
+	// 唯一索引冲突(部分索引 WHERE invite_code IS NOT NULL 仍会把空字符串视为重复)。
+	// 兜底: 最多重试 5 次, 防止极小概率碰撞。
+	inviteCode := ""
+	for i := 0; i < 5; i++ {
+		candidate := generateInviteCode(8)
+		if _, err := s.userRepo.GetByInviteCode(candidate); err != nil {
+			// record not found 表示可用
+			inviteCode = candidate
+			break
+		}
+	}
+	if inviteCode == "" {
+		return nil, errors.New("生成邀请码失败, 请稍后重试")
+	}
+
 	u := &model.User{
 		Username:     in.Username,
 		Email:        in.Email,
 		PasswordHash: string(hash),
 		TrafficLimit: trialTrafficLimit,
 		Status:       "active",
+		InviteCode:   inviteCode,
 	}
 	// 注册即享试用: 查找试用套餐(name 含"试用"且 enabled), 找到则绑定
 	// 修复 P1-TRIAL-02: 试用套餐若没有绑定任何节点, 不绑定该套餐,
