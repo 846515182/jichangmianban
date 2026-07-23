@@ -13,6 +13,7 @@ type User struct {
 	Username      string     `gorm:"type:varchar(64);uniqueIndex;not null" json:"username"`
 	PasswordHash  string     `gorm:"type:varchar(255);not null" json:"-"`
 	Email         string     `gorm:"type:varchar(128)" json:"email"`
+	EmailVerified bool       `gorm:"column:email_verified;default:false" json:"email_verified"`
 	TrafficLimit  int64      `gorm:"type:bigint;default:0" json:"traffic_limit"`  // 流量配额(字节)
 	TrafficUsed   int64      `gorm:"type:bigint;default:0" json:"traffic_used"`   // 已用流量(字节)
 	UploadBytes   int64      `gorm:"type:bigint;default:0" json:"upload_bytes"`   // 上行字节

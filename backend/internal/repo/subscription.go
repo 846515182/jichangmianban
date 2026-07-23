@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"context"
 	"time"
 
 	"gorm.io/gorm"
@@ -51,15 +52,26 @@ func (r *SubscriptionRepo) CreateInDB(db *gorm.DB, s *model.Subscription) error 
 }
 
 // Update 更新订阅
+// 兜底: 订阅变更(类型/有效期)可能影响用户可用性, 更新后清理所有节点的 usershash 缓存,
+// 让 agent 下次心跳重新计算用户指纹并触发配置重拉。
 func (r *SubscriptionRepo) Update(s *model.Subscription) error {
-	return r.db.Save(s).Error
+	if err := r.db.Save(s).Error; err != nil {
+		return err
+	}
+	clearAllNodeUsersHashCache(context.Background())
+	return nil
 }
 
 // DisableByUserID 禁用指定用户的所有订阅（软删除）
+// 兜底: 用户订阅禁用后, 清理所有节点的 usershash 缓存, 让 agent 下次心跳移除该用户凭证。
 func (r *SubscriptionRepo) DisableByUserID(userID string) error {
-	return r.db.Model(&model.Subscription{}).
+	if err := r.db.Model(&model.Subscription{}).
 		Where("user_id = ? AND is_deleted = false", userID).
-		Update("is_deleted", true).Error
+		Update("is_deleted", true).Error; err != nil {
+		return err
+	}
+	clearAllNodeUsersHashCache(context.Background())
+	return nil
 }
 
 // ExistsByToken 判断 token 是否已存在

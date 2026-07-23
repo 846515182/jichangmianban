@@ -39,32 +39,6 @@ func NewTrafficServiceServer(trafficRepo *repo.TrafficRepo, nodeRepo *repo.NodeR
 	}
 }
 
-// acceptOldNodeToken 检查给定的 token 是否是节点最近轮换前的旧 token (P0-N3 宽限期消费方)。
-// RotateToken 会把旧 token 写入 Redis key=node:old_token:{nodeID}, TTL=24h。
-// 返回 true 表示当前 token 不匹配但旧 token 匹配 (在宽限期内, 应放行)。
-// Redis 不可用或 key 不存在时返回 false (调用方会拒绝请求)。
-func (s *TrafficServiceServer) acceptOldNodeToken(nodeID, presentedToken string) bool {
-	if presentedToken == "" {
-		return false
-	}
-	rdb := app.Get().RDB
-	if rdb == nil {
-		return false
-	}
-	stored, err := rdb.Get(context.Background(), fmt.Sprintf("node:old_token:%s", nodeID)).Result()
-	if err != nil {
-		return false
-	}
-	if stored == presentedToken {
-		if s.logger != nil {
-			s.logger.Warn("接受节点旧 token (RotateToken 宽限期内)",
-				zap.String("node_id", nodeID))
-		}
-		return true
-	}
-	return false
-}
-
 // ReportRealtime 批量接收流量记录，写入 traffic_logs 表(INSERT)，
 // 同时累加 users.traffic_used 和 nodes.traffic_used(用事务保证一致)
 func (s *TrafficServiceServer) ReportRealtime(ctx context.Context, req *nexuspb.ReportRealtimeRequest) (*nexuspb.ReportRealtimeResponse, error) {
@@ -87,7 +61,7 @@ func (s *TrafficServiceServer) ReportRealtime(ctx context.Context, req *nexuspb.
 		// TTL=24h)。此处校验当前 token 失败时, 兜底查 Redis 旧 token, 匹配则放行。
 		// 用于 RotateToken 后 agent 仍用旧 token 上报流量/查询用户的过渡期, 避免流量丢失。
 		// 注: 宽限期内同时接受新旧 token, 24h 后 Redis key 过期, 旧 token 失效。
-		if !s.acceptOldNodeToken(req.GetNodeId(), req.GetNodeToken()) {
+		if !acceptOldNodeToken(ctx, req.GetNodeId(), req.GetNodeToken()) {
 			return nil, status.Error(codes.Unauthenticated, "node_token 不匹配")
 		}
 	}
@@ -281,7 +255,7 @@ func (s *TrafficServiceServer) QueryUserTraffic(ctx context.Context, req *nexusp
 		// TTL=24h)。此处校验当前 token 失败时, 兜底查 Redis 旧 token, 匹配则放行。
 		// 用于 RotateToken 后 agent 仍用旧 token 上报流量/查询用户的过渡期, 避免流量丢失。
 		// 注: 宽限期内同时接受新旧 token, 24h 后 Redis key 过期, 旧 token 失效。
-		if !s.acceptOldNodeToken(req.GetNodeId(), req.GetNodeToken()) {
+		if !acceptOldNodeToken(ctx, req.GetNodeId(), req.GetNodeToken()) {
 			return nil, status.Error(codes.Unauthenticated, "node_token 不匹配")
 		}
 	}

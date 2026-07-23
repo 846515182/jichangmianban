@@ -22,8 +22,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	"golang.org/x/crypto/bcrypt"
 
 	"nexus-panel/internal/app"
+	"nexus-panel/internal/middleware"
 	"nexus-panel/internal/model"
 	"nexus-panel/internal/repo"
 	"nexus-panel/internal/response"
@@ -38,14 +40,15 @@ type AdminSystemHandler struct {
 	loginAuditRepo *repo.LoginAuditRepo
 	nodeRepo       *repo.NodeRepo
 	userRepo       *repo.UserRepo
+	adminRepo      *repo.AdminRepo
 	subRepo        *repo.SubscriptionRepo
 	paymentSvc     *service.PaymentService
 	emailSvc       *service.EmailService
 }
 
 // NewAdminSystemHandler 创建管理端系统处理器
-func NewSystemHandler(ts *service.TrafficService, sr *repo.SettingRepo, la *repo.LoginAuditRepo, nr *repo.NodeRepo, ur *repo.UserRepo, subR *repo.SubscriptionRepo) *AdminSystemHandler {
-	return &AdminSystemHandler{trafficService: ts, settingRepo: sr, loginAuditRepo: la, nodeRepo: nr, userRepo: ur, subRepo: subR}
+func NewSystemHandler(ts *service.TrafficService, sr *repo.SettingRepo, la *repo.LoginAuditRepo, nr *repo.NodeRepo, ur *repo.UserRepo, subR *repo.SubscriptionRepo, ar *repo.AdminRepo) *AdminSystemHandler {
+	return &AdminSystemHandler{trafficService: ts, settingRepo: sr, loginAuditRepo: la, nodeRepo: nr, userRepo: ur, subRepo: subR, adminRepo: ar}
 }
 
 // SetPaymentService 注入支付服务(供 pay-config 接口使用)
@@ -1809,4 +1812,155 @@ func cleanupOldBackups(keep int) int {
 		}
 	}
 	return deleted
+}
+
+// ===================== 管理员自我管理 API (P0) =====================
+
+type adminListReq struct {
+	Keyword string `json:"keyword" form:"keyword"`
+}
+
+// AdminList [GET] /api/v1/admin/admins
+// 超级管理员查看管理员列表
+func (h *AdminSystemHandler) AdminList(c *gin.Context) {
+	if h.adminRepo == nil {
+		response.Fail(c, response.CodeServerError)
+		return
+	}
+	page, size := parsePage(c)
+	keyword := c.Query("keyword")
+	list, total, err := h.adminRepo.List(page, size, keyword)
+	if err != nil {
+		response.Fail(c, response.CodeDBError)
+		return
+	}
+	response.OK(c, gin.H{"list": list, "total": total})
+}
+
+type adminCreateReq struct {
+	Username string `json:"username" binding:"required,min=3,max=64"`
+	Password string `json:"password" binding:"required,min=8,max=64"`
+	Email    string `json:"email" binding:"omitempty,email,max=128"`
+	Role     string `json:"role" binding:"required,oneof=admin super_admin"`
+}
+
+// AdminCreate [POST] /api/v1/admin/admins
+// 超级管理员创建新管理员
+func (h *AdminSystemHandler) AdminCreate(c *gin.Context) {
+	if h.adminRepo == nil {
+		response.Fail(c, response.CodeServerError)
+		return
+	}
+	var req adminCreateReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, response.CodeParamError)
+		return
+	}
+	// 密码强度校验(与改密规则一致)
+	hasLetter, hasDigit := false, false
+	for _, ch := range req.Password {
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') {
+			hasLetter = true
+		} else if ch >= '0' && ch <= '9' {
+			hasDigit = true
+		}
+	}
+	if !hasLetter || !hasDigit {
+		response.FailMsg(c, response.CodeParamError, "密码必须包含字母和数字")
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
+	if err != nil {
+		response.Fail(c, response.CodeServerError)
+		return
+	}
+	admin := &model.Admin{
+		Username:     req.Username,
+		PasswordHash: string(hash),
+		Email:        req.Email,
+		Role:         req.Role,
+		Status:       "active",
+	}
+	if err := h.adminRepo.Create(admin); err != nil {
+		response.Fail(c, response.CodeDuplicate)
+		return
+	}
+	response.OK(c, admin)
+}
+
+type adminUpdateReq struct {
+	Status string `json:"status" binding:"omitempty,oneof=active disabled"`
+	Role   string `json:"role" binding:"omitempty,oneof=admin super_admin"`
+}
+
+// AdminUpdate [PUT] /api/v1/admin/admins/:id
+// 超级管理员修改管理员状态/角色
+func (h *AdminSystemHandler) AdminUpdate(c *gin.Context) {
+	if h.adminRepo == nil {
+		response.Fail(c, response.CodeServerError)
+		return
+	}
+	id := c.Param("id")
+	if id == "" {
+		response.Fail(c, response.CodeParamError)
+		return
+	}
+	// 禁止修改自己(避免误操作把自己锁死)
+	claims := middleware.GetClaims(c)
+	if claims != nil && claims.UserID == id {
+		response.FailMsg(c, response.CodeParamError, "不能通过本接口修改当前登录账号")
+		return
+	}
+	var req adminUpdateReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, response.CodeParamError)
+		return
+	}
+	if req.Status != "" {
+		if err := h.adminRepo.UpdateStatus(id, req.Status); err != nil {
+			response.Fail(c, response.CodeDBError)
+			return
+		}
+	}
+	if req.Role != "" {
+		if err := h.adminRepo.UpdateRole(id, req.Role); err != nil {
+			response.Fail(c, response.CodeDBError)
+			return
+		}
+	}
+	// 角色/状态变更后清除 RBAC 缓存, 使旧 token 在 30s 内失效敏感权限
+	if req.Role != "" || req.Status == "disabled" {
+		if rdb := app.Get().RDB; rdb != nil {
+			_ = rdb.Del(c.Request.Context(), fmt.Sprintf("rbac:role:%s", id)).Err()
+		}
+	}
+	response.OKMsg(c, "更新成功")
+}
+
+// AdminDelete [DELETE] /api/v1/admin/admins/:id
+// 超级管理员软删除管理员
+func (h *AdminSystemHandler) AdminDelete(c *gin.Context) {
+	if h.adminRepo == nil {
+		response.Fail(c, response.CodeServerError)
+		return
+	}
+	id := c.Param("id")
+	if id == "" {
+		response.Fail(c, response.CodeParamError)
+		return
+	}
+	claims := middleware.GetClaims(c)
+	if claims != nil && claims.UserID == id {
+		response.FailMsg(c, response.CodeParamError, "不能删除当前登录账号")
+		return
+	}
+	if err := h.adminRepo.SoftDelete(id); err != nil {
+		response.Fail(c, response.CodeDBError)
+		return
+	}
+	// 删除后清除 RBAC 缓存
+	if rdb := app.Get().RDB; rdb != nil {
+		_ = rdb.Del(c.Request.Context(), fmt.Sprintf("rbac:role:%s", id)).Err()
+	}
+	response.OKMsg(c, "删除成功")
 }

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -192,6 +193,11 @@ func (s *PlanService) UpdatePlan(id string, in *UpdatePlanInput) (*model.Plan, e
 	})
 	if err != nil {
 		return nil, err
+	}
+	// 兜底: UpdatePlan 绕过了 PlanRepo.Update, 必须自行清理套餐绑定节点的缓存,
+	// 使 agent 下次心跳重新计算用户指纹并拉取最新配置。
+	if ids, err := s.repo.NodeIDsByPlanID(p.ID); err == nil && len(ids) > 0 {
+		repo.ClearNodeUsersHashCache(context.Background(), ids...)
 	}
 	return p, nil
 }

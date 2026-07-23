@@ -3,7 +3,9 @@ package middleware
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log"
 	"strings"
 	"time"
 
@@ -14,17 +16,21 @@ import (
 	"nexus-panel/internal/repo"
 )
 
-// P1-AUDIT: 审计日志中需脱敏的敏感字段(全小写匹配, JSON key 不区分大小写也覆盖)
-// 命中后值会被替换为 "***" 再截断到 512 字节, 避免明文密码/密钥进入审计表
+// P0-AUDIT: 审计日志中需脱敏的敏感字段(全小写匹配, JSON key 不区分大小写也覆盖)
+// 命中后值会被替换为 "***" 再截断到 512 字节, 避免明文密码/密钥/token 进入审计表
 var sensitiveFields = []string{
-	"password", "old_password", "new_password",
+	"password", "old_password", "new_password", "password_hash",
 	"secret", "api_key", "apikey",
 	"smtp_pass", "smtp_password",
 	"private_key", "node_token",
+	"token", "refresh_token", "access_token", "authorization",
+	"jwt_secret", "hmac_secret", "aes_key",
 }
 
 // AuditAction 记录管理员操作审计日志中间件
 // 用法: admin.PUT("/nodes/:id", AuditAction("node.update"), adminNodeH.NodeUpdate)
+// P0-AUDIT: 同时记录成功与失败的状态变更操作(POST/PUT/DELETE/PATCH),
+// 失败事件包含状态码与错误提示, 便于追踪越权/误操作/攻击行为。
 func AuditAction(action string) gin.HandlerFunc {
         return func(c *gin.Context) {
                 // 在 c.Next() 之前读取请求体，避免 body 被 handler 消费后无法读取
@@ -32,13 +38,9 @@ func AuditAction(action string) gin.HandlerFunc {
 
                 c.Next() // 执行业务逻辑
 
-                // 仅记录成功的状态变更操作 (POST/PUT/DELETE/PATCH)
+                // 仅记录状态变更操作 (POST/PUT/DELETE/PATCH)
                 method := c.Request.Method
                 if method != "POST" && method != "PUT" && method != "DELETE" && method != "PATCH" {
-                        return
-                }
-                status := c.Writer.Status()
-                if status < 200 || status >= 300 {
                         return
                 }
 
@@ -51,8 +53,15 @@ func AuditAction(action string) gin.HandlerFunc {
                         return
                 }
 
+                status := c.Writer.Status()
+                success := status >= 200 && status < 300
+
                 // 提取请求体摘要(最多 512 字节)
                 detail := formatRequestBody(bodyBytes)
+                if !success {
+                        // 失败时追加状态码, 便于后续筛选安全事件
+                        detail = fmt.Sprintf("[HTTP %d] %s", status, detail)
+                }
 
                 audit := &model.AdminAction{
                         AdminID:    claims.UserID,
@@ -62,18 +71,28 @@ func AuditAction(action string) gin.HandlerFunc {
                         TargetID:   c.Param("id"),
                         Detail:     detail,
                         IP:         c.ClientIP(),
+                        Success:    success,
                 }
 
 			// 异步写入，不阻塞响应; 失败时短暂重试, 避免审计日志丢失
 			go func(a *model.AdminAction) {
-				defer func() { _ = recover() }()
+				defer func() {
+					if r := recover(); r != nil {
+						// P0-AUDIT: recover 后不应吞掉 panic, 至少记录到标准日志
+						log.Printf("[audit] async write panic: %v", r)
+					}
+				}()
 				r := repo.NewAdminActionRepo(app.Get().DB)
+				var lastErr error
 				for i := 0; i < 3; i++ {
-					if err := r.Create(a); err == nil {
+					lastErr = r.Create(a)
+					if lastErr == nil {
 						return
 					}
+					log.Printf("[audit] create attempt %d failed: %v", i+1, lastErr)
 					time.Sleep(time.Duration(i+1) * time.Second)
 				}
+				log.Printf("[audit] failed to persist audit after 3 retries: action=%s admin=%s err=%v", a.Action, a.AdminID, lastErr)
 			}(audit)
         }
 }

@@ -121,7 +121,7 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 	userH := NewUserHandler(deps.UserRepo, deps.NodeRepo, deps.AnnounceRepo, deps.SubSvc, deps.TrafficSvc)
 	adminNodeH := NewAdminNodeHandler(deps.NodeSvc, deps.NodeRepo)
 	adminUserH := NewAdminUserHandler(deps.UserSvc, deps.UserRepo, deps.SubSvc, deps.SubRepo, deps.OrderSvc, deps.NodeRepo)
-	systemH := NewSystemHandler(deps.TrafficSvc, deps.SettingRepo, deps.LoginAuditRepo, deps.NodeRepo, deps.UserRepo, deps.SubRepo)
+	systemH := NewSystemHandler(deps.TrafficSvc, deps.SettingRepo, deps.LoginAuditRepo, deps.NodeRepo, deps.UserRepo, deps.SubRepo, deps.AdminRepo)
 	systemH.SetPaymentService(deps.PaymentSvc)
 	systemH.SetEmailService(deps.EmailSvc)
 	sysStatsH := NewSystemStatsHandler(deps.SysStatsSvc)
@@ -137,7 +137,10 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 
 	auth := api.Group("/auth")
 	{
-		auth.POST("/login", authH.Login)
+		// P1-RateLimit: 登录接口加 IP 限流(10 次/分钟), 防止暴力撞库
+		auth.POST("/login",
+			middleware.RateLimitByIP("login:ip:", 10, time.Minute),
+			authH.Login)
 		// P0-RegAbuse: 注册接口加 IP 限流中间件(3 次/小时), 防代理池批量注册薅试用套餐
 		auth.POST("/register",
 			middleware.RateLimitByIP("reg:ip:", 3, time.Hour),
@@ -153,7 +156,10 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 	// 修复 P0-2: 邮箱验证码发送路由(register/change_email 两种场景)
 	email := api.Group("/email")
 	{
-		email.POST("/send-code", middleware.AnyAuth(), authH.SendEmailCode)
+		// P1-RateLimit: 验证码发送限流(5 次/小时/IP), 防止邮件服务被刷
+		email.POST("/send-code",
+			middleware.RateLimitByIP("emailcode:ip:", 5, time.Hour),
+			middleware.AnyAuth(), authH.SendEmailCode)
 	}
 
 	api.GET("/captcha", GetCaptcha)
@@ -271,6 +277,12 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 		admin.GET("/users/:id/subscription", middleware.RBAC(middleware.PermFundManage), NewAdminSubscriptionHandler(deps.SubRepo, deps.SubSvc).GetByUserID)
 		admin.POST("/users/:id/status", middleware.RBAC(middleware.PermFundManage), middleware.AuditAction("user.toggle_status"), adminUserH.UserToggleStatus)
 		admin.POST("/users/:id/activate-plan", middleware.RBAC(middleware.PermFundManage), middleware.AuditAction("user.activate_plan"), adminUserH.UserActivatePlan)
+
+		// P0: 管理员自我管理 API(仅 super_admin 可操作)
+		admin.GET("/admins", middleware.RBAC(middleware.PermGlobalSec), systemH.AdminList)
+		admin.POST("/admins", middleware.RBAC(middleware.PermGlobalSec), middleware.AuditAction("admin.create"), systemH.AdminCreate)
+		admin.PUT("/admins/:id", middleware.RBAC(middleware.PermGlobalSec), middleware.AuditAction("admin.update"), systemH.AdminUpdate)
+		admin.DELETE("/admins/:id", middleware.RBAC(middleware.PermGlobalSec), middleware.AuditAction("admin.delete"), systemH.AdminDelete)
 
 		admin.GET("/traffic/top", systemH.TrafficTop)
 		admin.GET("/dashboard", systemH.Dashboard)

@@ -15,9 +15,10 @@ type AdminAction struct {
         Action     string    `gorm:"type:varchar(64);not null;index" json:"action"`
         TargetType string    `gorm:"type:varchar(32);index" json:"target_type"`
         TargetID   string    `gorm:"type:varchar(64)" json:"target_id"`
-        Detail     string    `gorm:"type:text" json:"detail"`
-        IP         string    `gorm:"type:varchar(64)" json:"ip"`
-        CreatedAt  time.Time `json:"created_at"`
+	Detail     string    `gorm:"type:text" json:"detail"`
+	IP         string    `gorm:"type:varchar(64)" json:"ip"`
+	Success    bool      `gorm:"default:true;index" json:"success"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 func (AdminAction) TableName() string {

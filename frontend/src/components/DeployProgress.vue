@@ -457,7 +457,7 @@ const start = async () => {
       }),
     })
 
-    if (!resp.ok && resp.status !== 200) {
+    if (!resp.ok) {
       const txt = await resp.text()
       if (resp.status === 401) {
         addEvent({ step: 'connect_server', status: 'error', msg: '登录状态已过期，请关闭窗口后刷新页面重新登录', output: '' })

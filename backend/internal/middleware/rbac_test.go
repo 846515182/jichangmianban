@@ -11,6 +11,11 @@ import (
 	"nexus-panel/internal/response"
 )
 
+func init() {
+	// 单元测试不初始化数据库, 跳过 RBAC 对 super_admin 的 DB 二次校验
+	rbacSkipDBCheck = true
+}
+
 // performRequestAsRole 以指定角色发起请求
 func performRequestAsRole(role string, method, path string) *httptest.ResponseRecorder {
 	r := setupRouterWithRole(role)
@@ -20,14 +25,16 @@ func performRequestAsRole(role string, method, path string) *httptest.ResponseRe
 	return w
 }
 
-// setupRouterWithRole 构造带角色注入的路由(模拟 JWT 中间件设置 role 后进入 RBAC)
+// setupRouterWithRole 构造带角色注入的路由(模拟 JWT 中间件设置 role/user_id 后进入 RBAC)
 func setupRouterWithRole(role string) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	// 模拟 JWT 中间件: 将 role 注入 context
+	// 模拟 JWT 中间件: 将 role/user_id 注入 context
 	r.Use(func(c *gin.Context) {
 		if role != "" {
 			c.Set(string(CtxRole), role)
+			// 为 super_admin 的 DB 二次校验提供 adminID(测试跳过该校验, 但仍需非空)
+			c.Set(string(CtxUserID), "test-admin-id")
 		}
 		c.Next()
 	})
@@ -176,6 +183,7 @@ func TestRBACDirectly(t *testing.T) {
 			c.Request = httptest.NewRequest("GET", "/", nil)
 			if tc.role != "" {
 				c.Set(string(CtxRole), tc.role)
+				c.Set(string(CtxUserID), "test-admin-id")
 			}
 			blocked := false
 			RBAC(tc.perm)(c)

@@ -187,6 +187,11 @@ func (s *OrderService) CreateOrder(in *CreateOrderInput) (*model.Order, error) {
 		}
 		return nil, err
 	}
+	// 兜底: 0 元订单在事务内直接开通套餐, 绕过了 UserRepo.Update, 必须主动清理节点缓存,
+	// 让 agent 下次心跳重新计算用户指纹并下发新凭证。
+	if isFreeOrder {
+		repo.ClearAllNodeUsersHashCache(context.Background())
+	}
 	return order, nil
 }
 
@@ -407,6 +412,12 @@ func (s *OrderService) PaySuccess(orderNo, tradeNo string) error {
 		}
 		return nil
 	})
+	if err == nil {
+		// 兜底: 支付成功开通套餐后, 用户 plan_id/status 已变更, 清理所有节点 usershash 缓存,
+		// 让 agent 下次心跳重新计算用户指纹并下发新凭证。
+		repo.ClearAllNodeUsersHashCache(context.Background())
+	}
+	return err
 }
 
 // SetUserPlan 设置用户套餐(对外暴露给注册/手动开通场景)

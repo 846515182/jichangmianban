@@ -1,6 +1,8 @@
 package repo
 
 import (
+	"context"
+
 	"gorm.io/gorm"
 
 	"nexus-panel/internal/model"
@@ -94,22 +96,49 @@ func (r *PlanRepo) CountPendingOrdersByPlanID(planID string) (int64, error) {
 	return count, nil
 }
 
+// nodeIDsByPlanID 查询套餐绑定的所有节点 ID
+func (r *PlanRepo) nodeIDsByPlanID(planID string) ([]string, error) {
+	return r.NodeIDsByPlanID(planID)
+}
+
+// NodeIDsByPlanID 导出版: 查询套餐绑定的所有节点 ID。
+// 供 service/handler 跨包获取受影响节点列表, 用于精准清理 Redis 缓存。
+func (r *PlanRepo) NodeIDsByPlanID(planID string) ([]string, error) {
+	var ids []string
+	if err := r.db.Model(&model.NodePlanBinding{}).
+		Where("plan_id = ?", planID).
+		Pluck("node_id", &ids).Error; err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
 // Create 创建套餐
 func (r *PlanRepo) Create(p *model.Plan) error {
 	return r.db.Create(p).Error
 }
 
 // Update 更新套餐
+// 兜底: 套餐变更(价格/流量/状态)会影响订阅展示与节点用户列表,
+// 更新后清理该套餐绑定节点的 usershash + configver 缓存, 让 agent 下次心跳重拉。
 func (r *PlanRepo) Update(p *model.Plan) error {
-	return r.db.Save(p).Error
+	if err := r.db.Save(p).Error; err != nil {
+		return err
+	}
+	if ids, err := r.nodeIDsByPlanID(p.ID); err == nil && len(ids) > 0 {
+		clearNodeUsersHashCache(context.Background(), ids...)
+	}
+	return nil
 }
 
 // SoftDelete 软删除套餐
 // [P1-删除审计] 事务内同时物理删除 node_plan_bindings 绑定关系,
 // 旧版只软删 plan, 绑定残留导致 CountNodesByPlanID 统计虚高,
 // 且 node_plan_bindings.plan_id 外键 CASCADE 仅物理删 plan 时生效, 软删不触发
+// 兜底: 删除前记录绑定节点, 事务成功后清理这些节点的 usershash + configver 缓存。
 func (r *PlanRepo) SoftDelete(id string) error {
-	return r.db.Transaction(func(tx *gorm.DB) error {
+	nodeIDs, _ := r.nodeIDsByPlanID(id)
+	err := r.db.Transaction(func(tx *gorm.DB) error {
 		// 1. 软删套餐
 		if err := tx.Model(&model.Plan{}).Where("id = ? AND is_deleted = false", id).
 			Update("is_deleted", true).Error; err != nil {
@@ -122,6 +151,13 @@ func (r *PlanRepo) SoftDelete(id string) error {
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	if len(nodeIDs) > 0 {
+		clearNodeUsersHashCache(context.Background(), nodeIDs...)
+	}
+	return nil
 }
 
 // SyncUsersByPlanID 在事务内按 plan_id 同步 users 表的 traffic_limit

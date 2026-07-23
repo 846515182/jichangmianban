@@ -1,12 +1,29 @@
 package repo
 
 import (
+	"context"
+	"fmt"
 	"time"
 
 	"gorm.io/gorm"
 
+	"nexus-panel/internal/app"
 	"nexus-panel/internal/model"
 )
+
+// clearAdminRoleCache 清除管理员 RBAC 角色缓存。
+// 兜底: 管理员角色/状态/删除变更后, 即使调用方(handler)忘记清缓存,
+// 仓储层也会保证旧 token 在 30s 缓存窗口后无法继续使用 super_admin 权限。
+func clearAdminRoleCache(adminID string) {
+	if adminID == "" {
+		return
+	}
+	container := app.Get()
+	if container == nil || container.RDB == nil {
+		return
+	}
+	_ = container.RDB.Del(context.Background(), fmt.Sprintf("rbac:role:%s", adminID)).Err()
+}
 
 // AdminRepo 管理员仓储
 type AdminRepo struct {
@@ -52,7 +69,11 @@ func (r *AdminRepo) Create(a *model.Admin) error {
 
 // Update 更新管理员
 func (r *AdminRepo) Update(a *model.Admin) error {
-	return r.db.Save(a).Error
+	if err := r.db.Save(a).Error; err != nil {
+		return err
+	}
+	clearAdminRoleCache(a.ID)
+	return nil
 }
 
 // UpdatePassword 更新密码哈希
@@ -77,7 +98,56 @@ func (r *AdminRepo) UpdateLastLogin(id, ip string, t time.Time) error {
 		}).Error
 }
 
-// GetDB 暴露底层 db 句柄
-func (r *AdminRepo) GetDB() *gorm.DB {
-	return r.db
+// List 分页查询管理员列表(过滤软删除)
+func (r *AdminRepo) List(page, size int, keyword string) ([]model.Admin, int64, error) {
+	var list []model.Admin
+	var total int64
+	q := r.db.Model(&model.Admin{}).Where("is_deleted = false")
+	if keyword != "" {
+		like := "%" + keyword + "%"
+		q = q.Where("username ILIKE ? OR email ILIKE ?", like, like)
+	}
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	if err := q.Order("created_at DESC").Offset((page - 1) * size).Limit(size).Find(&list).Error; err != nil {
+		return nil, 0, err
+	}
+	return list, total, nil
+}
+
+// SoftDelete 软删除管理员
+func (r *AdminRepo) SoftDelete(id string) error {
+	if err := r.db.Model(&model.Admin{}).Where("id = ? AND is_deleted = false", id).
+		Update("is_deleted", true).Error; err != nil {
+		return err
+	}
+	clearAdminRoleCache(id)
+	return nil
+}
+
+// UpdateStatus 更新管理员状态(active/disabled)
+func (r *AdminRepo) UpdateStatus(id, status string) error {
+	if err := r.db.Model(&model.Admin{}).Where("id = ? AND is_deleted = false", id).
+		Update("status", status).Error; err != nil {
+		return err
+	}
+	clearAdminRoleCache(id)
+	return nil
+}
+
+// UpdateRole 更新管理员角色
+func (r *AdminRepo) UpdateRole(id, role string) error {
+	if err := r.db.Model(&model.Admin{}).Where("id = ? AND is_deleted = false", id).
+		Update("role", role).Error; err != nil {
+		return err
+	}
+	clearAdminRoleCache(id)
+	return nil
+}
+
+// UpdateLockUntil 更新管理员锁定时间
+func (r *AdminRepo) UpdateLockUntil(id string, lockUntil *time.Time) error {
+	return r.db.Model(&model.Admin{}).Where("id = ? AND is_deleted = false", id).
+		Update("lock_until", lockUntil).Error
 }

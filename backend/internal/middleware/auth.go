@@ -129,17 +129,19 @@ func ExtractToken(c *gin.Context) string {
 }
 
 // extractToken 从请求头提取 Bearer token
+// P0-AUTH: 严格匹配 Bearer scheme, 非 Bearer 格式(如 Basic/Digest)直接返回空,
+// 避免旧逻辑把非 Bearer 的整个 Authorization 头误当作 token 校验。
 func extractToken(c *gin.Context) string {
 	auth := c.GetHeader("Authorization")
 	if auth == "" {
 		return ""
 	}
-	// 支持 "Bearer xxx"
+	// 仅接受 "Bearer xxx"
 	parts := strings.SplitN(auth, " ", 2)
 	if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
 		return strings.TrimSpace(parts[1])
 	}
-	return strings.TrimSpace(auth)
+	return ""
 }
 
 // GetClaims 从上下文获取 claims

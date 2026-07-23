@@ -79,6 +79,11 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	}
 }
 
+// isAccountLocked 检查账户是否被锁定(LockUntil 字段生效)
+func isAccountLocked(lockUntil *time.Time) bool {
+	return lockUntil != nil && lockUntil.After(time.Now())
+}
+
 // adminLogin 管理员登录
 //
 // 修复 CRITICAL 2026-07-19: 账号锁定计数与 user 隔离
@@ -106,6 +111,11 @@ func (h *AuthHandler) adminLogin(c *gin.Context, ctx context.Context, req *login
 		middleware.RecordLoginFail(ctx, ip, adminAccKey)
 		h.recordAudit(ctx, "admin", "", req.Username, ip, ua, false)
 		response.Fail(c, response.CodeAccountPwdError)
+		return
+	}
+	// P0-LockUntil: 校验管理员账户锁定时间
+	if isAccountLocked(admin.LockUntil) {
+		response.Fail(c, response.CodeAccountLocked)
 		return
 	}
 	if admin.Status == "disabled" {
@@ -164,6 +174,11 @@ func (h *AuthHandler) userLogin(c *gin.Context, ctx context.Context, req *loginR
 		middleware.RecordLoginFail(ctx, ip, req.Username)
 		h.recordAudit(ctx, "user", "", req.Username, ip, ua, false)
 		response.Fail(c, response.CodeAccountPwdError)
+		return
+	}
+	// P0-LockUntil: 校验用户账户锁定时间
+	if isAccountLocked(user.LockUntil) {
+		response.Fail(c, response.CodeAccountLocked)
 		return
 	}
 	if user.Status == "disabled" {

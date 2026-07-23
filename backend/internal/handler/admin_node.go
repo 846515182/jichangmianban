@@ -638,6 +638,20 @@ func (h *AdminNodeHandler) NodeUpdate(c *gin.Context) {
 			return
 		}
 	}
+	// 节点配置(套餐绑定/启用状态/地址端口)变更后, 通知 agent 重新拉取配置,
+	// 避免用户已订阅的节点列表/凭证与面板 DB 不一致。
+	if rdb := app.Get().RDB; rdb != nil {
+		ctx := context.Background()
+		rdb.Del(ctx, fmt.Sprintf("node:configver:%s", id))
+		rdb.Del(ctx, fmt.Sprintf("node:usershash:%s", id))
+		// 容量/限速字段变更后, 旧 loadscore/dynlimit/speed_snap 可能失效,
+		// 清理后下次心跳重新计算, 避免 admin 监控大盘显示 stale 数据。
+		if hasCapacityUpdate {
+			rdb.Del(ctx, fmt.Sprintf("node:loadscore:%s", id))
+			rdb.Del(ctx, fmt.Sprintf("node:dynlimit:last:%s", id))
+			rdb.Del(ctx, fmt.Sprintf("node:speed_snap:%s", id))
+		}
+	}
 	response.OK(c, node)
 }
 

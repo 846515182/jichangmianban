@@ -358,14 +358,14 @@ const start = async () => {
         removeImg: removeImg.value,
       }),
     })
-    if (!resp.ok && !resp.body) {
+    if (!resp.body) {
       const txt = await resp.text()
       addEvent('finalize', 'error', `HTTP ${resp.status}: ${txt}`)
       running.value = false
       finished.value = true
       return
     }
-    const reader = resp.body!.getReader()
+    const reader = resp.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
     let sawFinish = false

@@ -459,6 +459,7 @@ func (s *NodeService) DeleteNode(id string) error {
 			// [P1-NODE-04] 负载/限速/状态相关缓存也需清理, 避免删除节点后 Redis 残留
 			fmt.Sprintf("node:loadscore:%s", id),
 			fmt.Sprintf("node:speed_snap:%s", id),
+			fmt.Sprintf("node:speed_ts:%s", id),
 			fmt.Sprintf("node:dynlimit:last:%s", id),
 			fmt.Sprintf("node:old_token:%s", id),
 		}

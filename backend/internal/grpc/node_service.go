@@ -110,7 +110,10 @@ func (s *NodeServiceServer) Heartbeat(ctx context.Context, req *nexuspb.Heartbea
 		return nil, status.Error(codes.Unauthenticated, "缺少 node_token")
 	}
 	if req.GetNodeToken() != node.NodeToken {
-		return nil, status.Error(codes.Unauthenticated, "node_token 不匹配")
+		// P0-N3: 双 token 宽限期, RotateToken 后 24h 内仍接受旧 token 心跳。
+		if !acceptOldNodeToken(ctx, req.GetNodeId(), req.GetNodeToken()) {
+			return nil, status.Error(codes.Unauthenticated, "node_token 不匹配")
+		}
 	}
 
 	now := time.Now()
@@ -297,7 +300,10 @@ func (s *NodeServiceServer) GetConfig(ctx context.Context, req *nexuspb.GetConfi
 		return nil, status.Error(codes.Internal, "查询节点失败")
 	}
 	if node.NodeToken != req.GetNodeToken() {
-		return nil, status.Error(codes.Unauthenticated, "node_token 与 node_id 不匹配")
+		// P0-N3: 双 token 宽限期, RotateToken 后 24h 内仍接受旧 token 拉配置。
+		if !acceptOldNodeToken(ctx, req.GetNodeId(), req.GetNodeToken()) {
+			return nil, status.Error(codes.Unauthenticated, "node_token 与 node_id 不匹配")
+		}
 	}
 	if !node.IsEnabled {
 		return nil, status.Error(codes.PermissionDenied, "节点已禁用")
@@ -396,7 +402,10 @@ func (s *NodeServiceServer) ReportStatus(ctx context.Context, req *nexuspb.Repor
 		return nil, status.Error(codes.Unauthenticated, "缺少 node_token")
 	}
 	if req.GetNodeToken() != node.NodeToken {
-		return nil, status.Error(codes.Unauthenticated, "node_token 不匹配")
+		// P0-N3: 双 token 宽限期, RotateToken 后 24h 内仍接受旧 token 上报状态。
+		if !acceptOldNodeToken(ctx, req.GetNodeId(), req.GetNodeToken()) {
+			return nil, status.Error(codes.Unauthenticated, "node_token 不匹配")
+		}
 	}
 
 	rdb := app.Get().RDB

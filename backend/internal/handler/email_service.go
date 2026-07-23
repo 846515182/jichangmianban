@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 
 	"nexus-panel/internal/app"
@@ -110,29 +111,25 @@ func (s *EmailService) SendVerifyCode(c *gin.Context) {
 // SendVerifyLink 生成邮箱激活链接并写 Redis + 发邮件
 // 修复 H1: 补全 email:verify:link:<token> 的写入点, key=value 为 token->user.ID(string UUID)
 // 仅对已注册且未激活的用户发送; 未注册用户静默成功(防用户枚举)。
+// P0: User 模型已映射 email_verified, 不再走原生 Select
 func (s *EmailService) SendVerifyLink(ctx context.Context, email string) error {
 	email = normalizeEmail(email)
-	// 仅查 id 与 email_verified(model.User 未映射 email_verified, 走原生 Select)
-	var row struct {
-		ID            string
-		EmailVerified bool
-	}
-	err := s.DB.Table("users").
-		Select("id, email_verified").
+	var user model.User
+	err := s.DB.Select("id, email_verified").
 		Where("email = ? AND is_deleted = false", email).
-		Take(&row).Error
+		Take(&user).Error
 	if err != nil {
 		// 用户不存在: 静默返回成功, 防止通过该接口枚举已注册邮箱
 		return nil
 	}
-	if row.EmailVerified {
+	if user.EmailVerified {
 		return nil // 已激活, 不重复发送
 	}
 	token, err := randomToken(48)
 	if err != nil {
 		return err
 	}
-	if err := s.Redis.Set(ctx, "email:verify:link:"+token, row.ID, emailResetTTL).Err(); err != nil {
+	if err := s.Redis.Set(ctx, "email:verify:link:"+token, user.ID, emailResetTTL).Err(); err != nil {
 		return err
 	}
 	link := getFrontendBase() + "/verify-email?token=" + token
@@ -148,7 +145,7 @@ func (s *EmailService) SendVerifyLink(ctx context.Context, email string) error {
 		} else {
 			log.Printf("[email] 激活链接发送成功 userID=%s email=%s", userID, emailTo)
 		}
-	}(email, link, row.ID)
+	}(email, link, user.ID)
 	return nil
 }
 
@@ -205,6 +202,8 @@ func (s *EmailService) SendVerifyCodeAsync(userID string, email, typ string) err
 // send 通过 service.EmailService 发送邮件
 // 修复: 原实现直接读取 os.Getenv(SMTP_*) + smtp.SendMail，缺少对端口465(隐式TLS)的支持，
 // 并且使用 SMTP 用户名作为 From 地址导致 Mailtrap 等平台失败。改为使用 service.EmailService。
+// 修复 P1-EMAIL-01: 增加指数退避重试(最多3次), 应对临时网络抖动/邮件服务商限流,
+// 避免一次性发送失败就丢失验证码/激活链接。
 func (s *EmailService) send(to, subject, body string) error {
 	if to == "" {
 		return fmt.Errorf("收件人为空")
@@ -215,7 +214,24 @@ func (s *EmailService) send(to, subject, body string) error {
 		return fmt.Errorf("app 尚未初始化")
 	}
 	emailSvc := service.NewEmailService(repo.NewSettingRepo(ct.DB), ct.Cfg)
-	return emailSvc.SendMail([]string{to}, subject, body)
+
+	var lastErr error
+	baseDelay := 500 * time.Millisecond
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			// 指数退避: 500ms, 1s, 2s
+			delay := baseDelay * time.Duration(1<<(attempt-1))
+			time.Sleep(delay)
+			if logger := ct.Logger; logger != nil {
+				logger.Warn("邮件发送重试", zap.String("to", to), zap.Int("attempt", attempt+1), zap.Error(lastErr))
+			}
+		}
+		lastErr = emailSvc.SendMail([]string{to}, subject, body)
+		if lastErr == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("邮件发送失败(已重试3次): %w", lastErr)
 }
 
 // normalizeEmail 邮箱归一化 (lowercase + trim)

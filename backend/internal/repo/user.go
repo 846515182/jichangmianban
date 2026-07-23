@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"context"
 	"time"
 
 	"gorm.io/gorm"
@@ -75,8 +76,14 @@ func (r *UserRepo) CreateBatch(users []*model.User) error {
 }
 
 // Update 更新用户
+// 兜底: 用户 plan_id/status 等变更会影响节点活跃用户列表, 更新后清理所有节点的 usershash 缓存,
+// 使 agent 下次心跳重新计算用户指纹并触发配置重拉。
 func (r *UserRepo) Update(u *model.User) error {
-	return r.db.Save(u).Error
+	if err := r.db.Save(u).Error; err != nil {
+		return err
+	}
+	clearAllNodeUsersHashCache(context.Background())
+	return nil
 }
 
 // SoftDelete 软删除
@@ -85,14 +92,19 @@ func (r *UserRepo) Update(u *model.User) error {
 // 导致用同 email 重新注册时 INSERT 触发唯一约束冲突, 报"重复"。
 // 现在同步给 email 加 _del_时间戳 后缀, 释放 email 唯一索引。
 // 同时 status=disabled 阻止订阅拉取。
+// 兜底: 用户删除后清理所有节点的 usershash 缓存, 避免 agent 继续下发已删用户凭证。
 func (r *UserRepo) SoftDelete(id string) error {
-	return r.db.Model(&model.User{}).Where("id = ? AND is_deleted = false", id).
+	if err := r.db.Model(&model.User{}).Where("id = ? AND is_deleted = false", id).
 		Updates(map[string]interface{}{
 			"is_deleted": true,
 			"status":     "disabled",
 			"username":   gorm.Expr("username || '_del_' || to_char(now(), 'YYYYMMDDHH24MISS')"),
 			"email":      gorm.Expr("email || '_del_' || to_char(now(), 'YYYYMMDDHH24MISS')"),
-		}).Error
+		}).Error; err != nil {
+		return err
+	}
+	clearAllNodeUsersHashCache(context.Background())
+	return nil
 }
 
 // HardDelete 硬删除(物理删除, 仅用于测试数据彻底清理)
@@ -155,9 +167,10 @@ func (r *UserRepo) HardDelete(id string) error {
 // 修复 TRAFFIC-RESET-01 (P0): 旧版只清 users.traffic_used, 但 QueryUserTraffic 优先取
 // SUM(traffic_logs), 导致重置后节点拉到的仍是历史总量 → 用户立即被判定超额 → 凭证被剔除 → 用户无法连接。
 // 现在同时清理该用户的 traffic_logs 历史(物理删除, 因 traffic_logs 无 is_deleted 字段)。
+// 兜底: 重置后用户恢复 active, 清理所有节点的 usershash 缓存, 让 agent 重新下发该用户凭证。
 func (r *UserRepo) ResetTraffic(id string) error {
 	// 事务: 清 users 表 + 清 traffic_logs 历史, 保证原子性
-	return r.db.Transaction(func(tx *gorm.DB) error {
+	err := r.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&model.User{}).Where("id = ? AND is_deleted = false", id).
 			Updates(map[string]interface{}{
 				"traffic_used":   0,
@@ -173,12 +186,22 @@ func (r *UserRepo) ResetTraffic(id string) error {
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	clearAllNodeUsersHashCache(context.Background())
+	return nil
 }
 
 // UpdateStatus 更新状态(禁用/启用)
+// 兜底: 状态变更影响节点活跃用户列表, 更新后清理所有节点的 usershash 缓存。
 func (r *UserRepo) UpdateStatus(id, status string) error {
-	return r.db.Model(&model.User{}).Where("id = ? AND is_deleted = false", id).
-		Update("status", status).Error
+	if err := r.db.Model(&model.User{}).Where("id = ? AND is_deleted = false", id).
+		Update("status", status).Error; err != nil {
+		return err
+	}
+	clearAllNodeUsersHashCache(context.Background())
+	return nil
 }
 
 // AddTraffic 增加用户流量统计(原子操作)
@@ -225,6 +248,7 @@ func (r *UserRepo) ListActive() ([]model.User, error) {
 // 此方法批量重置所有 active 且 traffic_used > 0 的用户流量, 同时清理 traffic_logs 历史,
 // 由 cron 在每月 reset_day 日 00:05 触发。
 // 返回重置的用户数。
+// 兜底: 批量重置后清理所有节点的 usershash 缓存, 让 agent 重新下发恢复服务的用户凭证。
 func (r *UserRepo) ResetTrafficForCycleBatch() (int64, error) {
 	var count int64
 	err := r.db.Transaction(func(tx *gorm.DB) error {
@@ -257,7 +281,13 @@ func (r *UserRepo) ResetTrafficForCycleBatch() (int64, error) {
 		}
 		return nil
 	})
-	return count, err
+	if err != nil {
+		return 0, err
+	}
+	if count > 0 {
+		clearAllNodeUsersHashCache(context.Background())
+	}
+	return count, nil
 }
 
 // ListActiveForPlans 查询 plan_id 命中给定列表的活跃用户(用于 node_plan_bindings)
@@ -278,18 +308,26 @@ func (r *UserRepo) ListActiveForPlans(planIDs []string) ([]model.User, error) {
 
 // ExpireOverdueUsers 将已过期但 status 仍为 active 的用户标记为 expired
 // 供定时任务调用，修复 BIZ-FATAL-01
+// 兜底: 批量状态变更后清理所有节点的 usershash 缓存, 让 agent 移除过期用户凭证。
 func (r *UserRepo) ExpireOverdueUsers(now time.Time) (int64, error) {
 	result := r.db.Model(&model.User{}).
 		Where("is_deleted = false AND status = 'active'").
 		Where("expired_at IS NOT NULL AND expired_at < ?", now).
 		Update("status", "expired")
-	return result.RowsAffected, result.Error
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	if result.RowsAffected > 0 {
+		clearAllNodeUsersHashCache(context.Background())
+	}
+	return result.RowsAffected, nil
 }
 
 // MarkAllTrafficExhausted [BIZ-FATAL-02 fix 2026-07-16]
 // 兜底检测所有超额用户: status='active' 且 traffic_limit>0 且 traffic_used>=traffic_limit
 // 把它们标记为 traffic_exhausted, 配合 ListActiveForPlans 的过滤
 // 实现"超额自动停服", 即使节点 agent 上报缺失/异常也能兜底。
+// 兜底: 批量状态变更后清理所有节点的 usershash 缓存, 让 agent 移除超额用户凭证。
 func (r *UserRepo) MarkAllTrafficExhausted() (int64, error) {
 	result := r.db.Exec(`
 		UPDATE users
@@ -299,7 +337,13 @@ func (r *UserRepo) MarkAllTrafficExhausted() (int64, error) {
 		  AND traffic_limit > 0
 		  AND traffic_used >= traffic_limit
 	`)
-	return result.RowsAffected, result.Error
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	if result.RowsAffected > 0 {
+		clearAllNodeUsersHashCache(context.Background())
+	}
+	return result.RowsAffected, nil
 }
 
 // ListByIDs 按 ID 列表批量查询用户
