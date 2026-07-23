@@ -297,6 +297,10 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 		admin.GET("/system/disk-usage", middleware.RBAC(middleware.PermBackup), systemH.DiskUsage)
 		admin.POST("/system/disk-cleanup", middleware.RBAC(middleware.PermBackup), middleware.AuditAction("system.disk_cleanup"), systemH.DiskCleanup)
 
+		// 智能运维: 全局错误聚合 + 一键自动清理(自动清缓存/修脏配置/清 stale 缓存)
+		admin.GET("/system/errors", middleware.RBAC(middleware.PermBackup), systemH.ErrorsAggregate)
+		admin.POST("/system/auto-cleanup", middleware.RBAC(middleware.PermBackup), middleware.AuditAction("system.auto_cleanup"), systemH.AutoOpsCleanup)
+
 		// 服务日志监控(容器列表 + 历史日志 + SSE 实时流)
 		// 用于在仪表盘内嵌日志监控卡片, 半小时轮询拉取最近日志, 报错高亮
 		admin.GET("/system/containers", middleware.RBAC(middleware.PermBackup), systemH.ContainerList)

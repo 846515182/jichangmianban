@@ -265,6 +265,119 @@ func (s *CronService) CleanOrphanData() {
 	s.CleanUpdateLogs()
 }
 
+// AutoOpsMaintenance 智能运维自动维护(每 6 小时执行一次)
+//
+// 设计目标: 让面板"自己照顾自己", 自动清理累积的缓存/脏数据/旧配置,
+// 避免磁盘爆满 + 脏配置引发故障(如 max_clients=1 残留导致疯狂踢人)。
+//
+// 处理范围(全自动, 无需人工介入):
+//  1. Docker build cache 清理(每次 docker build 累积, 可达数十 GB, 是存储杀手)
+//  2. Docker 悬空镜像 + 已停止容器清理(不用 --volumes 保护 pg-data/redis-data)
+//  3. 脏配置修复: max_clients=1 / max_bandwidth_mbps=1 的测试残留 → 重置为 0
+//     (历史教训: max_clients=1 残留 + 43 实际连接 → 每30秒踢43人 → agent 不停
+//      重拉配置重启 Xray → Cloudflare 522/524 Network Error)
+//  4. Stale Redis 配置缓存清理: 已删除节点的 node:configver:* / node:usershash:* 残留
+//
+// 安全保障:
+//   - Redis 分布式锁(3h TTL), 多副本/重启安全
+//   - safeRun 包裹, panic 不影响其它 cron 任务
+//   - 不用 docker system prune --volumes(会误删 pg-data/redis-data 业务卷)
+func (s *CronService) AutoOpsMaintenance() {
+	unlock := tryLock(app.Get().RDB, "cron:lock:auto_ops", 3*time.Hour)
+	if unlock == nil {
+		s.logger.Debug("智能运维维护被其它实例占用, 跳过本次")
+		return
+	}
+	defer unlock()
+
+	ctx := context.Background()
+	fixedConfigs := 0
+	staleCleaned := 0
+
+	// 1. Docker build cache 清理(存储杀手, 每次 docker build 累积一层)
+	if out, err := exec.Command("docker", "builder", "prune", "-af").CombinedOutput(); err != nil {
+		s.logger.Debug("docker builder prune 失败(容器内无 docker.sock 时正常)",
+			zap.Error(err))
+	} else {
+		s.logger.Info("智能运维: 已清理 Docker build cache",
+			zap.String("output", strings.TrimSpace(string(out))))
+	}
+
+	// 2. Docker 悬空镜像 + 停止容器(不用 --volumes 保护业务卷)
+	if out, err := exec.Command("docker", "image", "prune", "-f").CombinedOutput(); err == nil {
+		if strings.TrimSpace(string(out)) != "" {
+			s.logger.Info("智能运维: 已清理悬空镜像",
+				zap.String("output", strings.TrimSpace(string(out))))
+		}
+	}
+	if out, err := exec.Command("docker", "container", "prune", "-f").CombinedOutput(); err == nil {
+		if strings.TrimSpace(string(out)) != "" {
+			s.logger.Info("智能运维: 已清理停止的容器",
+				zap.String("output", strings.TrimSpace(string(out))))
+		}
+	}
+
+	// 3. 脏配置修复(max_clients=1 / max_bandwidth_mbps=1 测试残留)
+	//    正常节点应为 0(不限) 或 >=10 的合理值, 1 几乎一定是测试残留
+	db := app.Get().DB
+	if db != nil {
+		result := db.Model(&model.Node{}).
+			Where("is_deleted = false AND (max_clients = 1 OR max_bandwidth_mbps = 1)").
+			Updates(map[string]interface{}{
+				"max_clients":        0,
+				"max_bandwidth_mbps": 0,
+			})
+		if result.Error != nil {
+			s.logger.Warn("智能运维: 脏配置修复失败", zap.Error(result.Error))
+		} else if result.RowsAffected > 0 {
+			fixedConfigs = int(result.RowsAffected)
+			s.logger.Warn("智能运维: 已自动修复脏配置(测试残留 max_clients/max_bandwidth_mbps=1 → 0)",
+				zap.Int("fixed", fixedConfigs))
+		}
+	}
+
+	// 4. Stale Redis 配置缓存清理(已删除节点残留的 configver/usershash)
+	rdb := app.Get().RDB
+	if rdb != nil && db != nil {
+		var activeIDs []string
+		db.Model(&model.Node{}).Where("is_deleted = false").Pluck("id", &activeIDs)
+		activeSet := make(map[string]bool, len(activeIDs))
+		for _, id := range activeIDs {
+			activeSet[id] = true
+		}
+		for _, prefix := range []string{"node:configver:", "node:usershash:"} {
+			var cursor uint64
+			for {
+				keys, next, err := rdb.Scan(ctx, cursor, prefix+"*", 100).Result()
+				if err != nil {
+					break
+				}
+				for _, key := range keys {
+					nodeID := strings.TrimPrefix(key, prefix)
+					if !activeSet[nodeID] {
+						rdb.Del(ctx, key)
+						staleCleaned++
+					}
+				}
+				if next == 0 {
+					break
+				}
+				cursor = next
+			}
+		}
+		if staleCleaned > 0 {
+			s.logger.Info("智能运维: 已清理已删除节点的 stale Redis 缓存",
+				zap.Int("cleaned", staleCleaned))
+		}
+	}
+
+	if fixedConfigs > 0 || staleCleaned > 0 {
+		s.logger.Info("智能运维维护完成",
+			zap.Int("fixed_configs", fixedConfigs),
+			zap.Int("stale_cleaned", staleCleaned))
+	}
+}
+
 // dropOldTrafficPartitions DROP 超过 2 个月的 traffic_logs 旧分区
 // 保留当月与上月分区, 更早的分区整块 DROP 释放磁盘空间
 func (s *CronService) dropOldTrafficPartitions(db *gorm.DB) {

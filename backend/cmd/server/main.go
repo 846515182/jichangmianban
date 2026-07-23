@@ -183,6 +183,33 @@ func main() {
 	}()
 	logger.Info("节点心跳巡检(1m)与孤儿数据清理(6h)定时任务已启动")
 
+	// 智能运维自动维护 cron(每 6 小时执行一次)。
+	// 自动清理 Docker build cache/脏数据/旧配置残留(stale Redis 缓存/测试残留 max_clients=1),
+	// 让面板"自己照顾自己", 避免磁盘爆满 + 脏配置引发故障(如疯狂踢人导致 Network Error)。
+	// 与 CleanOrphanData 错开执行(都 6h 但用不同 Redis 锁, 互不干扰)。
+	go func() {
+		tickerOps := time.NewTicker(6 * time.Hour)
+		defer tickerOps.Stop()
+		// 启动后延迟 10 分钟再首次执行(避开启动高峰, 等 agent 重连+心跳稳定)
+		startupDelay := time.NewTimer(10 * time.Minute)
+		defer startupDelay.Stop()
+		select {
+		case <-startupDelay.C:
+		case <-ctx.Done():
+			return
+		}
+		cronSvc.SafeRun("AutoOpsMaintenance", func() { cronSvc.AutoOpsMaintenance() })
+		for {
+			select {
+			case <-tickerOps.C:
+				cronSvc.SafeRun("AutoOpsMaintenance", func() { cronSvc.AutoOpsMaintenance() })
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	logger.Info("智能运维自动维护(6h, 清缓存/修脏配置/清stale缓存)定时任务已启动")
+
 	// 修复 TRAFFIC-RESET-02 (P0): 周期性流量重置 cron。
 	// 每小时检查一次, 当"今日 == settings.traffic.reset_day"时触发批量重置。
 	// 方法内部用 Redis SetNX 当日幂等键, 保证同一天只执行一次(多副本/重启安全)。

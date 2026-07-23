@@ -128,7 +128,10 @@
             <el-tag v-else size="small" type="info" effect="plain">docker 不可用</el-tag>
           </div>
           <div class="log-toolbar">
-            <el-select v-model="logMonitor.selectedContainer" placeholder="选择容器" size="small" style="width: 240px" @change="onContainerChange">
+            <el-button size="small" :type="logMonitor.aggregateMode ? 'warning' : 'info'" @click="toggleAggregateMode">
+              <el-icon><Cpu /></el-icon><span>{{ logMonitor.aggregateMode ? '聚合中' : '智能聚合' }}</span>
+            </el-button>
+            <el-select v-if="!logMonitor.aggregateMode" v-model="logMonitor.selectedContainer" placeholder="选择容器" size="small" style="width: 240px" @change="onContainerChange">
               <el-option
                 v-for="c in logMonitor.containers"
                 :key="c.name"
@@ -136,7 +139,7 @@
                 :value="c.name"
               />
             </el-select>
-            <el-radio-group v-model="logMonitor.level" size="small" @change="onFilterChange">
+            <el-radio-group v-if="!logMonitor.aggregateMode" v-model="logMonitor.level" size="small" @change="onFilterChange">
               <el-radio-button label="all">全部</el-radio-button>
               <el-radio-button label="error">仅报错</el-radio-button>
               <el-radio-button label="warn">警告+</el-radio-button>
@@ -147,10 +150,13 @@
               <el-option label="最近 6 小时" value="6h" />
               <el-option label="最近 24 小时" value="24h" />
             </el-select>
-            <el-input-number v-model="logMonitor.tail" :min="50" :max="2000" :step="100" size="small" style="width: 130px" @change="onFilterChange" />
-            <span class="log-tail-label">行数</span>
+            <el-input-number v-if="!logMonitor.aggregateMode" v-model="logMonitor.tail" :min="50" :max="2000" :step="100" size="small" style="width: 130px" @change="onFilterChange" />
+            <span v-if="!logMonitor.aggregateMode" class="log-tail-label">行数</span>
             <div class="log-toolbar-spacer"></div>
-            <el-button size="small" type="primary" @click="fetchContainerLogs()" :loading="logMonitor.loading">
+            <el-button size="small" type="danger" plain @click="runAutoCleanup" :loading="logMonitor.cleanupLoading">
+              <el-icon><Delete /></el-icon><span>一键运维清理</span>
+            </el-button>
+            <el-button size="small" type="primary" @click="fetchLogs()" :loading="logMonitor.loading">
               <el-icon><Refresh /></el-icon><span>刷新</span>
             </el-button>
             <el-button size="small" :type="logMonitor.autoRefresh ? 'success' : 'info'" @click="toggleAutoRefresh">
@@ -162,14 +168,20 @@
           </div>
           <div class="log-stats-bar" v-if="logMonitor.lastFetch">
             <span class="log-stats-text">
-              最后拉取: {{ formatTime(logMonitor.lastFetch) }}
+              {{ logMonitor.aggregateMode ? `聚合扫描 ${logStats.containers_scanned} 个容器` : `最后拉取: ${formatTime(logMonitor.lastFetch)}` }}
               <span v-if="logStats.cached" class="log-stats-cached">(命中缓存)</span>
             </span>
-            <span class="log-stats-text" v-if="logStats.failed" style="color: var(--np-danger)">
+            <span class="log-stats-text" v-if="logMonitor.aggregateMode && logStats.total_errors > 0" style="color: var(--np-danger)">
+              ⚠ 发现 {{ logStats.total_errors }} 条错误 · {{ logStats.total_warns }} 条警告
+            </span>
+            <span class="log-stats-text" v-else-if="logMonitor.aggregateMode && logStats.total_errors === 0" style="color: var(--np-primary)">
+              ✓ 近期无错误日志
+            </span>
+            <span class="log-stats-text" v-if="!logMonitor.aggregateMode && logStats.failed" style="color: var(--np-danger)">
               ⚠ 拉取失败(容器可能已停止或 docker 不可用)
             </span>
           </div>
-          <pre class="log-view" ref="logViewRef">{{ logMonitor.filteredLogs || '请选择容器查看日志…' }}</pre>
+          <pre class="log-view" ref="logViewRef"><span v-if="!logMonitor.highlightEnabled">{{ logMonitor.filteredLogs || (logMonitor.aggregateMode ? '点击刷新扫描所有容器错误日志…' : '请选择容器查看日志…') }}</span><span v-else v-html="logMonitor.highlightedLogs || (logMonitor.aggregateMode ? '点击刷新扫描所有容器错误日志…' : '请选择容器查看日志…')"></span></pre>
         </div>
       </el-col>
     </el-row>
@@ -185,7 +197,7 @@ import { formatTraffic, formatTime, formatSpeed, formatDuration } from "@/utils/
 import { chartColors } from "@/utils/echarts"
 import { mockDashboardStats } from "@/mock/data"
 import { ElMessage } from "element-plus"
-import { Refresh, Timer, CopyDocument } from "@element-plus/icons-vue"
+import { Refresh, Timer, CopyDocument, Cpu, Delete } from "@element-plus/icons-vue"
 
 interface NodeRow {
   id: string; name: string; protocol: string; server_address: string; port: number
@@ -231,6 +243,8 @@ const logMonitor = reactive({
   containers: [] as ContainerInfo[],
   selectedContainer: '',
   available: true,
+  // 智能聚合模式: 开启后从所有容器自动抓取错误/警告日志(不需要手动切容器)
+  aggregateMode: false,
   // 等级筛选: all / error / warn
   level: 'all' as 'all' | 'error' | 'warn',
   // 时间窗口(对应 docker logs --since)
@@ -241,7 +255,13 @@ const logMonitor = reactive({
   rawLogs: '',
   // 当前过滤后展示的日志
   filteredLogs: '',
+  // 高亮渲染后的 HTML(错误行红色/警告行黄色)
+  highlightedLogs: '',
+  // 是否启用高亮渲染(聚合模式默认开启, 单容器模式也可开)
+  highlightEnabled: true,
   loading: false,
+  // 一键运维清理 loading
+  cleanupLoading: false,
   // 自动刷新(默认开启, 30 秒轮询)
   autoRefresh: true,
   intervalLabel: '30s',
@@ -254,6 +274,10 @@ const logStats = reactive({
   total_lines: 0,
   cached: false,
   failed: false,
+  // 聚合模式专用
+  containers_scanned: 0,
+  total_errors: 0,
+  total_warns: 0,
 })
 
 const logViewRef = ref<HTMLElement | null>(null)
@@ -313,23 +337,154 @@ const fetchContainerLogs = async (silent = false) => {
   }
 }
 
-// 根据等级筛选过滤日志
+// fetchErrorsAggregate 智能聚合: 自动扫描所有容器, 提取 ERROR/WARN 行
+// 一次请求拉取 nexus-panel/postgres/redis/frontend 等所有容器的错误日志
+// silent: 定时器触发时静默
+const fetchErrorsAggregate = async (silent = false) => {
+  logMonitor.loading = true
+  try {
+    const res: any = await request.get('/api/v1/admin/system/errors', {
+      params: { since: logMonitor.since, limit: 200 },
+      silent: true,
+    })
+    const d = res?.data || res
+    if (d) {
+      logMonitor.available = d.available !== false
+      logStats.containers_scanned = d.containers_scanned || 0
+      logStats.total_errors = d.total_errors || 0
+      logStats.total_warns = d.total_warns || 0
+      logStats.error_count = d.total_errors || 0
+      logStats.warn_count = d.total_warns || 0
+      // 将聚合的错误条目格式化为日志文本(带容器名前缀)
+      const errors = d.errors || []
+      if (errors.length === 0) {
+        logMonitor.rawLogs = '✓ 近期所有容器无错误/警告日志'
+      } else {
+        logMonitor.rawLogs = errors.map((e: any) => {
+          const ts = e.timestamp ? e.timestamp.split('T').join(' ').replace('Z', '') + ' ' : ''
+          const lvl = e.level === 'error' ? '[ERROR]' : '[WARN] '
+          return `${ts}${lvl} [${e.container}] ${e.line}`
+        }).join('\n')
+      }
+      logStats.total_lines = errors.length
+      logStats.cached = false
+      logStats.failed = false
+      logMonitor.lastFetch = Date.now()
+      // 聚合模式固定为 all(已只含 error/warn), 直接渲染高亮
+      logMonitor.level = 'all'
+      applyLogFilter()
+    }
+  } catch {
+    if (!silent) ElMessage.error('聚合扫描失败')
+  } finally {
+    logMonitor.loading = false
+  }
+}
+
+// fetchLogs 统一日志拉取入口(根据 aggregateMode 分发)
+const fetchLogs = (silent = false) => {
+  if (logMonitor.aggregateMode) {
+    return fetchErrorsAggregate(silent)
+  }
+  return fetchContainerLogs(silent)
+}
+
+// 根据等级筛选过滤日志 + 生成高亮 HTML
 const applyLogFilter = () => {
   if (!logMonitor.rawLogs) {
     logMonitor.filteredLogs = ''
+    logMonitor.highlightedLogs = ''
     return
   }
+  let lines: string[]
   if (logMonitor.level === 'all') {
-    logMonitor.filteredLogs = logMonitor.rawLogs
-    return
+    lines = logMonitor.rawLogs.split('\n')
+  } else {
+    lines = logMonitor.rawLogs.split('\n').filter(line => {
+      if (logMonitor.level === 'error') return LOG_ERROR_RE.test(line)
+      if (logMonitor.level === 'warn') return LOG_ERROR_RE.test(line) || LOG_WARN_RE.test(line)
+      return true
+    })
   }
-  const lines = logMonitor.rawLogs.split('\n')
-  const filtered = lines.filter(line => {
-    if (logMonitor.level === 'error') return LOG_ERROR_RE.test(line)
-    if (logMonitor.level === 'warn') return LOG_ERROR_RE.test(line) || LOG_WARN_RE.test(line)
-    return true
+  const text = lines.length ? lines.join('\n') : '(当前等级无匹配日志)'
+  logMonitor.filteredLogs = text
+  // 生成高亮 HTML: 错误行红色, 警告行黄色, 先转义 HTML 防注入
+  logMonitor.highlightedLogs = lines.map(line => {
+    const escaped = escapeHtml(line)
+    if (LOG_ERROR_RE.test(line)) {
+      return `<span class="log-line-error">${escaped}</span>`
+    }
+    if (LOG_WARN_RE.test(line)) {
+      return `<span class="log-line-warn">${escaped}</span>`
+    }
+    return escaped
+  }).join('\n')
+  // 自动滚动到底部(最新日志在底部), 仅在用户未手动上滚时触发
+  scrollToLogBottom()
+}
+
+// escapeHtml 转义 HTML 特殊字符, 防止日志内容注入(v-html 渲染安全)
+const escapeHtml = (s: string): string => {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+// scrollToLogBottom 自动滚动日志框到底部(最新日志)
+// 仅在用户当前已接近底部时触发, 避免打断用户查看历史日志
+const scrollToLogBottom = () => {
+  // nextTick 后 DOM 才更新
+  requestAnimationFrame(() => {
+    const el = logViewRef.value
+    if (!el) return
+    // 判断是否在底部附近(距底 < 80px), 是则自动跟随滚动
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+    if (nearBottom) {
+      el.scrollTop = el.scrollHeight
+    }
   })
-  logMonitor.filteredLogs = filtered.length ? filtered.join('\n') : '(当前等级无匹配日志)'
+}
+
+// toggleAggregateMode 切换"智能聚合"模式
+// 开启: 自动扫描所有容器的错误日志; 关闭: 回到单容器模式
+const toggleAggregateMode = () => {
+  logMonitor.aggregateMode = !logMonitor.aggregateMode
+  if (logMonitor.aggregateMode) {
+    // 聚合模式默认 1h 时间窗口(错误日志不需要像实时流那么频繁)
+    if (logMonitor.since === '30m') {
+      logMonitor.since = '1h'
+    }
+    ElMessage.success('已开启智能聚合: 自动扫描所有容器错误日志')
+    fetchErrorsAggregate()
+  } else {
+    ElMessage.info('已切换回单容器模式')
+    fetchContainerLogs()
+  }
+}
+
+// runAutoCleanup 一键智能运维清理: 清 Docker 缓存 + 修脏配置 + 清 stale 缓存
+const runAutoCleanup = async () => {
+  logMonitor.cleanupLoading = true
+  try {
+    const res: any = await request.post('/api/v1/admin/system/auto-cleanup', {})
+    const d = res?.data || res
+    const fixed = d?.fixed_configs || 0
+    const stale = d?.stale_cleaned || 0
+    const parts: string[] = []
+    if (fixed > 0) parts.push(`修复 ${fixed} 个脏配置`)
+    if (stale > 0) parts.push(`清理 ${stale} 个 stale 缓存`)
+    parts.push('Docker 缓存已清理')
+    ElMessage.success(`运维清理完成: ${parts.join(' · ')}`)
+    // 清理后刷新日志(可能有新的清理日志)
+    fetchLogs()
+  } catch {
+    ElMessage.error('运维清理失败')
+  } finally {
+    logMonitor.cleanupLoading = false
+  }
 }
 
 const onContainerChange = () => {
@@ -340,7 +495,7 @@ const onFilterChange = () => {
   // 等级筛选纯前端过滤(不需要重新请求)
   applyLogFilter()
   // 但 tail/since 变化需要重新拉取
-  fetchContainerLogs()
+  fetchLogs()
 }
 
 const toggleAutoRefresh = () => {
@@ -357,7 +512,7 @@ const toggleAutoRefresh = () => {
 const startLogTimer = () => {
   stopLogTimer()
   // 30 秒轮询一次(监控日志需要近实时感知)
-  logTimer = window.setInterval(() => fetchContainerLogs(true), 30 * 1000)
+  logTimer = window.setInterval(() => fetchLogs(true), 30 * 1000)
 }
 
 const stopLogTimer = () => {
@@ -516,6 +671,12 @@ onMounted(async () => {
   await fetchContainers()
   if (logMonitor.selectedContainer) {
     fetchContainerLogs()
+    // 首次加载后自动滚动到底部(展示最新日志)
+    requestAnimationFrame(() => {
+      if (logViewRef.value) {
+        logViewRef.value.scrollTop = logViewRef.value.scrollHeight
+      }
+    })
   }
   // P2-20: fetchContainers 失败(available=false)时不启动日志定时器, 避免空转
   if (logMonitor.autoRefresh && logMonitor.available) {
@@ -618,5 +779,18 @@ onBeforeUnmount(() => {
   height: 360px;
   overflow-y: auto;
   border: 1px solid var(--np-border);
+}
+/* 智能运维: 错误行高亮(红色背景), 警告行高亮(黄色背景) */
+.log-view :deep(.log-line-error) {
+  color: #ff6b6b;
+  background: rgba(255, 107, 107, 0.12);
+  display: inline;
+  border-radius: 2px;
+}
+.log-view :deep(.log-line-warn) {
+  color: #ffd93d;
+  background: rgba(255, 217, 61, 0.1);
+  display: inline;
+  border-radius: 2px;
 }
 </style>

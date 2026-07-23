@@ -1604,6 +1604,130 @@ func (h *AdminSystemHandler) DiskCleanup(c *gin.Context) {
 	})
 }
 
+// AutoOpsCleanup POST /api/v1/admin/system/auto-cleanup
+// 智能运维一键清理: 自动清理 Docker 缓存/脏数据 + 修复旧配置残留
+//
+// 与 DiskCleanup 的区别:
+//   - DiskCleanup: 通用磁盘清理(日志/tmp/备份/VACUUM), 需手动勾选各项
+//   - AutoOpsCleanup: 智能运维专用, 自动检测并修复"脏配置"(如测试残留 max_clients=1
+//     导致疯狂踢人), 清理 stale Redis 缓存, 清理 Docker build cache
+//
+// 处理范围(全自动, 无需管理员逐项勾选):
+//  1. Docker build cache 清理(每次 docker build 累积, 是存储杀手, 可达数十 GB)
+//  2. Docker 悬空镜像 + 已停止容器清理(不用 --volumes 保护业务卷)
+//  3. 脏配置修复: max_clients=1 / max_bandwidth_mbps=1 的测试残留 → 重置为 0
+//     (历史教训: max_clients=1 残留 + 43 实际连接 → 每30秒踢43人 → agent 不停
+//      重拉配置重启 Xray → Cloudflare 522/524 Network Error)
+//  4. Stale Redis 配置缓存清理: 已删除节点的 node:configver:* / node:usershash:* 残留
+func (h *AdminSystemHandler) AutoOpsCleanup(c *gin.Context) {
+	var summary []string
+
+	// 1. Docker 清理(build cache + 悬空镜像 + 停止容器)
+	summary = append(summary, "=== Docker 智能清理 ===")
+	out := execCommand("docker", "builder", "prune", "-af")
+	summary = append(summary, "Build cache: "+out.Output)
+	out = execCommand("docker", "image", "prune", "-f")
+	summary = append(summary, "悬空镜像: "+out.Output)
+	out = execCommand("docker", "container", "prune", "-f")
+	summary = append(summary, "停止的容器: "+out.Output)
+	if out.Error != "" {
+		summary = append(summary, "Docker 提示(容器内无 docker.sock 时正常): "+out.Error)
+	}
+
+	// 2. 脏配置修复(max_clients=1 / max_bandwidth_mbps=1 测试残留)
+	summary = append(summary, "=== 脏配置自动修复 ===")
+	fixedConfigs := 0
+	if h.nodeRepo != nil && app.Get().DB != nil {
+		// 检测 max_clients=1 或 max_bandwidth_mbps=1 的测试残留(正常节点应为 0=不限
+		// 或 >=10 的合理值, 1 几乎一定是测试残留, 会触发疯狂踢人)
+		result := app.Get().DB.Model(&model.Node{}).
+			Where("is_deleted = false AND (max_clients = 1 OR max_bandwidth_mbps = 1)").
+			Updates(map[string]interface{}{
+				"max_clients":        0,
+				"max_bandwidth_mbps": 0,
+			})
+		if result.Error != nil {
+			summary = append(summary, "脏配置修复失败: "+result.Error.Error())
+		} else {
+			fixedConfigs = int(result.RowsAffected)
+			if fixedConfigs > 0 {
+				summary = append(summary, fmt.Sprintf("已修复 %d 个节点的测试残留配置(max_clients/max_bandwidth_mbps=1 → 0)", fixedConfigs))
+				// 清理这些节点的 Redis 配置缓存, 强制下次心跳拉取正确配置
+				if rdb := app.Get().RDB; rdb != nil {
+					var nodeIDs []string
+					app.Get().DB.Model(&model.Node{}).
+						Where("is_deleted = false").
+						Pluck("id", &nodeIDs)
+					keys := make([]string, 0, len(nodeIDs)*2)
+					for _, id := range nodeIDs {
+						keys = append(keys, "node:configver:"+id, "node:usershash:"+id)
+					}
+					if len(keys) > 0 {
+						rdb.Del(c.Request.Context(), keys...)
+					}
+				}
+			} else {
+				summary = append(summary, "未检测到脏配置(所有节点配置正常)")
+			}
+		}
+	}
+
+	// 3. Stale Redis 配置缓存清理(已删除节点残留的 configver/usershash)
+	summary = append(summary, "=== Stale 缓存清理 ===")
+	staleCleaned := 0
+	if h.nodeRepo != nil && app.Get().RDB != nil {
+		// 获取所有存活的节点 ID
+		var activeIDs []string
+		app.Get().DB.Model(&model.Node{}).
+			Where("is_deleted = false").
+			Pluck("id", &activeIDs)
+		activeSet := make(map[string]bool, len(activeIDs))
+		for _, id := range activeIDs {
+			activeSet[id] = true
+		}
+		// 扫描 Redis 中所有 node:configver:* 和 node:usershash:* 键
+		ctx := c.Request.Context()
+		for _, prefix := range []string{"node:configver:", "node:usershash:"} {
+			var cursor uint64
+			for {
+				keys, next, err := app.Get().RDB.Scan(ctx, cursor, prefix+"*", 100).Result()
+				if err != nil {
+					break
+				}
+				for _, key := range keys {
+					// 提取 nodeID: node:configver:<uuid>
+					nodeID := strings.TrimPrefix(key, prefix)
+					if !activeSet[nodeID] {
+						app.Get().RDB.Del(ctx, key)
+						staleCleaned++
+					}
+				}
+				if next == 0 {
+					break
+				}
+				cursor = next
+			}
+		}
+		if staleCleaned > 0 {
+			summary = append(summary, fmt.Sprintf("已清理 %d 个已删除节点的 stale Redis 缓存", staleCleaned))
+		} else {
+			summary = append(summary, "未检测到 stale 缓存")
+		}
+	}
+
+	// 4. 最终磁盘状态
+	summary = append(summary, "=== 清理后磁盘状态 ===")
+	diskResult := execCommand("df", "-h")
+	summary = append(summary, diskResult.Output)
+
+	response.OK(c, gin.H{
+		"summary":         summary,
+		"output":          strings.Join(summary, "\n"),
+		"fixed_configs":   fixedConfigs,
+		"stale_cleaned":   staleCleaned,
+	})
+}
+
 // cleanupOldBackups 清理备份目录, 对每种类型(.json / .sql.gz)各保留最近 N 份
 // 修复 STORAGE-CLEANUP-01 (P0): 旧版只清 .json 不清 .sql.gz, 数据库备份无限累积
 func cleanupOldBackups(keep int) int {
