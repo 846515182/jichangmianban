@@ -216,3 +216,6 @@ var ErrDuplicate = errors.New("duplicate")
 
 // ErrDuplicateEmail 邮箱已注册
 var ErrDuplicateEmail = errors.New("email already registered")
+
+// ErrValidation 输入校验错误(用户名/密码格式等), 应由 handler 转为 400
+var ErrValidation = errors.New("validation failed")

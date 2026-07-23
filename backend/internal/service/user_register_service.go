@@ -40,11 +40,11 @@ type RegisterInput struct {
 
 func (s *UserRegisterService) Register(in *RegisterInput) (*model.User, error) {
 	if in.Username == "" || in.Password == "" {
-		return nil, errors.New("用户名和密码不能为空")
+		return nil, fmt.Errorf("%w: 用户名和密码不能为空", ErrValidation)
 	}
 	// 后端必须重复校验用户名规则 (前端校验不可信)
 	if !usernameRegex.MatchString(in.Username) {
-		return nil, errors.New("用户名长度 3-20 个字符, 仅支持字母、数字和下划线")
+		return nil, fmt.Errorf("%w: 用户名长度 3-20 个字符, 仅支持字母、数字和下划线", ErrValidation)
 	}
 	// 修复 P0-REG-03: 用户名至少包含一个字母, 避免纯数字用户名造成混淆/排序/安全审计问题。
 	hasAlpha := false
@@ -55,10 +55,10 @@ func (s *UserRegisterService) Register(in *RegisterInput) (*model.User, error) {
 		}
 	}
 	if !hasAlpha {
-		return nil, errors.New("用户名至少包含一个字母")
+		return nil, fmt.Errorf("%w: 用户名至少包含一个字母", ErrValidation)
 	}
 	if len(in.Password) < 8 {
-		return nil, errors.New("密码长度至少 8 位")
+		return nil, fmt.Errorf("%w: 密码长度至少 8 位", ErrValidation)
 	}
 	hasLetter := false
 	hasDigit := false
@@ -70,7 +70,7 @@ func (s *UserRegisterService) Register(in *RegisterInput) (*model.User, error) {
 		}
 	}
 	if !hasLetter || !hasDigit {
-		return nil, errors.New("密码必须包含字母和数字")
+		return nil, fmt.Errorf("%w: 密码必须包含字母和数字", ErrValidation)
 	}
 	// 修复 P0-10: 旧实现先查重再 bcrypt(250ms), 放大 TOCTOU 竞态窗口。
 	// 现改为先 bcrypt 再查重, 缩短查重与创建之间的时间窗口。

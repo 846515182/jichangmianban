@@ -92,6 +92,11 @@ func (h *AuthRegisterHandler) Register(c *gin.Context) {
 			response.FailMsg(c, response.CodeDuplicate, "该邮箱已被注册, 请更换或联系管理员清理旧账号")
 			return
 		}
+		// P1-REG-02: 校验错误返回 400, 避免用户看到"注册失败"而不知道具体原因
+		if errors.Is(err, service.ErrValidation) {
+			response.FailMsg(c, response.CodeParamError, err.Error())
+			return
+		}
 		// P1-REG-02: 内部错误不向客户端暴露明文(可能含 SQL/堆栈), 仅记日志并返回通用提示
 		log.Printf("[auth_register] register failed username=%s ip=%s: %v", req.Username, ip, err)
 		response.FailMsg(c, response.CodeServerError, "注册失败")
