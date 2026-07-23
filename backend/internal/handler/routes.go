@@ -141,10 +141,9 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 		auth.POST("/login",
 			middleware.RateLimitByIP("login:ip:", 10, time.Minute),
 			authH.Login)
-		// P0-RegAbuse: 注册接口加 IP 限流中间件(3 次/小时), 防代理池批量注册薅试用套餐
-		auth.POST("/register",
-			middleware.RateLimitByIP("reg:ip:", 3, time.Hour),
-			authRegisterH.Register)
+		// P1-RegAbuse: 注册限流改由 handler 内成功后再计数(3 次/小时/IP),
+		// 避免校验/验证码失败误触限流导致 NAT/校园网用户大面积无法注册。
+		auth.POST("/register", authRegisterH.Register)
 		auth.POST("/refresh", authH.Refresh)
 		auth.POST("/logout", middleware.AnyAuth(), authH.Logout)
 		auth.POST("/change-password", middleware.AnyAuth(), authH.ChangePassword)
