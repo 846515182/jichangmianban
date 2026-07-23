@@ -486,11 +486,21 @@ const fetchTrafficTrend = async () => {
   } catch { /* 拦截器处理 */ }
 }
 
-onMounted(async () => {
+// fetchStats 拉取仪表盘统计(用户数/节点数/今日流量/本周流量)
+// 修复 BUG: 旧版仅在 onMounted 拉一次, 页面打开后今日流量/在线节点数永远停在打开时的值,
+// 运营者刷新浏览器才能看到新数据。改为 30s 轮询, 流量/在线数实时更新。
+const fetchStats = async () => {
   try {
     const res = await request.get("/api/v1/admin/dashboard")
     if (res && res.data) { stats.value = { ...stats.value, ...res.data } }
   } catch { /* fallback */ }
+}
+
+let statsTimer: number | null = null
+
+onMounted(async () => {
+  fetchStats()
+  statsTimer = window.setInterval(fetchStats, 30000)
   fetchTrafficTrend()
   nodeLoading.value = true
   try {
@@ -514,23 +524,30 @@ onMounted(async () => {
   document.addEventListener('visibilitychange', handleVisibility)
 })
 
-// P2-9: 标签页隐藏时暂停所有轮询(sysTimer 3s + logTimer 30s), 切回恢复
+// P2-9: 标签页隐藏时暂停所有轮询(sysTimer 3s + statsTimer 30s + logTimer 30s), 切回恢复
 let isVisible = true
 const handleVisibility = () => {
   const nowVisible = !document.hidden
   if (nowVisible === isVisible) return
   isVisible = nowVisible
   if (isVisible) {
+    fetchStats()
+    statsTimer = window.setInterval(fetchStats, 30000)
     fetchSysStats()
     sysTimer = window.setInterval(fetchSysStats, 3000)
     if (logMonitor.autoRefresh && logMonitor.available) startLogTimer()
   } else {
+    if (statsTimer !== null) { clearInterval(statsTimer); statsTimer = null }
     if (sysTimer !== null) { clearInterval(sysTimer); sysTimer = null }
     stopLogTimer()
   }
 }
 
 onBeforeUnmount(() => {
+  if (statsTimer !== null) {
+    clearInterval(statsTimer)
+    statsTimer = null
+  }
   if (sysTimer !== null) {
     clearInterval(sysTimer)
     sysTimer = null

@@ -89,12 +89,15 @@ type DashboardStats struct {
 
 // Dashboard 仪表盘数据
 func (s *TrafficService) Dashboard() (*DashboardStats, error) {
-	// 修复 M4: 原代码用 now.Location()(服务器本地时区)构造 todayStart, 而
-	// repo/traffic.go RecordLog 用 UTC 桶存 log_time、DailyTraffic 用 date_trunc(UTC)。
-	// 当前 TZ=UTC 下侥幸一致, 一旦改时区即错位缺日。统一用 UTC 计算。
+	// 流量日界按北京时间(UTC+8)0点计算, 而非 UTC 0点。
+	// 原因: 运营者在中国, "今日流量"应指北京时间 00:00 起的流量。
+	// UTC 0点 = 北京 08:00, 早上8点前看的"今日"会把昨晚8点后的流量算进去, 体验混乱。
+	// log_time 是 TIMESTAMPTZ, 比较时 PG 自动按 UTC 比较, todayStart 用 UTC+8 的 0点转 UTC 即可。
 	now := time.Now().UTC()
-	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-	weekStart := now.AddDate(0, 0, -7)
+	bjNow := now.Add(8 * time.Hour)
+	bjTodayStart := time.Date(bjNow.Year(), bjNow.Month(), bjNow.Day(), 0, 0, 0, 0, time.UTC).Add(-8 * time.Hour)
+	todayStart := bjTodayStart
+	weekStart := bjTodayStart.AddDate(0, 0, -7)
 
 	stats := &DashboardStats{}
 
