@@ -446,7 +446,6 @@ func getGitRoot() string {
 
 var (
 	gitRepoPath     = getGitRoot()
-	updateStateDir  = filepath.Join(getGitRoot(), ".update-state")
 	updateLogFile   = filepath.Join(getGitRoot(), ".update-state", "git-pull.log")
 	updateStateFile = filepath.Join(getGitRoot(), ".update-state", "git-pull.state")
 )

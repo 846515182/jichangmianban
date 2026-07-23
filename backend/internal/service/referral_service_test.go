@@ -26,8 +26,9 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	db.Exec("DROP TABLE IF EXISTS referrals")
 	db.Exec("DROP TABLE IF EXISTS referral_rewards")
 	db.Exec("DROP TABLE IF EXISTS settings")
+	db.Exec("DROP TABLE IF EXISTS orders")
 
-	if err := db.AutoMigrate(&model.User{}, &model.Referral{}, &model.ReferralReward{}, &model.Setting{}); err != nil {
+	if err := db.AutoMigrate(&model.User{}, &model.Referral{}, &model.ReferralReward{}, &model.Setting{}, &model.Order{}); err != nil {
 		t.Fatalf("AutoMigrate 失败: %v", err)
 	}
 	return db

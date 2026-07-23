@@ -661,7 +661,6 @@ const savePoster = async () => {
 
     ElMessage.success('海报已保存到本地')
   } catch (err) {
-    console.error('海报生成失败:', err)
     ElMessage.error('海报生成失败，请重试')
   } finally {
     posterSaving.value = false

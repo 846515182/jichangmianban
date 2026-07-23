@@ -212,18 +212,6 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
-func getEnvBool(key string, fallback bool) bool {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		switch strings.ToLower(v) {
-		case "1", "true", "yes", "on":
-			return true
-		case "0", "false", "no", "off":
-			return false
-		}
-	}
-	return fallback
-}
-
 func getEnvInt(key string, fallback int) int {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -293,6 +281,7 @@ func ensureCACert(cfg *Config) {
 	}
 	if _, ok := privKey.(*ecdsa.PrivateKey); ok {
 		// ECDSA CA: 签名用证书私钥即�? 无需额外限制
+		_ = ok
 	}
 
 	certDER, err := x509.CreateCertificate(

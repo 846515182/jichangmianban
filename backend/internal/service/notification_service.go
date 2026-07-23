@@ -113,7 +113,7 @@ func (s *NotificationService) SendTelegram(payload TelegramPayload) error {
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
 		s.logger.Error("Telegram API 错误", zap.Int("status", resp.StatusCode), zap.String("body", string(respBody)))
-		return fmt.Errorf("Telegram API 返回 %d", resp.StatusCode)
+		return fmt.Errorf("telegram API 返回 %d", resp.StatusCode)
 	}
 	s.logger.Info("Telegram 发送成功")
 	return nil

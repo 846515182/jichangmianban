@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,36 +17,6 @@ import (
 	"nexus-panel/internal/repo"
 	nexuspb "nexus-panel/proto"
 )
-
-// s7WarnLimiter 限制每个节点的 S7 警告频率, 避免每 5 分钟刷屏
-var s7WarnLimiter sync.Map // map[nodeID]time.Time
-
-// shouldLogS7Warn 同一节点 1 小时内最多打一次 S7 警告(用于写库失败等真正的错误)
-func shouldLogS7Warn(nodeID string) bool {
-	now := time.Now()
-	if v, ok := s7WarnLimiter.Load(nodeID); ok {
-		if now.Sub(v.(time.Time)) < time.Hour {
-			return false
-		}
-	}
-	s7WarnLimiter.Store(nodeID, now)
-	return true
-}
-
-// s7InfoLimiter 限制 S7 INFO 日志频率(无活跃用户等正常状态)
-var s7InfoLimiter sync.Map // map[nodeID]time.Time
-
-// shouldLogS7Info 同一节点 1 小时内最多打一次 S7 INFO 日志
-func shouldLogS7Info(nodeID string) bool {
-	now := time.Now()
-	if v, ok := s7InfoLimiter.Load(nodeID); ok {
-		if now.Sub(v.(time.Time)) < time.Hour {
-			return false
-		}
-	}
-	s7InfoLimiter.Store(nodeID, now)
-	return true
-}
 
 // TrafficServiceServer 流量服务 gRPC 实现
 // 负责: 接收节点实时流量上报，查询用户流量汇总

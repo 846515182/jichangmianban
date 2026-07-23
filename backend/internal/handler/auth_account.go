@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/redis/go-redis/v9"
-	"gorm.io/gorm"
 
 	"nexus-panel/internal/app"
 )
@@ -37,14 +36,6 @@ func getenv(k, def string) string {
 		return v
 	}
 	return def
-}
-
-// getDB 返回全局 DB 句柄
-func getDB() *gorm.DB {
-	if a := app.Get(); a != nil {
-		return a.DB
-	}
-	return nil
 }
 
 // getRedis 返回全局 Redis 句柄
@@ -83,16 +74,3 @@ func invalidateUserTokens(uid string) {
 	_ = bumpTokenVersion(context.Background(), uid, "user")
 }
 
-// strongEnough 密码强度 (字母 + 数字)
-func strongEnough(p string) bool {
-	hasLetter, hasDigit := false, false
-	for _, ch := range p {
-		switch {
-		case ch >= 'a' && ch <= 'z', ch >= 'A' && ch <= 'Z':
-			hasLetter = true
-		case ch >= '0' && ch <= '9':
-			hasDigit = true
-		}
-	}
-	return hasLetter && hasDigit
-}

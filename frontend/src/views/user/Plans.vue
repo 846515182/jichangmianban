@@ -316,31 +316,16 @@ const createOrder = async () => {
       payment_method: payForm.paymentMethod,
       coupon_code: couponApplied.value ? payForm.couponCode : '',
     }
-    console.log('[Payment] 创建订单请求', {
-      plan_id: payload.plan_id,
-      plan_price_cents: currentPlan.value.price_cents,
-      payment_method: payload.payment_method,
-      coupon_code: payload.coupon_code || '(无)',
-      coupon_applied: couponApplied.value,
-    })
     const res: any = await request.post('/api/v1/user/orders', payload)
     const data = res?.data || res
     const orderId = data?.id || data?.order_id || ''
     const orderNo = data?.order_no || data?.orderNo || ''
-    console.log('[Payment] 创建订单响应', {
-      order_id: orderId,
-      order_no: orderNo,
-      status: data?.status,
-      amount_cents: data?.amount_cents,
-      pay_url: data?.pay_url ? '(已返回)' : '(未返回)',
-    })
     if (!orderId) {
       ElMessage.error('订单创建失败')
       return
     }
     // 0 元订单(100% 折扣): 后端直接标记已支付, 跳过支付网关
     if (data?.status === 'paid') {
-      console.log('[Payment] 0元订单直接支付成功', { order_id: orderId, order_no: orderNo })
       ElMessage.success('订单已支付，套餐已激活')
       purchaseVisible.value = false
       router.push('/user/orders')
@@ -349,8 +334,7 @@ const createOrder = async () => {
     ElMessage.success('订单已创建，正在生成支付链接')
     purchaseVisible.value = false
     await requestPay(orderId, orderNo, data?.amount_cents)
-  } catch (err) {
-    console.error('[Payment] 创建订单失败', err)
+  } catch {
     ElMessage.error('订单创建失败，请稍后重试')
   } finally {
     creating.value = false
@@ -360,19 +344,10 @@ const createOrder = async () => {
 // 请求支付链接
 const requestPay = async (orderId: string, orderNo: string, orderAmountCents?: number) => {
   try {
-    console.log('[Payment] 请求支付链接', { order_id: orderId, order_no: orderNo })
     const res: any = await request.post(`/api/v1/user/orders/${orderId}/pay`)
     const data = res?.data || res
-    console.log('[Payment] 支付链接响应', {
-      order_id: orderId,
-      order_no: orderNo,
-      status: data?.status,
-      amount_cents: data?.amount_cents,
-      pay_url: data?.pay_url ? '(已返回)' : '(未返回)',
-    })
     // 0 元订单(100% 折扣)已是已支付状态, 直接显示成功
     if (data?.status === 'paid') {
-      console.log('[Payment] 0元订单支付成功(支付链接阶段)', { order_id: orderId })
       ElMessage.success('订单已支付，套餐已激活')
       router.push('/user/orders')
       return
@@ -384,19 +359,11 @@ const requestPay = async (orderId: string, orderNo: string, orderAmountCents?: n
     const amountCents = data?.amount_cents || orderAmountCents || (currentPlan.value ? currentPlan.value.price_cents : 0)
     lastOrderAmount.value = amountCents / 100
     lastPayUrl.value = payUrl
-    console.log('[Payment] 二维码金额确定', {
-      order_id: orderId,
-      order_no: orderNo,
-      amount_cents: amountCents,
-      amount_yuan: lastOrderAmount.value.toFixed(2),
-      source: data?.amount_cents ? 'pay接口' : (orderAmountCents ? 'order接口' : '套餐原价兜底'),
-    })
     // 生成二维码：优先使用 pay_url，否则用订单号
     await generateQR(payUrl || orderNo)
     payVisible.value = true
     startStatusPolling()
-  } catch (err) {
-    console.error('[Payment] 获取支付链接失败', { order_id: orderId, order_no: orderNo, error: err })
+  } catch {
     ElMessage.error('获取支付链接失败，请前往订单列表重试')
     router.push('/user/orders')
   }
@@ -449,40 +416,18 @@ const refreshOrderStatus = async (silent = false) => {
     const res: any = await request.get(`/api/v1/user/orders/${lastOrderId.value}`)
     const data = res?.data || res
     const status = data?.status
-    console.log('[Payment] 轮询订单状态', {
-      order_id: lastOrderId.value,
-      order_no: lastOrderNo.value,
-      status,
-      amount_cents: data?.amount_cents,
-      silent,
-    })
     if (status === 'paid') {
-      console.log('[Payment] 支付成功(轮询确认)', {
-        order_id: lastOrderId.value,
-        order_no: lastOrderNo.value,
-        amount_cents: data?.amount_cents,
-      })
       stopStatusPolling()
       payVisible.value = false
       ElMessage.success('支付成功，套餐已激活')
       router.push('/user/orders')
     } else if (status === 'expired' || status === 'cancelled') {
-      console.log('[Payment] 订单失效', {
-        order_id: lastOrderId.value,
-        order_no: lastOrderNo.value,
-        status,
-      })
       stopStatusPolling()
       if (!silent) ElMessage.warning('订单已失效')
     } else if (!silent) {
       ElMessage.info('订单尚未支付，请扫码完成支付')
     }
-  } catch (err) {
-    console.error('[Payment] 轮询订单状态失败', {
-      order_id: lastOrderId.value,
-      order_no: lastOrderNo.value,
-      error: err,
-    })
+  } catch {
     if (!silent) ElMessage.info('订单尚未支付，请扫码完成支付')
   } finally {
     checkingStatus.value = false

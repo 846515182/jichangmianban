@@ -159,38 +159,6 @@ func (h *AdminNodeHandler) NodeList(c *gin.Context) {
 	})
 }
 
-// readNodeRuntime 从 Redis 读取节点实时运行状态并计算实时速度
-// 速度计算: 对比本次请求与上次请求(redis 快照)的 traffic_used 差值 / 时间差
-func (h *AdminNodeHandler) readNodeRuntime(ctx context.Context, rdb *redis.Client, nodeID string, dbTrafficUsed int64) gin.H {
-	hbKey := fmt.Sprintf("node:heartbeat:%s", nodeID)
-	hb, err := rdb.HGetAll(ctx, hbKey).Result()
-	rt := gin.H{
-		"cpu_usage":          0,
-		"memory_usage":       0,
-		"online_connections": 0,
-		"speed_bps":          0,
-		"uptime_seconds":     0,
-		"updated_at":         0,
-		"proxy_reachable":    int64(1),
-		"proxy_error":        "",
-	}
-	if err != nil || len(hb) == 0 {
-		return rt
-	}
-
-	// 计算实时速度: 与上次管理端查询的快照对比
-	snapKey := fmt.Sprintf("node:speed_snap:%s", nodeID)
-	snap, _ := rdb.HGetAll(ctx, snapKey).Result()
-	rt = h.buildNodeRuntimeFromCache(hb, snap, dbTrafficUsed)
-
-	// 更新快照(用 DB traffic_used，TTL 10 分钟)
-	now := time.Now().Unix()
-	rdb.HSet(ctx, snapKey, "traffic_used", dbTrafficUsed, "ts", now)
-	rdb.Expire(ctx, snapKey, 10*time.Minute)
-
-	return rt
-}
-
 // buildNodeRuntimeFromCache 从已预取的心跳数据计算运行时状态(纯计算, 无 IO)。
 // 修复 PERF-NPLUS1-01: 抽离自 readNodeRuntime, 供 NodeList 批量预取后复用。
 //

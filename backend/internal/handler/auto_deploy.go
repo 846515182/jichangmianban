@@ -1503,13 +1503,13 @@ func diagnoseDockerFailure(client *ssh.Client, sse *sseWriter) dockerDiag {
 	// 非致命: cgroup 和 overlay 都有, 但 dockerd 还是启动失败 (可能是 containerd 未运行/端口冲突/配置损坏等)
 	if strings.Contains(dockerLog, "containerd.sock") || strings.Contains(dockerLog, "dial containerd") {
 		return dockerDiag{
-			fatal:  false,
-			reason: fmt.Sprintf("dockerd 无法连接 containerd.sock (containerd 可能未运行或已崩溃)。修复: 执行下面命令后再重试部署:\n  containerd > /var/log/containerd.log 2>&1 &\n  sleep 2\n  dockerd > /var/log/dockerd.log 2>&1 &"),
+			fatal: false,
+			reason: "dockerd 无法连接 containerd.sock (containerd 可能未运行或已崩溃)。修复: 执行下面命令后再重试部署:\n  containerd > /var/log/containerd.log 2>&1 &\n  sleep 2\n  dockerd > /var/log/dockerd.log 2>&1 &",
 		}
 	}
 	return dockerDiag{
 		fatal:  false,
-		reason: fmt.Sprintf("内核兼容性检查通过 (cgroup+overlay 均可用), 但 dockerd 仍无法启动。请查看完整日志排查"),
+		reason: "内核兼容性检查通过 (cgroup+overlay 均可用), 但 dockerd 仍无法启动。请查看完整日志排查",
 	}
 }
 
@@ -1994,10 +1994,7 @@ func verifyDockerReady(client *ssh.Client, sse *sseWriter) bool {
 	}
 	// 兜底: 轮询超时, 尝试一键修复脚本
 	sse.event(PhaseInstallDocker, "log", "", "Docker daemon 轮询超时, 执行一键修复脚本(fix_docker)...")
-	if runDockerFixScript(client, sse) {
-		return true
-	}
-	return false
+	return runDockerFixScript(client, sse)
 }
 
 // sanitizeSSHError 过滤 SSH 错误信息中的敏感内容（IP/密码痕迹等）
