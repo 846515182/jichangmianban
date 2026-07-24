@@ -274,6 +274,17 @@ func (r *NodeRepo) CountEnabled() (int64, error) {
 	return n, err
 }
 
+// GetPortsByServerAddress 查询指定服务器 IP 下所有未删除节点的端口
+// 用于前端智能推荐端口、同机多节点端口冲突提示
+func (r *NodeRepo) GetPortsByServerAddress(serverAddress string) ([]int, error) {
+	var ports []int
+	err := r.db.Model(&model.Node{}).
+		Where("is_deleted = false AND server_address = ?", serverAddress).
+		Order("port ASC").
+		Pluck("port", &ports).Error
+	return ports, err
+}
+
 // AddTrafficTx 在指定事务内累加节点流量统计
 
 // TouchAllEnabled bumps updated_at on all enabled nodes to trigger config refresh on next heartbeat

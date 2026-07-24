@@ -486,192 +486,34 @@ func buildNodeInfoWithDecryptedKey(node *model.Node) (*nexuspb.NodeInfo, error) 
 	return info, nil
 }
 
-// buildXrayConfig 构造 VLESS+REALITY+XTLS-Vision 的 Xray 服务端配置 JSON
+// buildXrayConfig 构造 Xray 服务端配置 JSON。
+// 根据节点协议分发到对应的 XrayConfigBuilder，将用户凭证、动态限速、流量统计统一注入。
 func (s *NodeServiceServer) buildXrayConfig(node *model.Node, users []model.User) ([]byte, error) {
-	// [P1-NODE-02] 当前仅支持 VLESS+REALITY; 若节点协议不是 vless, 明确报错,
-	// 避免 agent 拿到错误配置后 Xray 启动失败。CreateNode/UpdateNode 已限制只允许创建 vless。
-	if strings.ToLower(node.Protocol) != "vless" {
-		return nil, fmt.Errorf("不支持的节点协议: %s, 当前仅支持 vless", node.Protocol)
-	}
 	// [P2-NODE-06-关联] 节点未绑定套餐时, 不下发空 clients 的 Xray 配置(会导致 Xray 启动失败),
 	// 直接返回明确错误, 让 agent 进入等待而不是启动一个不可用配置。
 	if len(users) == 0 {
 		return nil, fmt.Errorf("节点未绑定任何套餐或没有可用用户, 不下发 Xray 配置")
 	}
 
-	// 解析节点 server_config 取 REALITY 配置
-	var cfgMap map[string]interface{}
-	_ = json.Unmarshal(node.ServerConfig, &cfgMap)
-	if cfgMap == nil {
-		cfgMap = map[string]interface{}{}
+	builder, err := getXrayBuilder(node.Protocol)
+	if err != nil {
+		return nil, err
 	}
 
-	// REALITY 字段: dest / serverNames / privateKey / shortIds
-	// 注意: www.microsoft.com (AkamaiGHost) 的 TLS 响应与 REALITY 不兼容，
-	// 会导致 handshakeStatus: false。使用 gateway.icloud.com 作为默认 dest。
-	dest := "gateway.icloud.com:443"
-	serverNames := []string{"gateway.icloud.com"}
-	var privateKey string
-	var shortIDs []string
-
-	if reality, ok := cfgMap["reality"].(map[string]interface{}); ok {
-		if v, ok := reality["dest"].(string); ok && v != "" {
-			dest = v
-		}
-		if v, ok := reality["sni"].(string); ok && v != "" {
-			serverNames = []string{v}
-		}
-		if v, ok := reality["server_names"].([]interface{}); ok && len(v) > 0 {
-			names := make([]string, 0, len(v))
-			for _, n := range v {
-				if s, ok := n.(string); ok {
-					names = append(names, s)
-				}
-			}
-			if len(names) > 0 {
-				serverNames = names
-			}
-		}
-		// 优先使用已解密的明文私钥(正常不会出现)；若仍是加密字段则解密
-		if v, ok := reality["private_key"].(string); ok && v != "" {
-			privateKey = v
-		} else if enc, ok := reality["private_key_enc"].(string); ok && enc != "" {
-			aesMgr, err := security.NewAESManager(app.Get().Cfg.AESMasterKey)
-			if err != nil {
-				return nil, fmt.Errorf("初始化 AES 管理器失败: %w", err)
-			}
-			priv, err := aesMgr.DecryptString(enc)
-			if err != nil {
-				return nil, fmt.Errorf("解密 REALITY 私钥失败: %w", err)
-			}
-			privateKey = priv
-		}
-		if v, ok := reality["short_id"].(string); ok && v != "" {
-			shortIDs = []string{v}
-		}
-		if v, ok := reality["short_ids"].([]interface{}); ok && len(v) > 0 {
-			ids := make([]string, 0, len(v))
-			for _, id := range v {
-				if s, ok := id.(string); ok {
-					ids = append(ids, s)
-				}
-			}
-			if len(ids) > 0 {
-				shortIDs = ids
-			}
-		}
-	}
-
-	// clients: 每个用户一条，UUID=user.id，flow=xtls-rprx-vision
-	// [动态限速] 开关开启(usage_type=="limited")时, 限速值由 LoadScorer 按负载自动计算
-	// 保证每人能聊天+刷短视频, 看不了4K, 下载被限慢。无需手动设值, 也无需域名拦截。
-	clientLevel := 0
+	// [动态限速] 开关开启(usage_type=="limited")时, 从 Redis 读取 LoadScorer 计算的值。
 	dynLimit := 0
 	if s.loadScorer != nil && node.UsageType == "limited" {
 		dynLimit = s.loadScorer.GetDynamicLimitFromCache(context.Background(), node.ID)
 	}
-	applyLimit := dynLimit > 0
-	if applyLimit {
-		clientLevel = 1
-	}
-	clients := make([]map[string]interface{}, 0, len(users))
-	for _, u := range users {
-		if u.ID == "" {
-			continue
-		}
-		client := map[string]interface{}{
-			"id":    u.ID,
-			"flow":  "xtls-rprx-vision",
-			"level": clientLevel,
-		}
-		clients = append(clients, client)
+
+	// [静态限速兜底] 动态限速未开启或计算为 0 时, 若管理员设置了单用户静态限速,
+	// 则以静态限速作为生效限速, 保证策略始终落地到 Xray policy。
+	effectiveLimit := dynLimit
+	if effectiveLimit <= 0 && node.SpeedLimitMbps > 0 {
+		effectiveLimit = node.SpeedLimitMbps
 	}
 
-	xray := map[string]interface{}{
-		"log": map[string]interface{}{
-			"loglevel": "warning",
-			// P0-DeviceLimit: 启用 access log, 供 node agent 解析每个用户的源 IP 数实现连接级设备数限制
-			// (订阅层限制已生效, 这是连接层的补充: 阻止已导入订阅的设备被分享给更多人)
-			"access": "/app/xray-access.log",
-		},
-		"inbounds": []map[string]interface{}{
-			{
-				"listen": "0.0.0.0",
-				"port":   node.Port,
-				"protocol": "vless",
-				"settings": map[string]interface{}{
-					"clients":     clients,
-					"decryption":  "none",
-				},
-				"streamSettings": map[string]interface{}{
-					"network":  "tcp",
-					"security": "reality",
-					"realitySettings": map[string]interface{}{
-						"show":        false,
-						"dest":        dest,
-						"xver":        0,
-						"serverNames": serverNames,
-						"privateKey":  privateKey,
-						"shortIds":    shortIDs,
-					},
-				},
-				"sniffing": map[string]interface{}{
-					"enabled":      true,
-					"destOverride": []string{"http", "tls", "quic"},
-				},
-			},
-		},
-		"outbounds": []map[string]interface{}{
-			{"protocol": "freedom", "tag": "direct"},
-		},
-	}
-
-	// [动态限速] 开启时生成 Xray policy 配置
-	// 限速值由 LoadScorer 心跳时按负载自动算(8/5/3/1 Mbps), 写入 Redis 缓存
-	// 限速自然实现: 刷短视频(3-5Mbps)够, 4K(25Mbps+)看不了, 下载被限慢
-	//
-	// FIX traffic-stats: 必须在 policy.system 和每个 level 中都带
-	// statsUserUplink/statsUserDownlink, 否则 Xray 不收集用户级流量
-	// (agent 的 InjectStatsConfig 看到 levels 已存在就跳过注入, 导致统计失效)
-	if applyLimit {
-		// Mbps → bytes/s (Xray policy bufferSize 单位)
-		ratePerSec := int64(dynLimit) * 1000 * 1000 / 8
-		xray["policy"] = map[string]interface{}{
-			"levels": map[string]interface{}{
-				"0": map[string]interface{}{"bufferSize": 0, "statsUserUplink": true, "statsUserDownlink": true},
-				"1": map[string]interface{}{
-					"bufferSize":       ratePerSec,
-					"headerLimit":      ratePerSec,
-					"uplinkOnly":       0,
-					"downlinkOnly":     0,
-					"refreshSizeSec":   ratePerSec,
-					"statsUserUplink":   true,
-					"statsUserDownlink": true,
-				},
-			},
-			"system": map[string]interface{}{
-				"statsInboundUplink":   true,
-				"statsInboundDownlink": true,
-				"statsUserUplink":      true,
-				"statsUserDownlink":    true,
-			},
-		}
-	} else {
-		// 无限速时也要确保用户级流量统计开启
-		xray["policy"] = map[string]interface{}{
-			"levels": map[string]interface{}{
-				"0": map[string]interface{}{"statsUserUplink": true, "statsUserDownlink": true},
-			},
-			"system": map[string]interface{}{
-				"statsInboundUplink":   true,
-				"statsInboundDownlink": true,
-				"statsUserUplink":      true,
-				"statsUserDownlink":    true,
-			},
-		}
-	}
-
-	return json.Marshal(xray)
+	return builder.Build(node, users, effectiveLimit)
 }
 
 // protocolToProto 字符串协议名转 proto 枚举

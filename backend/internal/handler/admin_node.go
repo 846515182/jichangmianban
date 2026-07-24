@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +22,9 @@ import (
 	"nexus-panel/internal/response"
 	"nexus-panel/internal/service"
 )
+
+// validDomainRegex 校验基础域名格式（非最严格，但足够拦截明显错误输入）。
+var validDomainRegex = regexp.MustCompile(`^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$`)
 
 // AdminNodeHandler 管理端节点处理器
 type AdminNodeHandler struct {
@@ -110,6 +115,13 @@ func (h *AdminNodeHandler) NodeList(c *gin.Context) {
 			"server_config":  n.ServerConfig,
 			"version":        n.Version,
 			"last_seen_at":   n.LastSeenAt,
+			// [节点容量管理] 列表必须返回策略字段, 否则前端编辑回填会丢失配置
+			"max_clients":        n.MaxClients,
+			"max_bandwidth_mbps": n.MaxBandwidthMbps,
+			"cpu_threshold":      n.CpuThreshold,
+			"speed_limit_mbps":   n.SpeedLimitMbps,
+			"usage_type":         n.UsageType,
+			"load_status":        n.LoadStatus,
 		}
 
 		// 套餐绑定 ID 列表(前端编辑时回显) - 已批量预取
@@ -576,6 +588,96 @@ func (h *AdminNodeHandler) buildMonitorRuntime(hb map[string]string) gin.H {
 		rt["updated_at"] = v
 	}
 	return rt
+}
+
+// SuggestPort GET /api/v1/admin/nodes/suggest-port
+// 同机多节点场景：根据服务器 IP 返回已被占用的端口列表，并推荐下一个可用端口。
+// 推荐策略：优先从 443 开始；若 443 被占，尝试 8443；再之后按顺序找第一个 >=1024 的空闲端口。
+// 编辑节点时可通过 exclude_node_id 排除自身端口，避免误报冲突。
+func (h *AdminNodeHandler) SuggestPort(c *gin.Context) {
+	serverAddress := strings.TrimSpace(c.Query("server_address"))
+	if serverAddress == "" {
+		response.Fail(c, response.CodeParamError)
+		return
+	}
+	// [P1-同机多节点] 服务器地址合法性兜底：仅允许 IPv4/IPv6 或合法域名，
+	// 防止管理员输入带空格、端口或非法字符导致后续部署命令生成错误。
+	if !isValidServerAddress(serverAddress) {
+		response.FailMsg(c, response.CodeParamError, "服务器地址必须是合法 IP 或域名")
+		return
+	}
+
+	usedPorts, err := h.nodeRepo.GetPortsByServerAddress(serverAddress)
+	if err != nil {
+		response.Fail(c, response.CodeDBError)
+		return
+	}
+
+	// [P1-同机多节点] 编辑场景：排除当前节点自身端口，避免保存时误报冲突
+	excludeID := strings.TrimSpace(c.Query("exclude_node_id"))
+	excludePort := 0
+	if excludeID != "" {
+		if n, err := h.nodeRepo.GetByID(excludeID); err == nil &&
+			strings.TrimSpace(n.ServerAddress) == serverAddress {
+			excludePort = n.Port
+		}
+	}
+
+	usedSet := make(map[int]bool, len(usedPorts))
+	filtered := usedPorts[:0]
+	for _, p := range usedPorts {
+		if p == excludePort {
+			continue
+		}
+		if !usedSet[p] {
+			usedSet[p] = true
+			filtered = append(filtered, p)
+		}
+	}
+	usedPorts = filtered
+
+	suggest := 443
+	candidates := []int{443, 8443}
+	for _, p := range candidates {
+		if !usedSet[p] {
+			suggest = p
+			break
+		}
+	}
+	if usedSet[suggest] {
+		// 从 1024 开始递增找第一个空闲端口
+		for p := 1024; p <= 65535; p++ {
+			if !usedSet[p] {
+				suggest = p
+				break
+			}
+		}
+	}
+
+	// 去重并排序返回，方便前端展示
+	sort.Ints(usedPorts)
+	response.OK(c, gin.H{
+		"server_address": serverAddress,
+		"suggested_port": suggest,
+		"conflict":       usedSet[suggest],
+		"used_ports":     usedPorts,
+	})
+}
+
+// isValidServerAddress 校验服务器地址格式：IPv4 / IPv6 / 合法域名。
+func isValidServerAddress(addr string) bool {
+	if addr == "" {
+		return false
+	}
+	// 先尝试按 IP 解析
+	if ip := net.ParseIP(addr); ip != nil {
+		return true
+	}
+	// 再按域名校验：不允许端口、不允许空格、至少含一个点且符合基本域名规则
+	if strings.Contains(addr, ":") || strings.ContainsAny(addr, " /\\") {
+		return false
+	}
+	return len(addr) <= 253 && validDomainRegex.MatchString(addr)
 }
 
 // NodeUpdate [12] PUT /api/v1/admin/nodes/:id

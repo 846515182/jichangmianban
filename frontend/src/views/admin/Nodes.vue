@@ -253,16 +253,38 @@
         </el-form-item>
         <el-form-item label="协议" prop="protocol">
           <el-select v-model="form.protocol" style="width: 100%">
-            <!-- 当前后端 buildXrayConfig 仅支持 VLESS+REALITY，暂只开放该选项 -->
-            <el-option label="VLESS (推荐)" value="vless" />
+            <el-option label="VLESS (REALITY，推荐)" value="vless" />
+            <el-option label="VMess (TCP)" value="vmess" />
+            <el-option label="Shadowsocks" value="shadowsocks" />
+            <el-option label="Trojan (TLS，自动自签证书)" value="trojan" />
           </el-select>
-          <div class="form-tip">当前仅支持 VLESS+REALITY，其他协议后续版本开放。</div>
+          <div class="form-tip">
+            VLESS 走 REALITY 伪装，抗封锁最强；VMess/Shadowsocks 适合兼容旧客户端或内网场景；
+            Trojan 会自动生成自签名 TLS 证书，客户端需信任证书或开启 allowInsecure。
+          </div>
         </el-form-item>
         <el-form-item label="服务器IP" prop="server_address">
-          <el-input v-model="form.server_address" placeholder="节点服务器的公网IP" />
+          <el-input v-model="form.server_address" placeholder="节点服务器的公网IP 或域名" />
+          <div class="form-tip">支持 IPv4 / IPv6 / 域名。同一台服务器添加多节点时，端口会自动推荐为未被占用的端口。</div>
         </el-form-item>
         <el-form-item label="端口" prop="port">
-          <el-input-number v-model="form.port" :min="1" :max="65535" controls-position="right" style="width: 100%" />
+          <el-input-number
+            v-model="form.port"
+            :min="1"
+            :max="65535"
+            controls-position="right"
+            style="width: 100%"
+            @change="onPortChange"
+          />
+          <div class="form-tip" v-if="portConflict && usedPorts.length">
+            <span style="color:#f56c6c">
+              ⚠️ 该 IP 下端口 {{ form.port }} 已被节点占用（已用：{{ usedPorts.join('、') }}）
+            </span>
+            <el-button link type="primary" size="small" @click="applySuggestedPort">自动改为 {{ portSuggest }}</el-button>
+          </div>
+          <div class="form-tip" v-else-if="!portConflict && usedPorts.length">
+            该 IP 已用端口：{{ usedPorts.join('、') }}；当前端口可用
+          </div>
         </el-form-item>
         <el-form-item label="绑定套餐" prop="plan_ids">
           <el-select v-model="form.plan_ids" multiple filterable style="width: 100%" placeholder="至少选择一个套餐">
@@ -279,30 +301,45 @@
           <el-input-number v-model="form.trafficLimitGB" :min="0" :precision="2" controls-position="right" style="width: 100%" />
           <div style="font-size:12px;color:#909399">0 = 不限</div>
         </el-form-item>
-        <el-divider content-position="left">节点策略控制（可选）</el-divider>
+        <el-divider content-position="left">容量与限速策略（可选）</el-divider>
+        <div class="form-tip" style="margin-bottom:12px">
+          动态限速是「自动挡」——根据负载自动调；下面字段是「护栏」——定义上限与满载线。二者配合，而非重复。
+        </div>
         <el-form-item label="最大用户数">
           <el-input-number v-model="form.maxClients" :min="0" controls-position="right" style="width:100%" />
-          <div style="font-size:12px;color:#909399">0=不限。超过此数量新用户不会下发到此节点，已连接用户超额时自动踢出最后加入的用户</div>
+          <div style="font-size:12px;color:#909399">0=不限。连接数护栏；超过后新用户不再调度至此节点，超载时自动移除最后加入的用户</div>
         </el-form-item>
         <el-form-item label="带宽上限(Mbps)">
           <el-input-number v-model="form.maxBandwidthMbps" :min="0" controls-position="right" style="width:100%" />
-          <div style="font-size:12px;color:#909399">0=不限。节点总带宽上限，用于负载评分计算</div>
+          <div style="font-size:12px;color:#909399">0=不限。节点总带宽护栏；仅设此项不会限速单个用户，需配合动态限速或单用户限速</div>
         </el-form-item>
         <el-form-item label="CPU阈值(%)">
           <el-input-number v-model="form.cpuThreshold" :min="1" :max="100" controls-position="right" style="width:100%" />
-          <div style="font-size:12px;color:#909399">CPU超过此阈值视为满载，默认80</div>
+          <div style="font-size:12px;color:#909399">满载判定线，默认80%。CPU超过此值即视为满载，触发动态降级或拒绝新用户</div>
+        </el-form-item>
+        <el-form-item label="单用户限速(Mbps)">
+          <el-input-number v-model="form.speedLimitMbps" :min="0" controls-position="right" style="width:100%" />
+          <div style="font-size:12px;color:#909399">0=不限。管理员硬顶：无论负载多低，单个用户速率都不会超过此值；动态限速值也不会超过它</div>
         </el-form-item>
         <el-form-item label="动态限速">
           <el-switch v-model="form.dynamicLimit" active-text="开启" inactive-text="关闭" />
           <div style="font-size:12px;color:#909399">
-            开启后系统自动检测节点负载并动态调整单用户限速：<br/>
-            • 空闲：15 Mbps（1080P流畅，4K看不了）<br/>
-            • 正常：12 Mbps（1080P底线）<br/>
-            • 繁忙：12 Mbps（仍保1080P底线，不降）<br/>
+            开启后系统按负载自动调整单用户限速，是「自动挡」：<br/>
+            • 空闲：15 Mbps（1080P流畅）<br/>
+            • 正常/繁忙：12 Mbps（保1080P底线，不降）<br/>
             • 满载：5 Mbps（降级保720P+聊天）<br/>
-            底线保证每人能看1080P视频，只有CPU满载才降级
+            如同时设了「单用户限速」，动态值以该硬顶为上限。
           </div>
         </el-form-item>
+        <el-alert
+          v-if="showPolicyWarning"
+          type="warning"
+          :closable="false"
+          style="margin-bottom:12px"
+          show-icon
+        >
+          <template #title>当前只设置了带宽上限，未开启动态限速/单用户限速，单用户速率不会被限制。</template>
+        </el-alert>
         <el-divider content-position="left">一键自动部署（可选）</el-divider>
         <el-form-item label="SSH 密码">
           <el-input v-model="form.sshPassword" type="password" show-password placeholder="留空则不自动部署，后续可点「部署」按钮" autocomplete="new-password" name="ssh-deploy-pwd" />
@@ -453,7 +490,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted, h, defineComponent } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, h, defineComponent, watch } from 'vue'
 import { ElMessage, ElMessageBox, ElIcon, type FormInstance, type FormRules } from 'element-plus'
 import { Search, Plus, CopyDocument, ArrowDown } from '@element-plus/icons-vue'
 import WebTerminal from '@/components/WebTerminal.vue'
@@ -512,6 +549,7 @@ interface NodeRow {
   max_clients: number
   max_bandwidth_mbps: number
   cpu_threshold: number
+  speed_limit_mbps: number
   usage_type: string
   // 节点实时负载状态: idle/normal/busy/full
   load_status: string
@@ -771,16 +809,122 @@ const form = reactive({
   maxClients: 0,
   maxBandwidthMbps: 0,
   cpuThreshold: 80,
+  speedLimitMbps: 0,
   dynamicLimit: false,
   sshPassword: '',
   sshPort: 22,
 })
+// 简易 IP / 域名格式校验
+const isValidServerAddress = (val: string): boolean => {
+  if (!val) return false
+  // IPv4 / IPv6
+  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(val)) return true
+  if (/^\[[0-9a-fA-F:]+\]$/.test(val)) return true
+  // 域名
+  return /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/.test(val)
+}
+
 const rules: FormRules = {
   name: [{ required: true, message: '请输入节点名称', trigger: 'blur' }],
   protocol: [{ required: true, message: '请选择协议', trigger: 'change' }],
-  server_address: [{ required: true, message: '请输入服务器IP', trigger: 'blur' }],
+  server_address: [
+    { required: true, message: '请输入服务器IP或域名', trigger: 'blur' },
+    {
+      validator: (_rule: any, value: string, callback: (err?: Error) => void) => {
+        if (!value || isValidServerAddress(value)) {
+          callback()
+        } else {
+          callback(new Error('服务器地址必须是合法 IPv4 / IPv6 / 域名'))
+        }
+      },
+      trigger: 'blur',
+    },
+  ],
   port: [{ required: true, message: '请输入端口', trigger: 'blur' }],
   plan_ids: [{ required: true, type: 'array', min: 1, message: '请至少选择一个套餐', trigger: 'change' }],
+}
+
+// 当只设了总带宽上限、没开任何单用户限速时，提示管理员
+const showPolicyWarning = computed(() => {
+  return form.maxBandwidthMbps > 0 && form.speedLimitMbps === 0 && !form.dynamicLimit
+})
+
+// ---- 同机多节点端口智能推荐与冲突检测 ----
+const usedPorts = ref<number[]>([])
+const portSuggest = ref<number>(443)
+const portLoading = ref(false)
+let portSuggestTimer: ReturnType<typeof setTimeout> | null = null
+
+const portConflict = computed(() => {
+  if (!form.server_address || !form.port) return false
+  return usedPorts.value.includes(form.port)
+})
+
+// 根据服务器 IP 拉取已用端口与推荐端口
+// editNodeId: 编辑节点时传入, 排除自身端口避免误报冲突
+const fetchPortSuggest = async (ip: string, autoApply = false, editNodeId = '') => {
+  if (!ip || portLoading.value) return
+  portLoading.value = true
+  try {
+    const params: Record<string, string> = { server_address: ip }
+    if (editNodeId) params.exclude_node_id = editNodeId
+    const res = await request.get<ApiResponse<{
+      server_address: string
+      suggested_port: number
+      conflict: boolean
+      used_ports: number[]
+    }>>('/api/v1/admin/nodes/suggest-port', { params })
+    if (res && res.code === 0 && res.data) {
+      usedPorts.value = res.data.used_ports || []
+      portSuggest.value = res.data.suggested_port
+      // 新建/编辑节点时, 若当前端口冲突, 自动填入推荐端口(编辑时仅在用户未手动改端口时应用)
+      if (autoApply && (portConflict.value || (form.port === 443 && res.data.conflict))) {
+        form.port = res.data.suggested_port
+      }
+    }
+  } catch {
+    usedPorts.value = []
+  } finally {
+    portLoading.value = false
+  }
+}
+
+const debounceFetchPortSuggest = (ip: string, autoApply = false) => {
+  if (portSuggestTimer) clearTimeout(portSuggestTimer)
+  portSuggestTimer = setTimeout(() => fetchPortSuggest(ip, autoApply, editing.value?.id || ''), 300)
+}
+
+// 服务器 IP 变化时自动检测端口占用并推荐
+watch(() => form.server_address, (val) => {
+  if (val) {
+    debounceFetchPortSuggest(val, !editing.value)
+  } else {
+    usedPorts.value = []
+    portSuggest.value = 443
+  }
+})
+
+const onPortChange = () => {
+  if (form.server_address) {
+    debounceFetchPortSuggest(form.server_address, false)
+  }
+}
+
+// 端口冲突时阻止保存, 给出明确提示
+const validatePortConflict = (): boolean => {
+  if (portConflict.value) {
+    ElMessage.error(`端口 ${form.port} 已被该服务器其他节点占用, 请改为 ${portSuggest.value}`)
+    return false
+  }
+  return true
+}
+
+const applySuggestedPort = () => {
+  if (portSuggest.value > 0) {
+    form.port = portSuggest.value
+    // 应用后再刷新一次提示状态
+    onPortChange()
+  }
 }
 
 const openDialog = (row?: NodeRow) => {
@@ -799,6 +943,7 @@ const openDialog = (row?: NodeRow) => {
       maxClients: row.max_clients || 0,
       maxBandwidthMbps: row.max_bandwidth_mbps || 0,
       cpuThreshold: row.cpu_threshold || 80,
+      speedLimitMbps: row.speed_limit_mbps || 0,
       dynamicLimit: row.usage_type === "limited",
       // 安全: 编辑节点时清空密码, 避免上次添加节点时的密码缓存
       sshPassword: '',
@@ -817,10 +962,18 @@ const openDialog = (row?: NodeRow) => {
       maxClients: 0,
       maxBandwidthMbps: 0,
       cpuThreshold: 80,
+      speedLimitMbps: 0,
       dynamicLimit: false,
       sshPassword: '',
       sshPort: 22,
     })
+  }
+  // 打开弹窗时若已有服务器地址, 立即拉取端口推荐
+  if (form.server_address) {
+    fetchPortSuggest(form.server_address, !editing.value, editing.value?.id || '')
+  } else {
+    usedPorts.value = []
+    portSuggest.value = 443
   }
   dialogVisible.value = true
 }
@@ -829,6 +982,7 @@ const handleSave = async () => {
   if (!formRef.value) return
   await formRef.value.validate(async (valid) => {
     if (!valid) return
+    if (!validatePortConflict()) return
     saving.value = true
     try {
       const payload: any = {
@@ -845,6 +999,7 @@ const handleSave = async () => {
         max_clients: form.maxClients,
         max_bandwidth_mbps: form.maxBandwidthMbps,
         cpu_threshold: form.cpuThreshold,
+        speed_limit_mbps: form.speedLimitMbps,
         usage_type: form.dynamicLimit ? "limited" : "general",
       }
       if (editing.value) {

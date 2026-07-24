@@ -256,6 +256,10 @@ func parseNodeConfig(n *model.Node) *nodeConfig {
 	if c.SNI == "" && strings.ToLower(c.Protocol) == "vless" && c.Reality != nil {
 		c.SNI = "gateway.icloud.com"
 	}
+	// Trojan 自签证书以服务器地址为 CN，分享链接 SNI 回退到服务器地址
+	if c.SNI == "" && strings.ToLower(c.Protocol) == "trojan" {
+		c.SNI = c.ServerAddress
+	}
 	// VLESS+REALITY 默认使用 XTLS-Vision(flow=xtls-rprx-vision)，与服务端 buildXrayConfig 保持一致
 	if c.Flow == "" && strings.ToLower(c.Protocol) == "vless" && c.Reality != nil {
 		c.Flow = "xtls-rprx-vision"
@@ -271,6 +275,10 @@ func (s *SubscribeService) generateClashYAML(nodes []model.Node, userID string) 
 		// VLESS/VMess 用 user.ID 作为客户端 UUID（与服务端 xray clients.id 对齐）
 		if strings.ToLower(c.Protocol) == "vless" || strings.ToLower(c.Protocol) == "vmess" {
 			c.UUID = userID
+		}
+		// Trojan 用 user.ID 作为密码（与服务端 xray trojan clients.password 对齐）
+		if strings.ToLower(c.Protocol) == "trojan" {
+			c.Password = userID
 		}
 		p := buildClashProxy(n, c)
 		proxies = append(proxies, p)
@@ -359,6 +367,10 @@ func (s *SubscribeService) generateSingBoxJSON(nodes []model.Node, userID string
 		if strings.ToLower(c.Protocol) == "vless" || strings.ToLower(c.Protocol) == "vmess" {
 			c.UUID = userID
 		}
+		// Trojan 用 user.ID 作为密码（与服务端 xray trojan clients.password 对齐）
+		if strings.ToLower(c.Protocol) == "trojan" {
+			c.Password = userID
+		}
 		outbounds = append(outbounds, buildSingBoxOutbound(n, c))
 	}
 	// 构建选择器可选出站标签(direct + 所有节点)
@@ -432,6 +444,12 @@ func buildSingBoxOutbound(n model.Node, c *nodeConfig) map[string]interface{} {
 		o["security"] = orDefault(c.Method, "auto")
 	case "trojan":
 		o["password"] = c.Password
+		if c.SNI != "" {
+			o["tls"] = map[string]interface{}{
+				"enabled":     true,
+				"server_name": c.SNI,
+			}
+		}
 	case "shadowsocks", "ss":
 		o["method"] = c.Method
 		o["password"] = c.Password
@@ -447,6 +465,10 @@ func (s *SubscribeService) generateV2RayURIs(nodes []model.Node, userID string) 
 		// VLESS/VMess 用 user.ID 作为客户端 UUID（与服务端 xray clients.id 对齐）
 		if strings.ToLower(c.Protocol) == "vless" || strings.ToLower(c.Protocol) == "vmess" {
 			c.UUID = userID
+		}
+		// Trojan 用 user.ID 作为密码（与服务端 xray trojan clients.password 对齐）
+		if strings.ToLower(c.Protocol) == "trojan" {
+			c.Password = userID
 		}
 		uri := buildV2RayURI(n, c)
 		if uri != "" {

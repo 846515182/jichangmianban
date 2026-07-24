@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"regexp"
 	"strings"
 	"time"
 
@@ -55,6 +57,9 @@ func (s *NodeService) CreateNode(in *CreateNodeInput) (*model.Node, error) {
 	if in.Name == "" || in.Protocol == "" || in.ServerAddress == "" || in.Port == 0 {
 		return nil, errors.New("缺少必填字段")
 	}
+	if !isValidNodeServerAddress(in.ServerAddress) {
+		return nil, errors.New("服务器地址必须是合法 IP 或域名")
+	}
 	// 校验套餐绑定(必填，至少一个)
 	if len(in.PlanIDs) == 0 {
 		return nil, errors.New("请至少选择一个套餐绑定")
@@ -98,13 +103,17 @@ func (s *NodeService) CreateNode(in *CreateNodeInput) (*model.Node, error) {
 		return nil, fmt.Errorf("地址 %s:%d 已被其他节点占用, 同机多节点需用不同端口(如 443/8443)", in.ServerAddress, in.Port)
 	}
 
-	// [P1-NODE-02] 当前 buildXrayConfig 仅支持 VLESS+REALITY, 为防止创建其他协议节点后
-	// agent 拿到错误配置无法启动, 暂时只允许创建 vless。后续扩展多协议时再放开。
+	// [P1-NODE-02] 当前服务端已支持 VLESS+REALITY、VMess、Shadowsocks、Trojan 的 Xray 配置生成。
+	// Trojan 默认自动生成自签名 TLS 证书，管理员也可通过 extra_config.tls 传入自有证书。
 	supportedProtocols := map[string]bool{
-		"vless": true,
+		"vless":       true,
+		"vmess":       true,
+		"shadowsocks": true,
+		"ss":          true,
+		"trojan":      true,
 	}
 	if !supportedProtocols[strings.ToLower(in.Protocol)] {
-		return nil, fmt.Errorf("当前仅支持 vless 协议, %s 协议的配置生成尚未完成, 请先选择 vless", in.Protocol)
+		return nil, fmt.Errorf("当前不支持 %s 协议, 请选择 VLESS/VMess/Shadowsocks/Trojan", in.Protocol)
 	}
 
 	aesMgr, err := security.NewAESManager(app.Get().Cfg.AESMasterKey)
@@ -131,36 +140,60 @@ func (s *NodeService) CreateNode(in *CreateNodeInput) (*model.Node, error) {
 	}
 
 	// 4. 组装 server_config(JSONB)
-	// REALITY 默认 dest/sni = gateway.icloud.com(www.microsoft.com 的 AkamaiGHost
-	// TLS 实现与 REALITY 不兼容，会导致 handshakeStatus: false)
-	shortID, err := generateShortID()
-	if err != nil {
-		return nil, err
-	}
-	realityCfg := map[string]interface{}{
-		"public_key":      pubB64,
-		"private_key_enc": encPriv,
-		"short_id":        shortID,
-		"sni":             "gateway.icloud.com",
-		"dest":            "gateway.icloud.com:443",
-	}
+	// VLESS 默认使用 REALITY；VMess/Shadowsocks 不使用 REALITY。
 	cfgMap := map[string]interface{}{
 		"protocol":       in.Protocol,
 		"server_address": in.ServerAddress,
 		"port":           in.Port,
-		"reality":        realityCfg,
+	}
+	proto := strings.ToLower(in.Protocol)
+	if proto == "vless" {
+		shortID, err := generateShortID()
+		if err != nil {
+			return nil, err
+		}
+		cfgMap["reality"] = map[string]interface{}{
+			"public_key":      pubB64,
+			"private_key_enc": encPriv,
+			"short_id":        shortID,
+			"sni":             "gateway.icloud.com",
+			"dest":            "gateway.icloud.com:443",
+		}
 	}
 
-	// 5. 根据协议生成认证凭证(uuid/password)
-	switch strings.ToLower(in.Protocol) {
+	// 5. 根据协议生成认证凭证(uuid/password) 与协议专属配置
+	switch proto {
 	case "vless", "vmess":
 		cfgMap["uuid"] = uuid.NewString()
-	case "trojan", "shadowsocks", "ss":
+	case "shadowsocks", "ss":
 		password, err := generateRandomPassword()
 		if err != nil {
 			return nil, err
 		}
 		cfgMap["password"] = password
+		cfgMap["method"] = "chacha20-ietf-poly1305"
+	case "trojan":
+		// Trojan 必须依赖 TLS 证书；自动创建自签名证书并加密私钥。
+		// 管理员也可通过 extra_config.tls 覆盖为自有证书。
+		if _, ok := cfgMap["tls"]; !ok {
+			certDomain := in.ServerAddress
+			if net.ParseIP(certDomain) != nil {
+				// 自签证书对纯 IP 生成也能用，但部分客户端会报证书域名不匹配；
+				// 这里用 IP 作为 CN，并提示客户端需 trust/allowInsecure。
+			}
+			certPEM, keyPEM, err := security.GenerateSelfSignedCert(certDomain)
+			if err != nil {
+				return nil, fmt.Errorf("生成 Trojan TLS 证书失败: %w", err)
+			}
+			encKey, err := aesMgr.EncryptString(keyPEM)
+			if err != nil {
+				return nil, fmt.Errorf("加密 Trojan TLS 私钥失败: %w", err)
+			}
+			cfgMap["tls"] = map[string]interface{}{
+				"cert_pem": certPEM,
+				"key_enc":  encKey,
+			}
+		}
 	}
 
 	for k, v := range in.ExtraConfig {
@@ -170,6 +203,17 @@ func (s *NodeService) CreateNode(in *CreateNodeInput) (*model.Node, error) {
 				if curReality, ok := cfgMap["reality"].(map[string]interface{}); ok {
 					for rk, rv := range extraReality {
 						curReality[rk] = rv
+					}
+					continue
+				}
+			}
+		}
+		// tls 字段同样做深度合并，避免管理员传入的 cert_pem 覆盖自动生成的密钥对
+		if k == "tls" {
+			if extraTLS, ok := v.(map[string]interface{}); ok {
+				if curTLS, ok := cfgMap["tls"].(map[string]interface{}); ok {
+					for tk, tv := range extraTLS {
+						curTLS[tk] = tv
 					}
 					continue
 				}
@@ -259,6 +303,9 @@ func (s *NodeService) UpdateNode(id string, in *UpdateNodeInput) (*model.Node, e
 		node.CountryCode = *in.CountryCode
 	}
 	if in.ServerAddress != nil {
+		if !isValidNodeServerAddress(*in.ServerAddress) {
+			return nil, errors.New("服务器地址必须是合法 IP 或域名")
+		}
 		node.ServerAddress = *in.ServerAddress
 	}
 	if in.Port != nil {
@@ -609,3 +656,20 @@ func generateRandomPassword() (string, error) {
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
+
+// isValidNodeServerAddress 校验节点服务器地址：IPv4 / IPv6 / 合法域名。
+func isValidNodeServerAddress(addr string) bool {
+	if addr == "" {
+		return false
+	}
+	if ip := net.ParseIP(addr); ip != nil {
+		return true
+	}
+	if strings.Contains(addr, ":") || strings.ContainsAny(addr, " /\\") {
+		return false
+	}
+	return len(addr) <= 253 && validNodeDomainRegex.MatchString(addr)
+}
+
+// validNodeDomainRegex 基础域名格式校验。
+var validNodeDomainRegex = regexp.MustCompile(`^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$`)

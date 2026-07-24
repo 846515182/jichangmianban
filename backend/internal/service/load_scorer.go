@@ -218,6 +218,7 @@ var (
 //   - 繁忙(0.6~0.85):  12 Mbps  (1080P底线, 不降)
 //   - 满载(>=0.85):    5 Mbps   (降级保720P+聊天)
 //   - 若配了 MaxBandwidthMbps, 还要保证: 限速 <= 总带宽/连接数(均分)
+//   - 若配了 SpeedLimitMbps, 动态限速值不得超过该静态上限(管理员硬顶)
 //
 // CPU 毛刺去抖动: 仅当上一次心跳也是满载(StatusFull)时才真正降速到 5Mbps,
 // 单次毛刺(上一次非满载)保持上一次的限速值不变, 避免误触发限速降级 + 全节点配置重载。
@@ -268,6 +269,11 @@ func CalcDynamicSpeedLimit(node *model.Node, score LoadScore, snap *HeartbeatSna
 		if perUser < limit {
 			limit = perUser
 		}
+	}
+
+	// 若管理员设置了单用户静态限速, 动态限速不得超过该硬顶
+	if node.SpeedLimitMbps > 0 && limit > node.SpeedLimitMbps {
+		limit = node.SpeedLimitMbps
 	}
 
 	// 最低保底 1Mbps(避免限到 0 导致无法使用)

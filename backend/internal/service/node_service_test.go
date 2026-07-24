@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/glebarez/sqlite"
@@ -48,17 +49,53 @@ func TestCreateNode_UnsupportedProtocol(t *testing.T) {
 	svc := NewNodeService(repo.NewNodeRepo(app.Get().DB))
 
 	_, err := svc.CreateNode(&CreateNodeInput{
-		Name:          "trojan-node",
-		Protocol:      "trojan",
+		Name:          "http-node",
+		Protocol:      "http",
 		ServerAddress: "1.2.3.4",
 		Port:          443,
 		PlanIDs:       []string{"plan-1"},
 	})
 	if err == nil {
-		t.Fatal("创建 trojan 节点应该失败")
+		t.Fatal("创建 http 节点应该失败")
 	}
-	if !contains(err.Error(), "仅支持 vless") {
-		t.Fatalf("错误信息应提示仅支持 vless, 实际: %v", err)
+	if !contains(err.Error(), "VLESS/VMess/Shadowsocks/Trojan") {
+		t.Fatalf("错误信息应提示支持 VLESS/VMess/Shadowsocks/Trojan, 实际: %v", err)
+	}
+}
+
+func TestCreateNode_TrojanAutoCert(t *testing.T) {
+	db := setupNodeTestDB(t)
+	svc := NewNodeService(repo.NewNodeRepo(db))
+
+	plan := &model.Plan{Name: "p1", PriceCents: 100, DurationDays: 30, IsEnabled: true}
+	if err := db.Create(plan).Error; err != nil {
+		t.Fatalf("创建套餐失败: %v", err)
+	}
+
+	node, err := svc.CreateNode(&CreateNodeInput{
+		Name:          "trojan-auto-cert",
+		Protocol:      "trojan",
+		ServerAddress: "1.2.3.4",
+		Port:          443,
+		PlanIDs:       []string{plan.ID},
+	})
+	if err != nil {
+		t.Fatalf("创建 Trojan 节点失败: %v", err)
+	}
+
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(node.ServerConfig, &cfg); err != nil {
+		t.Fatalf("解析 server_config 失败: %v", err)
+	}
+	tlsCfg, ok := cfg["tls"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Trojan 节点应自动生成 tls 配置")
+	}
+	if tlsCfg["cert_pem"] == "" {
+		t.Fatal("Trojan TLS 证书不应为空")
+	}
+	if tlsCfg["key_enc"] == "" {
+		t.Fatal("Trojan TLS 私钥不应为空")
 	}
 }
 

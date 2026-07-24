@@ -245,6 +245,8 @@ func RegisterRoutes(r *gin.Engine, deps *Deps) {
 	admin.Use(middleware.AdminAuth())
 	{
 		admin.GET("/nodes", adminNodeH.NodeList)
+		// 同机多节点端口推荐与冲突检测
+		admin.GET("/nodes/suggest-port", adminNodeH.SuggestPort)
 		// P1-RBAC: NodeDetail 返回 node_token + REALITY 私钥, 需 PermKeyManage 权限
 		admin.GET("/nodes/:id", middleware.RBAC(middleware.PermKeyManage), adminNodeH.NodeDetail)
 		// 节点负载监控大盘: 返回所有节点实时负载评分 + 状态汇总, 供前端 Monitor.vue 使用
