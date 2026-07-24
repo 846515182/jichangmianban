@@ -75,4 +75,11 @@ onMounted(async () => {
   overflow-wrap: anywhere;   /* 防溢出 */
 }
 .announce-footer { display: flex; align-items: center; gap: 6px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--np-border); font-size: 12px; color: var(--np-text-muted); }
+
+@media (max-width: 768px) {
+  .announce-card { padding: 16px; }
+  .announce-header { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .announce-title { font-size: 15px; }
+  .announce-content { font-size: 13px; }
+}
 </style>

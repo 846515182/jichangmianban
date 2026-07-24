@@ -16,29 +16,31 @@
         </div>
       </div>
 
-      <el-table :data="filteredList" stripe v-loading="loading">
-        <el-table-column prop="id" label="日志号" width="80" />
-        <el-table-column label="目标" min-width="140">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.target_type === 'admin' ? 'warning' : 'info'" effect="plain">{{ row.target_type || '-' }}</el-tag>
-            <span v-if="row.target_id" class="target-id" :title="row.target_id">{{ row.target_id.slice(0, 8) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="ip" label="IP地址" min-width="140" />
-        <el-table-column prop="location" label="登录位置" min-width="120" />
-        <el-table-column prop="user_agent" label="User-Agent" min-width="240" show-overflow-tooltip />
-        <el-table-column label="状态" width="100">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.success ? 'success' : 'danger'" effect="dark">
-              <el-icon style="vertical-align: middle"><CircleCheck v-if="row.success" /><CircleClose v-else /></el-icon>
-              {{ row.success ? '成功' : '失败' }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="时间" width="180">
-          <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
-        </el-table-column>
-      </el-table>
+      <div class="table-wrap">
+        <el-table :data="filteredList" stripe v-loading="loading">
+          <el-table-column prop="id" label="日志号" width="80" />
+          <el-table-column label="目标" min-width="140">
+            <template #default="{ row }">
+              <el-tag size="small" :type="row.target_type === 'admin' ? 'warning' : 'info'" effect="plain">{{ row.target_type || '-' }}</el-tag>
+              <span v-if="row.target_id" class="target-id" :title="row.target_id">{{ row.target_id.slice(0, 8) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="ip" label="IP地址" min-width="140" />
+          <el-table-column prop="location" label="登录位置" min-width="120" />
+          <el-table-column prop="user_agent" label="User-Agent" min-width="240" show-overflow-tooltip />
+          <el-table-column label="状态" width="100">
+            <template #default="{ row }">
+              <el-tag size="small" :type="row.success ? 'success' : 'danger'" effect="dark">
+                <el-icon style="vertical-align: middle"><CircleCheck v-if="row.success" /><CircleClose v-else /></el-icon>
+                {{ row.success ? '成功' : '失败' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="时间" width="180">
+            <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
+          </el-table-column>
+        </el-table>
+      </div>
 
       <!-- 修复 P1: 旧版无分页组件, 后端默认 size=20, 第 21 条之后不可见 -->
       <div class="pagination-wrap">
@@ -148,4 +150,23 @@ onMounted(() => { fetchList() })
 .stat-mini-value.danger { color: var(--np-danger); }
 .target-id { margin-left: 6px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--np-text-muted); }
 .pagination-wrap { margin-top: 16px; display: flex; justify-content: flex-end; }
+
+@media (max-width: 768px) {
+  .page-card { padding: 14px; }
+  .page-header { flex-direction: column; align-items: stretch; }
+  .header-actions { flex-direction: column; align-items: stretch; width: 100%; }
+  .header-actions .el-select,
+  .header-actions .el-input {
+    width: 100% !important;
+    max-width: none !important;
+    margin-left: 0 !important;
+  }
+  .header-actions .el-select + .el-input,
+  .header-actions .el-input + .el-select {
+    margin-top: 8px;
+  }
+  .pagination-wrap { justify-content: center; }
+  .stat-mini { padding: 12px; }
+  .stat-mini-value { font-size: 22px; }
+}
 </style>

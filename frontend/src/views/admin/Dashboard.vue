@@ -86,31 +86,33 @@
             <span class="chart-title">节点运行状态</span>
             <el-button text @click="$router.push('/admin/nodes')">查看全部</el-button>
           </div>
-          <el-table :data="nodeList" stripe size="default" v-loading="nodeLoading">
-            <el-table-column prop="name" label="节点名称" min-width="140" />
-            <el-table-column prop="protocol" label="协议" width="120">
-              <template #default="{ row }">
-                <el-tag size="small" effect="dark">{{ (row.protocol || "").toUpperCase() }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="地址" min-width="180">
-              <template #default="{ row }">{{ row.server_address }}:{{ row.port }}</template>
-            </el-table-column>
-            <el-table-column label="状态" width="100">
-              <template #default="{ row }">
-                <span class="np-flex" style="gap:6px;align-items:center;">
-                  <i class="np-dot" :class="row.online ? 'online' : 'offline'"></i>
-                  {{ row.online ? '在线' : '离线' }}
-                </span>
-              </template>
-            </el-table-column>
-            <el-table-column label="流量" min-width="140">
-              <template #default="{ row }">{{ formatTraffic(row.traffic_used) }}</template>
-            </el-table-column>
-            <el-table-column label="最后在线" width="160">
-              <template #default="{ row }">{{ row.last_seen_at ? formatTime(row.last_seen_at) : "-" }}</template>
-            </el-table-column>
-          </el-table>
+          <div class="table-wrap">
+            <el-table :data="nodeList" stripe size="default" v-loading="nodeLoading">
+              <el-table-column prop="name" label="节点名称" min-width="140" />
+              <el-table-column prop="protocol" label="协议" width="120">
+                <template #default="{ row }">
+                  <el-tag size="small" effect="dark">{{ (row.protocol || "").toUpperCase() }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="地址" min-width="180">
+                <template #default="{ row }">{{ row.server_address }}:{{ row.port }}</template>
+              </el-table-column>
+              <el-table-column label="状态" width="100">
+                <template #default="{ row }">
+                  <span class="np-flex" style="gap:6px;align-items:center;">
+                    <i class="np-dot" :class="row.online ? 'online' : 'offline'"></i>
+                    {{ row.online ? '在线' : '离线' }}
+                  </span>
+                </template>
+              </el-table-column>
+              <el-table-column label="流量" min-width="140">
+                <template #default="{ row }">{{ formatTraffic(row.traffic_used) }}</template>
+              </el-table-column>
+              <el-table-column label="最后在线" width="160">
+                <template #default="{ row }">{{ row.last_seen_at ? formatTime(row.last_seen_at) : "-" }}</template>
+              </el-table-column>
+            </el-table>
+          </div>
           <el-empty v-if="!nodeLoading && nodeList.length === 0" description="暂无节点" :image-size="80" />
         </div>
       </el-col>
@@ -805,6 +807,52 @@ onBeforeUnmount(() => {
 .net-inline.down { color: var(--np-primary); }
 .net-sep { color: var(--np-text-muted); margin: 0 4px; }
 .sys-sub { font-size: 12px; color: var(--np-text-muted); margin-top: 4px; }
+
+/* 移动端适配 */
+@media (max-width: 768px) {
+  .stat-card { padding: 14px; gap: 12px; margin-bottom: 12px; }
+  .stat-icon { width: 44px; height: 44px; }
+  .stat-value { font-size: 18px; }
+  .chart-card { padding: 14px; }
+  .chart-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .chart { height: 220px; }
+  .sys-block { padding: 8px 0; }
+  .sys-value {
+    font-size: 13px;
+    word-break: break-all;
+    line-height: 1.4;
+  }
+  .sys-sub { word-break: break-all; }
+  .net-inline { display: inline-block; }
+
+  .log-toolbar {
+    gap: 8px;
+  }
+  .log-toolbar .el-button,
+  .log-toolbar .el-select,
+  .log-toolbar .el-radio-group,
+  .log-toolbar .el-input-number {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .log-toolbar-spacer { display: none; }
+  .log-stats-bar {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+  .log-view { height: 260px; padding: 10px; }
+  .aggregate-meta { gap: 6px; }
+  .aggregate-containers,
+  .aggregate-sources {
+    word-break: break-all;
+  }
+}
 
 /* 服务日志监控卡片 */
 .log-toolbar {

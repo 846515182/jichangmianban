@@ -50,8 +50,9 @@
         </div>
       </div>
 
-      <el-table :data="filteredList" stripe v-loading="loading">
-        <el-table-column prop="order_no" label="订单号" min-width="170" />
+      <div class="table-wrap">
+        <el-table :data="filteredList" stripe v-loading="loading">
+          <el-table-column prop="order_no" label="订单号" min-width="170" />
         <el-table-column label="用户" min-width="110">
           <template #default="{ row }">
             <span v-if="row.user_username">{{ row.user_username }}</span>
@@ -110,7 +111,8 @@
             >取消</el-button>
           </template>
         </el-table-column>
-      </el-table>
+        </el-table>
+      </div>
 
       <!-- 修复 P1: 加分页组件, 旧版无分页组件, 后端默认 size=20, 第 21 条之后永远看不到 -->
       <div class="pagination-wrap">
@@ -483,5 +485,46 @@ onMounted(() => {
   margin-top: 20px;
   display: flex;
   justify-content: flex-end;
+}
+
+@media (max-width: 768px) {
+  .page-card { padding: 12px; }
+  .page-header { flex-direction: column; align-items: stretch; }
+  .header-actions {
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
+  }
+  .header-actions .el-button {
+    width: 100%;
+    margin-left: 0 !important;
+  }
+  .filter-bar {
+    flex-direction: column;
+    align-items: stretch;
+    padding: 12px;
+    gap: 10px;
+  }
+  .filter-bar .el-select,
+  .filter-bar .el-input,
+  .filter-bar .el-date-editor,
+  .filter-bar .el-button {
+    width: 100% !important;
+    margin-left: 0 !important;
+  }
+  .filter-bar .el-button + .el-button {
+    margin-left: 0 !important;
+    margin-top: 0;
+  }
+  .stat-summary {
+    margin-left: 0;
+    width: 100%;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 12px;
+    padding-top: 8px;
+    border-top: 1px solid var(--np-border);
+  }
+  .stat-item { white-space: nowrap; }
 }
 </style>

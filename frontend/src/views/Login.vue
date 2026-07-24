@@ -93,7 +93,7 @@ const onSubmit = async () => {
   margin: 0 0 28px;
   font-size: 26px;
   font-weight: 700;
-  color: #1e293b;
+  color: var(--np-text, #f1f5f9);
 }
 
 :deep(.el-form-item__label) {

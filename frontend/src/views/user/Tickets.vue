@@ -246,4 +246,16 @@ const loadDetail = async (id: string) => {
 .message-meta { display: flex; gap: 8px; font-size: 12px; color: var(--np-text-muted); margin-bottom: 4px; }
 .message-item.admin .message-meta { justify-content: flex-end; }
 .message-content { background: var(--np-bg-soft); border: 1px solid var(--np-border); padding: 8px 12px; border-radius: 8px; font-size: 14px; color: var(--np-text); display: inline-block; text-align: left; }
+
+@media (max-width: 768px) {
+  .page-header { flex-direction: column; align-items: flex-start; gap: 12px; }
+  .page-header .el-button { width: 100%; }
+  .list-card { margin-bottom: 16px; }
+  .ticket-list { max-height: 300px; }
+  .detail-card { padding: 14px; min-height: auto; }
+  .detail-header { flex-direction: column; align-items: flex-start; gap: 10px; }
+  .message-list { max-height: 260px; }
+  .message-body { max-width: 85%; }
+  .reply-area .el-button { width: 100%; }
+}
 </style>

@@ -23,45 +23,47 @@
         </div>
       </div>
 
-      <el-table :data="filteredList" stripe v-loading="loading">
-        <el-table-column prop="order_no" label="订单号" min-width="200" />
-        <el-table-column prop="plan_name" label="套餐" min-width="120" />
-        <el-table-column label="金额" width="120">
-          <template #default="{ row }">
-            <span class="amount-text">¥ {{ (row.amount_cents / 100).toFixed(2) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="状态" width="100">
-          <template #default="{ row }">
-            <el-tag size="small" :type="statusTagType(row.status)" effect="dark">
-              {{ statusText(row.status) }}
-            </el-tag>
-            <div v-if="row.status === 'pending'" class="countdown">
-              {{ countdownText(row) }}
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="支付方式" width="110">
-          <template #default="{ row }">
-            <span v-if="row.payment_method">{{ payMethodText(row.payment_method) }}</span>
-            <span v-else class="text-muted">-</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="创建时间" min-width="160">
-          <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
-        </el-table-column>
-        <el-table-column label="操作" width="200" fixed="right">
-          <template #default="{ row }">
-            <el-button v-if="row.status === 'pending'" size="small" link type="primary" @click="goPay(row)">
-              去支付
-            </el-button>
-            <el-button v-if="row.status === 'pending'" size="small" link type="warning" @click="cancelOrder(row)">
-              取消
-            </el-button>
-            <el-button size="small" link @click="viewDetail(row)">详情</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
+      <div class="table-wrap">
+        <el-table :data="filteredList" stripe v-loading="loading">
+          <el-table-column prop="order_no" label="订单号" min-width="200" />
+          <el-table-column prop="plan_name" label="套餐" min-width="120" />
+          <el-table-column label="金额" width="120">
+            <template #default="{ row }">
+              <span class="amount-text">¥ {{ (row.amount_cents / 100).toFixed(2) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="100">
+            <template #default="{ row }">
+              <el-tag size="small" :type="statusTagType(row.status)" effect="dark">
+                {{ statusText(row.status) }}
+              </el-tag>
+              <div v-if="row.status === 'pending'" class="countdown">
+                {{ countdownText(row) }}
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="支付方式" width="110">
+            <template #default="{ row }">
+              <span v-if="row.payment_method">{{ payMethodText(row.payment_method) }}</span>
+              <span v-else class="text-muted">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="创建时间" min-width="160">
+            <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="200" fixed="right">
+            <template #default="{ row }">
+              <el-button v-if="row.status === 'pending'" size="small" link type="primary" @click="goPay(row)">
+                去支付
+              </el-button>
+              <el-button v-if="row.status === 'pending'" size="small" link type="warning" @click="cancelOrder(row)">
+                取消
+              </el-button>
+              <el-button size="small" link @click="viewDetail(row)">详情</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
 
       <el-empty v-if="!loading && !filteredList.length" description="暂无订单记录" />
     </div>
@@ -270,4 +272,19 @@ onBeforeUnmount(() => {
 }
 .text-muted { color: var(--np-text-muted); }
 .amount-final { color: var(--np-primary); font-weight: 700; font-size: 16px; }
+
+@media (max-width: 768px) {
+  .page-card { padding: 14px; }
+  .page-header { flex-direction: column; align-items: stretch; }
+  .header-actions { flex-direction: column; align-items: stretch; width: 100%; }
+  .header-actions .el-select,
+  .header-actions .el-button {
+    width: 100% !important;
+    margin-left: 0 !important;
+  }
+  .header-actions .el-button + .el-button {
+    margin-left: 0 !important;
+    margin-top: 8px;
+  }
+}
 </style>

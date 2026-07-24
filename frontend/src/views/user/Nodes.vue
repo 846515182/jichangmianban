@@ -147,4 +147,13 @@ onBeforeUnmount(() => {
 .load-value { font-size: 12px; color: var(--np-text); font-weight: 600; font-family: monospace; }
 .load-value.up { color: #ffbe0b; }
 .load-value.down { color: var(--np-primary); }
+
+@media (max-width: 768px) {
+  .page-header { flex-direction: column; align-items: flex-start; gap: 12px; }
+  .node-card { padding: 14px; }
+  .node-top { flex-wrap: wrap; gap: 8px; }
+  .node-name { font-size: 14px; }
+  .node-meta { gap: 8px; }
+  .meta-item { flex: 1; }
+}
 </style>

@@ -122,4 +122,9 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .page-header { margin-bottom: 20px; }
 .page-title { margin: 0; font-size: 20px; color: var(--np-text); }
 .form-card { padding: 24px; }
+
+@media (max-width: 768px) {
+  .user-page { padding: 14px; }
+  .form-card { padding: 16px; }
+}
 </style>

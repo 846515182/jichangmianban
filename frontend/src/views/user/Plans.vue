@@ -733,4 +733,23 @@ onBeforeUnmount(() => {
   gap: 10px;
   margin-top: 8px;
 }
+
+@media (max-width: 768px) {
+  .plans-grid { grid-template-columns: 1fr; gap: 14px; }
+  .plan-card { padding: 18px; }
+  .price-value { font-size: 28px; }
+  .pay-methods { width: 100%; }
+  .pay-method-item { flex: 1 1 calc(50% - 5px); min-width: 0; }
+  .coupon-row { flex-direction: column; }
+  .coupon-row .el-input,
+  .coupon-row .el-button {
+    width: 100% !important;
+    margin-left: 0 !important;
+  }
+  .qr-actions { flex-direction: column; }
+  .qr-actions .el-button {
+    width: 100%;
+    margin-left: 0 !important;
+  }
+}
 </style>

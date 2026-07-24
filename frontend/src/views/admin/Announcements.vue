@@ -9,29 +9,31 @@
         <el-button type="primary" @click="openDialog()"><el-icon><Plus /></el-icon>发布公告</el-button>
       </div>
 
-      <el-table :data="list" stripe v-loading="loading">
-        <el-table-column prop="title" label="标题" min-width="200">
-          <template #default="{ row }">
-            <span>{{ row.title }}</span>
-            <el-tag v-if="row.pinned" size="small" type="warning" effect="dark" style="margin-left: 8px">置顶</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="内容预览" min-width="280">
-          <template #default="{ row }">
-            <span class="content-preview">{{ stripHtml(row.content).slice(0, 60) }}...</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="发布时间" width="170">
-          <template #default="{ row }">{{ formatTime(row.published_at) }}</template>
-        </el-table-column>
-        <el-table-column label="操作" width="180" fixed="right">
-          <template #default="{ row }">
-            <el-button size="small" link :loading="actionLoadingId === row.id" @click="togglePin(row)">{{ row.pinned ? '取消置顶' : '置顶' }}</el-button>
-            <el-button size="small" link type="primary" @click="openDialog(row)">编辑</el-button>
-            <el-button size="small" link type="danger" :loading="actionLoadingId === row.id" @click="handleDelete(row)">删除</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
+      <div class="table-wrap">
+        <el-table :data="list" stripe v-loading="loading">
+          <el-table-column prop="title" label="标题" min-width="200">
+            <template #default="{ row }">
+              <span>{{ row.title }}</span>
+              <el-tag v-if="row.pinned" size="small" type="warning" effect="dark" style="margin-left: 8px">置顶</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="内容预览" min-width="280">
+            <template #default="{ row }">
+              <span class="content-preview">{{ stripHtml(row.content).slice(0, 60) }}...</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="发布时间" width="170">
+            <template #default="{ row }">{{ formatTime(row.published_at) }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="180" fixed="right">
+            <template #default="{ row }">
+              <el-button size="small" link :loading="actionLoadingId === row.id" @click="togglePin(row)">{{ row.pinned ? '取消置顶' : '置顶' }}</el-button>
+              <el-button size="small" link type="primary" @click="openDialog(row)">编辑</el-button>
+              <el-button size="small" link type="danger" :loading="actionLoadingId === row.id" @click="handleDelete(row)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
 
       <!-- 修复 P1: 加分页组件 -->
       <div class="pagination-wrap">
@@ -216,5 +218,14 @@ onMounted(() => {
   margin-top: 20px;
   display: flex;
   justify-content: flex-end;
+}
+
+@media (max-width: 768px) {
+  .page-card { padding: 14px; }
+  .page-header { flex-direction: column; align-items: stretch; gap: 12px; }
+  .page-header .el-button {
+    width: 100%;
+  }
+  .pagination-wrap { justify-content: center; }
 }
 </style>

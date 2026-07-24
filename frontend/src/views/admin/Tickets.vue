@@ -15,34 +15,36 @@
         </div>
       </div>
 
-      <el-table :data="list" stripe v-loading="loading">
-        <el-table-column prop="id" label="工单号" width="90" />
-        <el-table-column prop="subject" label="主题" min-width="200" />
-        <el-table-column prop="username" label="提交用户" width="120" />
-        <el-table-column label="优先级" width="100">
-          <template #default="{ row }">
-            <el-tag size="small" :type="priorityType(row.priority)" effect="dark">
-              {{ priorityText(row.priority) }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="状态" width="100">
-          <template #default="{ row }">
-            <el-tag size="small" :type="statusType(row.status)" effect="plain">
-              {{ statusText(row.status) }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="更新时间" width="170">
-          <template #default="{ row }">{{ formatTime(row.updated_at) }}</template>
-        </el-table-column>
-        <el-table-column label="操作" width="150" fixed="right">
-          <template #default="{ row }">
-            <el-button size="small" link type="primary" @click="openDetail(row)">查看</el-button>
-            <el-button v-if="row.status !== 'closed'" size="small" link @click="closeTicket(row)">关闭</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
+      <div class="table-wrap">
+        <el-table :data="list" stripe v-loading="loading">
+          <el-table-column prop="id" label="工单号" width="90" />
+          <el-table-column prop="subject" label="主题" min-width="200" />
+          <el-table-column prop="username" label="提交用户" width="120" />
+          <el-table-column label="优先级" width="100">
+            <template #default="{ row }">
+              <el-tag size="small" :type="priorityType(row.priority)" effect="dark">
+                {{ priorityText(row.priority) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="100">
+            <template #default="{ row }">
+              <el-tag size="small" :type="statusType(row.status)" effect="plain">
+                {{ statusText(row.status) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="更新时间" width="170">
+            <template #default="{ row }">{{ formatTime(row.updated_at) }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="150" fixed="right">
+            <template #default="{ row }">
+              <el-button size="small" link type="primary" @click="openDetail(row)">查看</el-button>
+              <el-button v-if="row.status !== 'closed'" size="small" link @click="closeTicket(row)">关闭</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
 
       <!-- 后端分页: 传 page/size/status 给接口, 切换筛选/翻页都重新请求 -->
       <div class="pagination-wrap">
@@ -239,4 +241,13 @@ onMounted(() => {
 .message-meta { display: flex; gap: 8px; font-size: 12px; color: var(--np-text-muted); margin-bottom: 4px; }
 .message-item.admin .message-meta { justify-content: flex-end; }
 .message-content { background: var(--np-card); border: 1px solid var(--np-border); padding: 8px 12px; border-radius: 8px; font-size: 14px; color: var(--np-text); display: inline-block; text-align: left; }
+
+@media (max-width: 768px) {
+  .page-card { padding: 14px; }
+  .page-header { flex-direction: column; align-items: stretch; }
+  .header-actions { flex-direction: column; align-items: stretch; width: 100%; }
+  .header-actions .el-select { width: 100% !important; }
+  .pagination-wrap { justify-content: center; }
+  .detail-meta { flex-direction: column; align-items: flex-start; gap: 6px; }
+}
 </style>

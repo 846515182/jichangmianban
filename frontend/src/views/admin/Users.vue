@@ -12,60 +12,62 @@
         </div>
       </div>
 
-      <el-table :data="filteredList" stripe v-loading="loading">
-        <el-table-column prop="username" label="用户名" min-width="100" />
-        <el-table-column prop="email" label="邮箱" min-width="160" show-overflow-tooltip />
-        <el-table-column label="套餐" min-width="120">
-          <template #default="{ row }">{{ row.plan_id ? planName(row.plan_id) : "未选择" }}</template>
-        </el-table-column>
+      <div class="table-wrap">
+        <el-table :data="filteredList" stripe v-loading="loading">
+          <el-table-column prop="username" label="用户名" min-width="100" />
+          <el-table-column prop="email" label="邮箱" min-width="160" show-overflow-tooltip />
+          <el-table-column label="套餐" min-width="120">
+            <template #default="{ row }">{{ row.plan_id ? planName(row.plan_id) : "未选择" }}</template>
+          </el-table-column>
 
-        <el-table-column label="流量用量" min-width="200">
-          <template #default="{ row }">
-            <div class="traffic-cell">
-              <el-progress :percentage="trafficPercent(row)" :stroke-width="8" :color="trafficColor(row)" :show-text="false" />
-              <span class="traffic-text">
-                {{ formatTraffic(row.traffic_used) }}
-                <template v-if="row.traffic_limit">/ {{ formatTraffic(row.traffic_limit) }}</template>
-                <template v-else>/ 不限</template>
-              </span>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="到期时间" min-width="160">
-          <template #default="{ row }">
-            <span :class="{ expired: isExpired(row) }">{{ row.expired_at ? formatTime(row.expired_at) : "不限期" }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="状态" width="90">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.status === 'active' ? 'success' : 'danger'" effect="plain">
-              {{ row.status === 'active' ? '启用' : '禁用' }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="订阅链接" min-width="220">
-          <template #default="{ row }">
-            <el-input v-if="row.subscribe_url" :model-value="row.subscribe_url" readonly size="small" style="width:100%">
-              <template #append>
-                <el-button size="small" @click="copySubUrl(row.subscribe_url)"><el-icon><CopyDocument /></el-icon></el-button>
-              </template>
-            </el-input>
-            <span v-else style="color:#909399;font-size:12px">无订阅</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="420" fixed="right">
-          <template #default="{ row }">
-            <el-button size="small" link type="primary" @click="openDialog(row)">编辑</el-button>
-            <el-button size="small" link type="success" @click="openActivateDialog(row)">开通套餐</el-button>
-            <el-button size="small" link @click="resetTraffic(row)">重置流量</el-button>
-            <el-button size="small" link :type="row.status === 'active' ? 'warning' : 'success'" @click="toggleStatus(row)">
-              {{ row.status === 'active' ? '禁用' : '启用' }}
-            </el-button>
-            <el-button size="small" link type="danger" @click="handleDelete(row)">删除</el-button>
-            <el-button size="small" link type="danger" @click="handleHardDelete(row)">彻底删除</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
+          <el-table-column label="流量用量" min-width="200">
+            <template #default="{ row }">
+              <div class="traffic-cell">
+                <el-progress :percentage="trafficPercent(row)" :stroke-width="8" :color="trafficColor(row)" :show-text="false" />
+                <span class="traffic-text">
+                  {{ formatTraffic(row.traffic_used) }}
+                  <template v-if="row.traffic_limit">/ {{ formatTraffic(row.traffic_limit) }}</template>
+                  <template v-else>/ 不限</template>
+                </span>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="到期时间" min-width="160">
+            <template #default="{ row }">
+              <span :class="{ expired: isExpired(row) }">{{ row.expired_at ? formatTime(row.expired_at) : "不限期" }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="90">
+            <template #default="{ row }">
+              <el-tag size="small" :type="row.status === 'active' ? 'success' : 'danger'" effect="plain">
+                {{ row.status === 'active' ? '启用' : '禁用' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="订阅链接" min-width="220">
+            <template #default="{ row }">
+              <el-input v-if="row.subscribe_url" :model-value="row.subscribe_url" readonly size="small" style="width:100%">
+                <template #append>
+                  <el-button size="small" @click="copySubUrl(row.subscribe_url)"><el-icon><CopyDocument /></el-icon></el-button>
+                </template>
+              </el-input>
+              <span v-else style="color:#909399;font-size:12px">无订阅</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="420" fixed="right">
+            <template #default="{ row }">
+              <el-button size="small" link type="primary" @click="openDialog(row)">编辑</el-button>
+              <el-button size="small" link type="success" @click="openActivateDialog(row)">开通套餐</el-button>
+              <el-button size="small" link @click="resetTraffic(row)">重置流量</el-button>
+              <el-button size="small" link :type="row.status === 'active' ? 'warning' : 'success'" @click="toggleStatus(row)">
+                {{ row.status === 'active' ? '禁用' : '启用' }}
+              </el-button>
+              <el-button size="small" link type="danger" @click="handleDelete(row)">删除</el-button>
+              <el-button size="small" link type="danger" @click="handleHardDelete(row)">彻底删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
 
       <div class="pagination-wrap">
         <el-pagination
@@ -361,4 +363,20 @@ onMounted(async () => { await fetchPlans(); await fetchList() })
 .expired { color: var(--np-danger); }
 .form-tip { font-size: 12px; color: var(--np-text-muted); }
 .pagination-wrap { margin-top: 16px; display: flex; justify-content: flex-end; }
+
+@media (max-width: 768px) {
+  .page-card { padding: 14px; }
+  .page-header { flex-direction: column; align-items: stretch; }
+  .header-actions { flex-direction: column; align-items: stretch; width: 100%; }
+  .header-actions .el-input,
+  .header-actions .el-button {
+    width: 100% !important;
+    margin-left: 0 !important;
+  }
+  .header-actions .el-button + .el-button {
+    margin-left: 0 !important;
+    margin-top: 8px;
+  }
+  .pagination-wrap { justify-content: center; }
+}
 </style>

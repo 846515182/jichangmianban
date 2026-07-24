@@ -10,60 +10,62 @@
       </div>
     </div>
 
-    <el-table :data="list" v-loading="loading" stripe style="width:100%">
-      <el-table-column prop="username" label="用户名" min-width="120" />
-      <el-table-column prop="email" label="邮箱" min-width="180" show-overflow-tooltip />
-      <el-table-column prop="sub_type" label="类型" width="90">
-        <template #default="{ row }">
-          <el-tag size="small">{{ row.sub_type || 'clash' }}</el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column prop="status" label="用户状态" width="90">
-        <template #default="{ row }">
-          <el-tag size="small" :type="row.status === 'active' ? 'success' : 'danger'">
-            {{ row.status === 'active' ? '正常' : '禁用' }}
-          </el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column label="到期时间" width="160">
-        <template #default="{ row }">
-          <span v-if="row.user_expired_at">{{ formatTime(row.user_expired_at) }}</span>
-          <span v-else style="color:#909399">不限</span>
-        </template>
-      </el-table-column>
-      <el-table-column prop="created_at" label="订阅时间" width="160">
-        <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
-      </el-table-column>
-      <el-table-column label="订阅链接" min-width="280">
-        <template #default="{ row }">
-          <div class="sub-url-cell">
-            <el-input :model-value="row.subscribe_url" readonly size="small" style="flex:1">
-              <template #append>
-                <el-button size="small" @click="copyText(row.subscribe_url)">
-                  <el-icon><CopyDocument /></el-icon>
-                </el-button>
+    <div class="table-wrap">
+      <el-table :data="list" v-loading="loading" stripe style="width:100%">
+        <el-table-column prop="username" label="用户名" min-width="120" />
+        <el-table-column prop="email" label="邮箱" min-width="180" show-overflow-tooltip />
+        <el-table-column prop="sub_type" label="类型" width="90">
+          <template #default="{ row }">
+            <el-tag size="small">{{ row.sub_type || 'clash' }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="status" label="用户状态" width="90">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.status === 'active' ? 'success' : 'danger'">
+              {{ row.status === 'active' ? '正常' : '禁用' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="到期时间" width="160">
+          <template #default="{ row }">
+            <span v-if="row.user_expired_at">{{ formatTime(row.user_expired_at) }}</span>
+            <span v-else style="color:#909399">不限</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="created_at" label="订阅时间" width="160">
+          <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
+        </el-table-column>
+        <el-table-column label="订阅链接" min-width="280">
+          <template #default="{ row }">
+            <div class="sub-url-cell">
+              <el-input :model-value="row.subscribe_url" readonly size="small" style="flex:1">
+                <template #append>
+                  <el-button size="small" @click="copyText(row.subscribe_url)">
+                    <el-icon><CopyDocument /></el-icon>
+                  </el-button>
+                </template>
+              </el-input>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="120" fixed="right">
+          <template #default="{ row }">
+            <el-dropdown @command="(cmd: string) => openClient(cmd, row.subscribe_url)">
+              <el-button size="small" link type="primary">
+                导入客户端<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="clash">Clash</el-dropdown-item>
+                  <el-dropdown-item command="singbox">SingBox</el-dropdown-item>
+                  <el-dropdown-item command="v2ray">V2Ray</el-dropdown-item>
+                </el-dropdown-menu>
               </template>
-            </el-input>
-          </div>
-        </template>
-      </el-table-column>
-      <el-table-column label="操作" width="120" fixed="right">
-        <template #default="{ row }">
-          <el-dropdown @command="(cmd: string) => openClient(cmd, row.subscribe_url)">
-            <el-button size="small" link type="primary">
-              导入客户端<el-icon class="el-icon--right"><ArrowDown /></el-icon>
-            </el-button>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item command="clash">Clash</el-dropdown-item>
-                <el-dropdown-item command="singbox">SingBox</el-dropdown-item>
-                <el-dropdown-item command="v2ray">V2Ray</el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
-        </template>
-      </el-table-column>
-    </el-table>
+            </el-dropdown>
+          </template>
+        </el-table-column>
+      </el-table>
+    </div>
 
     <div class="pagination">
       <el-pagination
@@ -160,13 +162,31 @@ onMounted(() => {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 20px;
+  flex-wrap: wrap;
+  gap: 12px;
 }
 .page-header h2 { margin: 0; font-size: 18px; }
-.header-actions { display: flex; gap: 10px; }
+.header-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .sub-url-cell { display: flex; align-items: center; }
 .pagination {
   margin-top: 20px;
   display: flex;
   justify-content: flex-end;
+}
+
+@media (max-width: 768px) {
+  .admin-page { padding: 14px; }
+  .page-header { flex-direction: column; align-items: stretch; }
+  .header-actions { flex-direction: column; align-items: stretch; width: 100%; }
+  .header-actions .el-input,
+  .header-actions .el-button {
+    width: 100% !important;
+    margin-left: 0 !important;
+  }
+  .header-actions .el-button + .el-button {
+    margin-left: 0 !important;
+    margin-top: 8px;
+  }
+  .pagination { justify-content: center; }
 }
 </style>

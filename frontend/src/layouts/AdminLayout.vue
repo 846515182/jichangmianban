@@ -337,10 +337,14 @@ const handleCommand = async (command: string) => {
     left: 0;
     top: 0;
     bottom: 0;
+    width: 220px !important;
     z-index: 1001;
     transform: translateX(-100%);
     transition: transform 0.3s ease;
     box-shadow: 2px 0 20px rgba(0,0,0,0.3);
+  }
+  .np-sidebar.collapsed {
+    width: 220px !important;
   }
   .np-sidebar.show {
     transform: translateX(0);
@@ -353,10 +357,26 @@ const handleCommand = async (command: string) => {
     z-index: 1000;
   }
   .np-topbar {
-    padding: 0 16px;
+    padding: 0 12px;
+    height: 56px;
+  }
+  .np-topbar-left {
+    gap: 10px;
+    min-width: 0;
+  }
+  .np-page-title {
+    font-size: 15px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 160px;
+  }
+  .np-username {
+    display: none;
   }
   .np-content {
-    padding: 16px;
+    padding: 12px;
+    min-width: 0;
   }
 }
 </style>

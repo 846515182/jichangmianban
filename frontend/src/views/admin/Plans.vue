@@ -12,8 +12,9 @@
         </div>
       </div>
 
-      <el-table :data="filteredList" stripe v-loading="loading">
-        <el-table-column prop="name" label="名称" min-width="140" />
+      <div class="table-wrap">
+        <el-table :data="filteredList" stripe v-loading="loading">
+          <el-table-column prop="name" label="名称" min-width="140" />
         <el-table-column label="流量" min-width="120">
           <template #default="{ row }">{{ row.traffic_limit ? formatTraffic(row.traffic_limit) : '不限' }}</template>
         </el-table-column>
@@ -47,7 +48,8 @@
             <el-button size="small" link type="danger" @click="handleDelete(row)">删除</el-button>
           </template>
         </el-table-column>
-      </el-table>
+        </el-table>
+      </div>
 
       <div class="pagination-wrap">
         <el-pagination
@@ -305,4 +307,25 @@ onMounted(() => { fetchList() })
 .dynamic-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
 .dynamic-row .el-input { flex: 1; }
 .pagination-wrap { margin-top: 16px; display: flex; justify-content: flex-end; }
+
+@media (max-width: 768px) {
+  .page-card { padding: 12px; }
+  .page-header { flex-direction: column; align-items: stretch; }
+  .header-actions {
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
+  }
+  .header-actions .el-input,
+  .header-actions .el-button {
+    width: 100% !important;
+    margin-left: 0 !important;
+  }
+  .header-actions .el-button + .el-button {
+    margin-left: 0 !important;
+    margin-top: 0;
+  }
+  .dynamic-row { flex-wrap: wrap; }
+  .dynamic-row .el-button { width: auto !important; }
+}
 </style>

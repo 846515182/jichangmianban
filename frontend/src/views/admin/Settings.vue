@@ -85,21 +85,23 @@
               <el-button><el-icon><Upload /></el-icon>恢复备份</el-button>
             </el-upload>
           </div>
-          <el-table :data="backups" stripe style="margin-top: 16px" v-loading="loadingBackups">
-            <el-table-column prop="name" label="备份名称" min-width="220" />
-            <el-table-column label="大小" width="120">
-              <template #default="{ row }">{{ row.size_human || row.size }}</template>
-            </el-table-column>
-            <el-table-column label="创建时间" width="180">
-              <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
-            </el-table-column>
-            <el-table-column label="操作" width="180">
-              <template #default="{ row }">
-                <el-button size="small" link type="primary" @click="downloadBackup(row)">下载</el-button>
-                <el-button size="small" link type="danger" @click="deleteBackup(row)">删除</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
+          <div class="table-wrap">
+            <el-table :data="backups" stripe style="margin-top: 16px" v-loading="loadingBackups">
+              <el-table-column prop="name" label="备份名称" min-width="220" />
+              <el-table-column label="大小" width="120">
+                <template #default="{ row }">{{ row.size_human || row.size }}</template>
+              </el-table-column>
+              <el-table-column label="创建时间" width="180">
+                <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
+              </el-table-column>
+              <el-table-column label="操作" width="180">
+                <template #default="{ row }">
+                  <el-button size="small" link type="primary" @click="downloadBackup(row)">下载</el-button>
+                  <el-button size="small" link type="danger" @click="deleteBackup(row)">删除</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
           <el-empty v-if="!loadingBackups && !backups.length" description="暂无备份文件" />
         </div>
       </el-col>
@@ -972,8 +974,30 @@ onUnmounted(() => {
 
 /* 移动端适配 - 对齐项目惯例(AdminLayout/style.css 都用 768px 断点) */
 @media (max-width: 768px) {
+  .section-card { padding: 14px; margin-bottom: 14px; }
+  .section-title { font-size: 15px; margin-bottom: 16px; padding-bottom: 10px; }
+  .form-tip { display: block; margin: 6px 0 0 0; }
+  .backup-actions {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .backup-actions .el-button,
+  .backup-actions .el-upload {
+    width: 100% !important;
+  }
+  .backup-actions .el-button + .el-button {
+    margin-left: 0 !important;
+  }
+  .pay-status { width: 100%; }
+  .pay-tips { padding-left: 16px; }
   /* 按钮组放开换行, 避免窄屏溢出 */
   .git-actions { flex-wrap: wrap; }
+  .git-actions .el-button,
+  .disk-actions .el-button {
+    flex: 1 1 calc(50% - 4px);
+    min-width: 120px;
+  }
   /* 运行版本行: 标签和值垂直堆叠, 避免 tag 被挤到下一行丢失关联 */
   .git-version-row { flex-direction: column; align-items: flex-start; gap: 4px; }
   .git-version-row .el-tag { margin-left: 0; }
@@ -981,6 +1005,7 @@ onUnmounted(() => {
   .git-log { max-height: 200px; }
   /* 标签允许收缩, 避免长标签独占一行 */
   .git-label { flex-shrink: 1; }
+  .disk-output pre { max-height: 160px; }
 }
 
 </style>

@@ -213,6 +213,8 @@ const handleCommand = async (command: string) => {
   margin: 0 auto;
   padding: 24px;
   box-sizing: border-box;
+  min-width: 0;
+  overflow-x: hidden;
 }
 
 /* PC 端隐藏汉堡按钮 */
@@ -224,14 +226,15 @@ const handleCommand = async (command: string) => {
 @media (max-width: 768px) {
   .np-header-inner {
     height: 56px;
-    padding: 0 16px;
+    padding: 0 12px;
+    flex-wrap: nowrap;
   }
   .np-brand-text {
     display: none;
   }
   .np-nav {
-    display: none;
-    position: absolute;
+    display: none !important;
+    position: fixed;
     top: 56px;
     left: 0;
     right: 0;
@@ -240,28 +243,40 @@ const handleCommand = async (command: string) => {
     border-bottom: 1px solid var(--np-border);
     padding: 8px;
     gap: 2px;
-    z-index: 100;
+    z-index: 1000;
     box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+    max-height: calc(100vh - 56px);
+    overflow-y: auto;
   }
   .np-nav.show {
-    display: flex;
+    display: flex !important;
   }
   .np-nav-item {
     width: 100%;
     padding: 12px 16px;
+    box-sizing: border-box;
   }
   .np-username {
     display: none;
   }
   .np-user-content {
-    padding: 16px;
+    padding: 12px;
+    max-width: 100vw;
   }
   .np-mobile-menu-btn {
     display: flex;
     align-items: center;
+    justify-content: center;
     cursor: pointer;
     font-size: 22px;
     color: var(--np-text);
+    width: 36px;
+    height: 36px;
+    margin-left: auto;
+    margin-right: 8px;
+  }
+  .np-header-right {
+    flex-shrink: 0;
   }
 }
 </style>

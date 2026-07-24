@@ -337,6 +337,20 @@ onBeforeUnmount(() => {
 .np-dot.offline { background: #909399; }
 
 @media (max-width: 768px) {
-  .speed-val { min-width: 70px; font-size: 12px; }
+  .dash-card { padding: 14px; }
+  .card-title { font-size: 14px; margin-bottom: 12px; }
+  .mini-stat { padding: 8px 0; }
+  .mini-value { font-size: 15px; }
+  .gauge-chart { height: 180px; }
+  .traffic-detail { gap: 8px; }
+  .detail-value { font-size: 14px; }
+  .info-grid { grid-template-columns: 1fr; gap: 14px; }
+  .info-value { flex-wrap: wrap; }
+  .import-guide { flex-direction: column; align-items: flex-start; gap: 10px; }
+  .client-btns { width: 100%; }
+  .client-btns .el-button { flex: 1; min-width: 0; }
+  .speed-row { gap: 8px; padding: 6px 8px; }
+  .speed-name { font-size: 12px; }
+  .speed-val { min-width: 60px; font-size: 11px; }
 }
 </style>

@@ -231,4 +231,19 @@ loadData()
 .top-info { flex: 1; display: flex; flex-direction: column; gap: 6px; }
 .top-name { font-size: 14px; color: var(--np-text); }
 .top-value { font-size: 13px; color: var(--np-primary); font-weight: 600; min-width: 100px; text-align: right; }
+
+@media (max-width: 768px) {
+  .filter-card { flex-direction: column; align-items: stretch; gap: 14px; padding: 14px; }
+  .filter-label { font-size: 13px; }
+  .filter-summary { margin-left: 0; width: 100%; justify-content: space-between; gap: 12px; }
+  .summary-item { flex: 1; }
+  .summary-value { font-size: 16px; }
+  .chart-card { padding: 14px; }
+  .chart { height: 260px; }
+  .trend-chart { height: 220px; }
+  .top-list { gap: 12px; }
+  .top-item { gap: 10px; }
+  .top-rank { width: 24px; height: 24px; font-size: 12px; }
+  .top-value { min-width: 70px; font-size: 12px; }
+}
 </style>

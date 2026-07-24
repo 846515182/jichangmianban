@@ -74,22 +74,24 @@
           <el-divider />
 
           <div class="card-title"><el-icon><Clock /></el-icon> 最近登录记录</div>
-          <el-table :data="loginRecords" stripe size="small">
-            <el-table-column prop="ip" label="IP" min-width="120" />
-            <el-table-column prop="location" label="位置" min-width="100">
-              <template #default="{ row }">{{ row.location || '未知' }}</template>
-            </el-table-column>
-            <el-table-column label="状态" width="80">
-              <template #default="{ row }">
-                <el-tag size="small" :type="row.success ? 'success' : 'danger'" effect="plain">
-                  {{ row.success ? '成功' : '失败' }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="时间" width="160">
-              <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
-            </el-table-column>
-          </el-table>
+          <div class="table-wrap">
+            <el-table :data="loginRecords" stripe size="small">
+              <el-table-column prop="ip" label="IP" min-width="120" />
+              <el-table-column prop="location" label="位置" min-width="100">
+                <template #default="{ row }">{{ row.location || '未知' }}</template>
+              </el-table-column>
+              <el-table-column label="状态" width="80">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="row.success ? 'success' : 'danger'" effect="plain">
+                    {{ row.success ? '成功' : '失败' }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="时间" width="160">
+                <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
+              </el-table-column>
+            </el-table>
+          </div>
         </div>
       </el-col>
     </el-row>
@@ -272,4 +274,15 @@ const logoutAll = () => {
 .device-info { flex: 1; }
 .device-name { font-size: 14px; color: var(--np-text); display: flex; align-items: center; gap: 8px; }
 .device-meta { font-size: 12px; color: var(--np-text-muted); margin-top: 4px; }
+
+@media (max-width: 768px) {
+  .profile-card { padding: 14px; height: auto; }
+  .profile-avatar { flex-direction: column; align-items: flex-start; gap: 12px; }
+  .profile-name { font-size: 18px; }
+  .profile-stats { flex-direction: column; gap: 12px; }
+  .stat-item { flex-direction: row; justify-content: space-between; }
+  .card-title { flex-wrap: wrap; gap: 10px; }
+  .device-item { padding: 10px; }
+  .device-name { flex-wrap: wrap; }
+}
 </style>

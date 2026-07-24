@@ -14,8 +14,9 @@
         </div>
       </div>
 
-      <el-table :data="filteredList" stripe v-loading="loading">
-        <el-table-column prop="code" label="优惠码" min-width="160">
+      <div class="table-wrap">
+        <el-table :data="filteredList" stripe v-loading="loading">
+          <el-table-column prop="code" label="优惠码" min-width="160">
           <template #default="{ row }">
             <span class="coupon-code">{{ row.code }}</span>
           </template>
@@ -72,7 +73,8 @@
             <el-button size="small" link type="danger" @click="handleDelete(row)">删除</el-button>
           </template>
         </el-table-column>
-      </el-table>
+        </el-table>
+      </div>
 
       <!-- 修复 P1: 加分页组件 -->
       <div class="pagination-wrap">
@@ -450,5 +452,24 @@ onMounted(() => {
   margin-top: 20px;
   display: flex;
   justify-content: flex-end;
+}
+
+@media (max-width: 768px) {
+  .page-card { padding: 12px; }
+  .page-header { flex-direction: column; align-items: stretch; }
+  .header-actions {
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
+  }
+  .header-actions .el-input,
+  .header-actions .el-button {
+    width: 100% !important;
+    margin-left: 0 !important;
+  }
+  .header-actions .el-button + .el-button {
+    margin-left: 0 !important;
+    margin-top: 0;
+  }
 }
 </style>

@@ -574,4 +574,24 @@ watch(format, () => updateUrl())
 /* 确保弹窗在视窗内完整显示 */
 :deep(.el-dialog) { max-height: 84vh; margin-top: 8vh !important; }
 :deep(.el-dialog__body) { max-height: calc(84vh - 110px - 60px); overflow-y: auto; padding: 16px 20px; }
+
+@media (max-width: 768px) {
+  .dash-card { padding: 14px; }
+  .stat-card { padding: 14px; }
+  .stat-icon { width: 40px; height: 40px; font-size: 18px; }
+  .stat-value { font-size: 16px; }
+  .card-header { flex-direction: column; align-items: flex-start; }
+  .header-actions { width: 100%; }
+  .header-actions .el-button,
+  .header-actions .el-input {
+    flex: 1;
+    min-width: 0;
+  }
+  .qr-section { flex-direction: column; align-items: center; gap: 16px; }
+  .qr-box { width: 200px; height: 200px; }
+  .qr-tip { min-width: 0; width: 100%; text-align: center; }
+  .qr-actions { justify-content: center; }
+  .node-grid { grid-template-columns: 1fr; }
+  .node-actions { flex-wrap: wrap; }
+}
 </style>

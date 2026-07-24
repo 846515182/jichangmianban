@@ -212,6 +212,19 @@ html.dark {
   margin: 0 !important;
 }
 
+/* ===== 通用页面头部 ===== */
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.page-title { margin: 0; font-size: 18px; color: var(--np-text); }
+.page-desc { margin: 6px 0 0; font-size: 13px; color: var(--np-text-secondary); }
+.header-actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+
 /* ===== 全局移动端适配 (max-width: 768px) ===== */
 @media (max-width: 768px) {
   .el-dialog {
@@ -247,4 +260,47 @@ html.dark {
   .el-descriptions--border .el-descriptions__body { overflow-x: auto; }
   .el-row { margin-left: -8px !important; margin-right: -8px !important; }
   .el-col { padding-left: 8px !important; padding-right: 8px !important; }
+
+  /* 页面头部在移动端改为竖向, 操作按钮占满宽度 */
+  .page-header {
+    flex-direction: column;
+    align-items: stretch !important;
+  }
+  .header-actions {
+    flex-direction: column;
+    align-items: stretch !important;
+    width: 100%;
+  }
+  .header-actions .el-input,
+  .header-actions .el-select,
+  .header-actions .el-date-editor,
+  .header-actions .el-button,
+  .header-actions .el-input-number {
+    width: 100% !important;
+    margin-left: 0 !important;
+  }
+  .header-actions .el-button + .el-button {
+    margin-left: 0 !important;
+    margin-top: 8px;
+  }
+
+  /* 表格横向滚动容器 */
+  .table-wrap {
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .table-wrap .el-table {
+    min-width: 640px;
+  }
+
+  /* 分页器移动端适配 */
+  .el-pagination {
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: center;
+  }
+  .el-pagination__jump {
+    margin-left: 0 !important;
+  }
 }
