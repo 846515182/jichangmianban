@@ -434,4 +434,37 @@ const handleRegister = async () => {
 .login-link a:hover {
   text-shadow: 0 0 8px var(--np-primary-glow);
 }
+
+/* 移动端适配 */
+@media (max-width: 640px) {
+  .register-card {
+    padding: 28px 20px;
+    width: 100%;
+    max-width: calc(100vw - 24px);
+  }
+  .logo-text {
+    font-size: 22px;
+    letter-spacing: 2px;
+  }
+  .logo-icon {
+    font-size: 24px;
+  }
+  .register-subtitle {
+    font-size: 12px;
+  }
+  .captcha-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .captcha-img,
+  .captcha-placeholder {
+    width: 100%;
+    height: 44px;
+  }
+  .register-tip {
+    font-size: 11px;
+    padding: 8px 10px;
+  }
+}
 </style>
