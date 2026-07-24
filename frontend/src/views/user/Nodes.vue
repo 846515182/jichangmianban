@@ -126,6 +126,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.user-nodes { overflow-x: hidden; }
 .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
 .page-title { margin: 0; font-size: 20px; color: var(--np-text); }
 .node-card { padding: 18px; margin-bottom: 20px; transition: all 0.3s ease; overflow: hidden; }

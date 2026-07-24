@@ -59,7 +59,7 @@
             </div>
           </div>
 
-          <el-input :model-value="subscribeUrl" readonly size="large" class="sub-input" :disabled="!!subscribeError">
+          <el-input :model-value="subscribeUrl" readonly size="large" class="sub-input sub-link-input" :disabled="!!subscribeError">
             <template #append>
               <el-button @click="copyLink" :icon="CopyDocument" :disabled="!!subscribeError">复制链接</el-button>
             </template>
@@ -537,7 +537,9 @@ watch(format, () => updateUrl())
   gap: 8px;
 }
 
+.user-subscribe { overflow-x: hidden; }
 .sub-input :deep(.el-input__inner) { font-size: 13px; }
+.sub-link-input :deep(.el-input__inner) { text-overflow: ellipsis; }
 
 .qr-section { display: flex; align-items: center; gap: 24px; margin-top: 20px; flex-wrap: wrap; }
 .qr-box { width: 256px; height: 256px; background: #fff; border-radius: 12px; padding: 8px; display: flex; align-items: center; justify-content: center; position: relative; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }

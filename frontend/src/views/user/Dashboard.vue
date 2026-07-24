@@ -115,7 +115,7 @@
       <el-col :span="24">
         <div class="np-card dash-card">
           <div class="card-title">订阅链接 & 快速导入</div>
-          <el-input :model-value="subscribeUrl" readonly size="large">
+          <el-input :model-value="subscribeUrl" readonly size="large" class="sub-link-input">
             <template #append>
               <el-button @click="copyLink"><el-icon><CopyDocument /></el-icon>复制</el-button>
             </template>
@@ -299,7 +299,9 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.user-dashboard { overflow-x: hidden; }
 .dash-card { padding: 20px; height: 100%; box-sizing: border-box; }
+.sub-link-input :deep(.el-input__inner) { text-overflow: ellipsis; }
 .card-title { font-size: 15px; font-weight: 600; color: var(--np-text); margin-bottom: 16px; display: flex; align-items: center; gap: 10px; }
 .mini-stat { display: flex; flex-direction: column; gap: 6px; padding: 4px 0; }
 .mini-label { font-size: 12px; color: var(--np-text-muted); }

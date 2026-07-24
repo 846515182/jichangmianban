@@ -256,6 +256,7 @@ const logoutAll = () => {
 </script>
 
 <style scoped>
+.user-profile { overflow-x: hidden; }
 .profile-card { padding: 20px; height: 100%; box-sizing: border-box; }
 .card-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 15px; font-weight: 600; color: var(--np-text); margin-bottom: 16px; }
 .card-title span { display: flex; align-items: center; gap: 8px; }

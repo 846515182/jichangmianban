@@ -221,6 +221,7 @@ const loadDetail = async (id: string) => {
 </script>
 
 <style scoped>
+.user-tickets { overflow-x: hidden; }
 .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
 .page-title { margin: 0; font-size: 20px; color: var(--np-text); }
 .list-card { padding: 16px; }
