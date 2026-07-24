@@ -105,6 +105,33 @@
                   </span>
                 </template>
               </el-table-column>
+              <el-table-column label="实时负载" min-width="180">
+                <template #default="{ row }">
+                  <div v-if="row.runtime && row.runtime.updated_at > 0" class="runtime-cell">
+                    <div class="rt-row">
+                      <span class="rt-label">CPU</span>
+                      <div class="rt-bar">
+                        <div class="rt-bar-inner" :style="{ width: Math.min(100, row.runtime.cpu_usage || 0) + '%', background: loadColor(row.runtime.cpu_usage) }"></div>
+                      </div>
+                      <span class="rt-value">{{ (row.runtime.cpu_usage || 0).toFixed(1) }}%</span>
+                    </div>
+                    <div class="rt-row">
+                      <span class="rt-label">内存</span>
+                      <div class="rt-bar">
+                        <div class="rt-bar-inner" :style="{ width: Math.min(100, row.runtime.memory_usage || 0) + '%', background: loadColor(row.runtime.memory_usage) }"></div>
+                      </div>
+                      <span class="rt-value">{{ (row.runtime.memory_usage || 0).toFixed(1) }}%</span>
+                    </div>
+                    <div class="rt-row">
+                      <span class="rt-label">连接</span>
+                      <span class="rt-value" style="margin-left:auto">{{ row.runtime.online_connections || 0 }}</span>
+                      <span class="rt-label" style="margin-left:8px">速度</span>
+                      <span class="rt-value">{{ formatSpeed(row.runtime.speed_bps) }}</span>
+                    </div>
+                  </div>
+                  <span v-else style="color: var(--np-text-muted); font-size:12px">无数据</span>
+                </template>
+              </el-table-column>
               <el-table-column label="流量" min-width="140">
                 <template #default="{ row }">{{ formatTraffic(row.traffic_used) }}</template>
               </el-table-column>
@@ -229,12 +256,21 @@ import "@/utils/echarts"
 import request from "@/utils/request"
 import { formatTraffic, formatTime, formatSpeed, formatDuration } from "@/utils/format"
 import { chartColors } from "@/utils/echarts"
-import { mockDashboardStats } from "@/mock/data"
 import { ElMessage } from "element-plus"
 import { Refresh, Timer, CopyDocument, Cpu, Delete } from "@element-plus/icons-vue"
 
+interface NodeRuntime {
+  cpu_usage: number
+  memory_usage: number
+  online_connections: number
+  speed_bps: number
+  updated_at: number
+}
+
 interface NodeRow {
   id: string; name: string; protocol: string; server_address: string; port: number
+  online: boolean; traffic_used: number; last_seen_at: string
+  runtime?: NodeRuntime
 }
 
 interface SysStats {
@@ -247,7 +283,14 @@ interface SysStats {
   uptime_sec: number; hostname: string; sampled_at: number
 }
 
-const stats = ref({ ...mockDashboardStats })
+// 修复: 初始不使用 mock 数据, 用 statsLoading 控制展示, 避免请求失败/未完成时显示虚假 0
+const stats = ref<Record<string, number>>({
+  total_users: 0, active_users: 0, expired_users: 0,
+  total_nodes: 0, online_nodes: 0, enabled_nodes: 0,
+  today_upload: 0, today_download: 0,
+  week_upload: 0, week_download: 0, total_traffic: 0,
+})
+const statsLoading = ref(false)
 // 修复 H2: 趋势图初始为空数组, 由 fetchTrafficTrend 从 /traffic/trend 拉真实数据填充
 const trafficTrend = ref<{ days: string[]; upload: number[]; download: number[] }>({ days: [], upload: [], download: [] })
 const userGrowth = ref<{ days: string[]; total: number[]; new: number[] }>({ days: [], total: [], new: [] })
