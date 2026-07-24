@@ -695,6 +695,13 @@ const loadPct = computed(() => {
 const memPct = computed(() => Math.round(sysStats.value.mem_pct || 0))
 const diskPct = computed(() => Math.round(sysStats.value.disk_pct || 0))
 
+// 实时负载颜色: <70% 绿, 70-90% 橙, >=90% 红
+const loadColor = (val: number): string => {
+  if (val >= 90) return '#f56c6c'
+  if (val >= 70) return '#e6a23c'
+  return '#67c23a'
+}
+
 const trafficOption = computed(() => ({
   tooltip: { trigger: "axis" },
   legend: { data: ["上行", "下行"], textStyle: { color: "#8b98a9" }, top: 0 },
