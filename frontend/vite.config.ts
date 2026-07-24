@@ -35,6 +35,16 @@ export default defineConfig({
       },
     },
   },
+  preview: {
+    port: 4173,
+    proxy: {
+      // 预览环境代理 /api 到已部署后端（仅本地/沙箱验证使用）
+      '/api': {
+        target: 'http://127.0.0.1:80',
+        changeOrigin: true,
+      },
+    },
+  },
   build: {
     outDir: 'dist',
     sourcemap: false,
